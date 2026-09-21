@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: homecam
+      POSTGRES_PASSWORD: homecam
+      POSTGRES_DB: homecam
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U homecam"], interval: 5s, timeout: 5s, retries: 10}
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10}
+  api:
+    build: ./apps/api
+    env_file: .env
+    ports: ["8000:8000"]
+    depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_healthy}}
+  worker:
+    build: ./apps/api
+    command: python -m app.worker
+    env_file: .env
+    depends_on: {api: {condition: service_started}}
+  web:
+    build: ./apps/web
+    ports: ["3000:3000"]
+    environment: {NEXT_PUBLIC_API_URL: http://localhost:8000}
+    depends_on: [api]
+  media:
+    image: bluenviron/mediamtx:latest
+    ports: ["8554:8554", "8889:8889"]
+volumes: {pgdata: {}}
