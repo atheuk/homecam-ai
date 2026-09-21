@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "development-only"
     media_root: str = "./media"
+    cors_origins: str = "http://localhost:3000"
     ai_provider: str = "mock"
     # AI pipeline (SPEC sections 12-15). Defaults keep HomeCam fully local,
     # deterministic and dependency-free; real backends are strictly opt-in.
