@@ -101,8 +101,7 @@ describe("AdminPanel",()=>{
     expect(screen.queryByText("hunter2")).not.toBeInTheDocument();
   });
 
-  it("lists a configured provider with redacted fields and enable/disable/delete actions", async()=>{
-    mockFetch({
+  it("lists a configured provider with redacted fields and enable/disable/delete actions", async()=>{    mockFetch({
       "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
       "/admin/providers/cfg-1/enabled":()=>jsonResponse({id:"cfg-1",provider_type:"dahua",name:"Dahua NVR",enabled:false,scheme:"http",host:"192.0.2.10",port:80,username:"admin",channels:"1:Front Door",adapter_url:null,has_secret:true,last_test_status:"SUCCESS",last_test_message:"ok",last_test_at:new Date().toISOString(),created_at:new Date().toISOString(),updated_at:new Date().toISOString()}),
       "/admin/providers":()=>jsonResponse([{id:"cfg-1",provider_type:"dahua",name:"Dahua NVR",enabled:true,scheme:"http",host:"192.0.2.10",port:80,username:"admin",channels:"1:Front Door",adapter_url:null,has_secret:true,last_test_status:"SUCCESS",last_test_message:"ok",last_test_at:new Date().toISOString(),created_at:new Date().toISOString(),updated_at:new Date().toISOString()}]),
@@ -114,5 +113,51 @@ describe("AdminPanel",()=>{
     expect(screen.queryByText("hunter2")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Disable"));
     await waitFor(()=>expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/admin/providers/cfg-1/enabled"),expect.objectContaining({method:"POST"})));
+  });
+
+  const zoneHandlers={
+    "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+    "/api/v1/cameras":()=>jsonResponse([{id:"mock-front-door",name:"Front Door"}]),
+    "/admin/providers":()=>jsonResponse([]),
+  };
+
+  it("lists the detection zones configured for the selected camera", async()=>{
+    mockFetch({
+      ...zoneHandlers,
+      "/admin/cameras/mock-front-door/zones":()=>jsonResponse([{id:"z1",camera_id:"mock-front-door",name:"driveway",kind:"driveway",x1:0,y1:0.5,x2:0.6,y2:1}]),
+    });
+    await signIn();
+    expect(await screen.findByText(/driveway — \[0, 0.5\]/)).toBeInTheDocument();
+  });
+
+  it("posts a new zone with normalized coordinates", async()=>{
+    let capturedBody:Record<string,unknown>|null=null;
+    mockFetch({
+      ...zoneHandlers,
+      "/admin/cameras/mock-front-door/zones":(init)=>{
+        if(init?.method==="POST"){capturedBody=JSON.parse(String(init.body));return jsonResponse({id:"z1"},201);}
+        return jsonResponse([]);
+      },
+    });
+    await signIn();
+    await screen.findByText("Detection zones");
+    fireEvent.change(screen.getByLabelText("Zone name"),{target:{value:"mailbox"}});
+    fireEvent.change(screen.getByLabelText("Zone x1"),{target:{value:"0.7"}});
+    fireEvent.click(screen.getByText("Add zone"));
+    await waitFor(()=>expect(capturedBody).not.toBeNull());
+    expect(capturedBody!.name).toBe("mailbox");
+    expect(capturedBody!.x1).toBe(0.7);
+    await screen.findByText("Zone saved.");
+  });
+
+  it("reports an inline error when a zone rectangle is rejected", async()=>{
+    mockFetch({
+      ...zoneHandlers,
+      "/admin/cameras/mock-front-door/zones":(init)=>init?.method==="POST"?jsonResponse({detail:"invalid"},422):jsonResponse([]),
+    });
+    await signIn();
+    await screen.findByText("Detection zones");
+    fireEvent.click(screen.getByText("Add zone"));
+    expect(await screen.findByText(/Coordinates must be between 0 and 1/)).toBeInTheDocument();
   });
 });

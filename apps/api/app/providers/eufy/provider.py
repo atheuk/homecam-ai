@@ -16,6 +16,7 @@ from ..base import (
     ProviderStatus,
     ProviderUnavailableError,
 )
+from ..capabilities import AUDIO_DETECTION, audio_detection_status
 
 
 SUPPORTED = CapabilityStatus.SUPPORTED.value
@@ -116,6 +117,9 @@ class EufyEdgeProvider:
             "battery": SUPPORTED if raw_caps.get("battery") else UNKNOWN,
             "ptz": UNSUPPORTED,
             "eventImages": SUPPORTED if raw_caps.get("eventImages") else UNKNOWN,
+            # The edge adapter does not expose a normalized audio buffer yet;
+            # HomeCam never fabricates audio, so this stays UNAVAILABLE.
+            AUDIO_DETECTION: audio_detection_status(bool(raw_caps.get("audioBuffer")), False),
         }
 
     @classmethod

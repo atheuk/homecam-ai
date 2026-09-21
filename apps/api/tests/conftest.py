@@ -17,11 +17,15 @@ per-test loop pytest-asyncio would otherwise create.
 import asyncio
 import copy
 import os
+import shutil
 import tempfile
 
 _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
 os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db_path}"
+# Best-photo files must land in a throwaway directory, never the repo.
+_media_root = tempfile.mkdtemp(prefix="homecam-media-")
+os.environ["MEDIA_ROOT"] = _media_root
 
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
@@ -49,6 +53,21 @@ def _reset_provider_state():
     mock_eufy_provider._unavailable = False
 
 
+@pytest.fixture(autouse=True)
+def _reset_ai_state():
+    """The detector script and dwell tracker are process-wide singletons;
+    leaking them between tests would make pipeline assertions order
+    dependent."""
+    from app.ai.detector import mock_detector
+    from app.ai.dwell import dwell_tracker
+
+    mock_detector().clear_script()
+    dwell_tracker.reset()
+    yield
+    mock_detector().clear_script()
+    dwell_tracker.reset()
+
+
 @pytest.fixture
 async def client():
     from app.main import app
@@ -63,4 +82,5 @@ def pytest_sessionfinish(session, exitstatus):
         os.remove(_db_path)
     except OSError:
         pass
+    shutil.rmtree(_media_root, ignore_errors=True)
 
