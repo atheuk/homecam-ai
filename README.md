@@ -1,6 +1,6 @@
 # HomeCam AI
 
-Provider-independent, local-first camera dashboard foundation. Phase 0 and the minimum Phase 1 mock foundation are implemented; no physical-camera or cloud integrations are included.
+Provider-independent, local-first camera dashboard foundation. Phase 0/1 mock foundations are implemented, with opt-in provider-isolated Dahua and Eufy integration seams that are disabled by default unless local runtime configuration is supplied.
 
 ## Start with Docker
 
@@ -37,11 +37,12 @@ npm run build
 - HomeCam-native authentication (SPEC section 27): `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`. Passwords are hashed with PBKDF2-HMAC-SHA256 (260k iterations, stdlib `hashlib` only — chosen over bcrypt/argon2-cffi specifically because those need native wheels that are not reliably available on Windows ARM64). Sessions are opaque tokens stored **hashed** in the `auth_sessions` table with an expiry (`SESSION_TTL_MINUTES`, default 720) and are accepted either as a `Authorization: Bearer <token>` header or an httponly `homecam_session` cookie set at login.
 - Redis and a worker service seam; the worker is intentionally idle until background jobs are added.
 - Deterministic mock providers with five cameras (including mock Eufy T8210 doorbell), snapshots, HLS-shaped live URLs, and controllable mock events. Capabilities are returned as a **status map** (`{"snapshot": "SUPPORTED", "vehicleEvents": "UNSUPPORTED", ...}` with values `SUPPORTED` / `UNSUPPORTED` / `UNAVAILABLE` / `UNKNOWN`) per SPEC section 5, not a flat feature list.
+- Provider-isolated Dahua and Eufy adapters live under `apps/api/app/providers/dahua` and `apps/api/app/providers/eufy`. They are opt-in via environment variables, keep credentials server-side, and degrade cleanly when host/adapter settings are absent. See `docs/dahua.md` and `docs/eufy.md`.
 - Simulation controls for local development/testing: `POST /api/v1/mock/cameras/{id}/status` (`online`/`offline`/`degraded`/`unknown`), `POST /api/v1/mock/cameras/{id}/battery` (drains battery and automatically raises a high-priority `battery_low` event once below `LOW_BATTERY_THRESHOLD`, default 20%), `POST /api/v1/mock/providers/{id}/outage` (simulates a whole provider — e.g. the Eufy HomeBase — becoming unreachable while the other provider keeps working, proving provider-failure isolation). `GET /api/v1/providers` reports each provider's aggregated health (`ONLINE`/`DEGRADED`/`OFFLINE`) based on how many of its cameras are online.
 - Offline/degraded cameras return `503` from `/snapshot` and `/live` instead of crashing or silently returning stale/fake data; unknown camera/provider ids return `404`; invalid payloads return `422`.
 - SSE real-time stream at `/api/v1/ws` (named `event.created` events).
 - Responsive dashboard with overview, live/events/system/settings navigation scaffolding.
-- Backend tests (35, pytest) covering provider discovery/capabilities, event persistence, camera offline/degraded state, doorbell/battery-low high-priority events, provider failure isolation, real-time SSE delivery, auth register/login/logout/me, and API validation (404/422). Frontend tests (5, Vitest + Testing Library) cover rendering, camera list display, and the events tab. GitHub Actions CI runs backend lint/tests, frontend lint/typecheck/tests/build, and a Docker Compose config + build validation job.
+- Backend tests cover provider discovery/capabilities, event persistence, camera offline/degraded state, doorbell/battery-low high-priority events, provider failure isolation, real-time SSE delivery, auth register/login/logout/me, API validation (404/422), and mocked Dahua/Eufy adapter contracts. Frontend tests (Vitest + Testing Library) cover rendering, camera list display, and the events tab. GitHub Actions CI runs backend lint/tests, frontend lint/typecheck/tests/build, and a Docker Compose config + build validation job.
 
 Run the smoke test against a running API with `python scripts/smoke.py`.
 
@@ -58,7 +59,7 @@ curl -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: applicati
 
 ## Limitations
 
-The mock snapshot is a deterministic placeholder, not a real image. MediaMTX is present but not connected to camera hardware. Authentication is a minimal local scaffold (PBKDF2 + opaque DB-backed session tokens) suitable for local development only — there is no email verification, password reset, rate limiting, MFA, or production identity provider integration, and the frontend has no login UI yet (auth is API-only in this phase). There are no Dahua, Eufy, Azure, AI inference, notifications, search, retention jobs, or production deployment integrations. Do not expose this development stack to the internet.
+The mock snapshot is a deterministic placeholder, not a real image. MediaMTX is present but not connected to camera hardware. Authentication is a minimal local scaffold (PBKDF2 + opaque DB-backed session tokens) suitable for local development only — there is no email verification, password reset, rate limiting, MFA, or production identity provider integration, and the frontend has no login UI yet (auth is API-only in this phase). Dahua and Eufy code is an opt-in integration boundary with mocked contract tests; no live hardware verification has been claimed without a locally configured reachable LAN host/adapter. There are no Azure, AI inference, notifications, search, retention jobs, or production deployment integrations. Do not expose this development stack to the internet.
 
 ## Repository
 
