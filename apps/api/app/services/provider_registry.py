@@ -8,18 +8,58 @@ from __future__ import annotations
 
 import logging
 
-from ..providers.base import CameraNotFoundError, ProviderUnavailableError
-from ..providers.mock import PROVIDERS, MockCameraProvider
+from ..config import settings
+from ..providers.base import CameraNotFoundError, CameraProvider, ProviderUnavailableError
+from ..providers.dahua import DahuaProvider, DahuaSettings
+from ..providers.eufy import EufyEdgeProvider, EufySettings
+from ..providers.mock import PROVIDERS as MOCK_PROVIDERS
+from ..providers.mock import MockCameraProvider
 
 logger = logging.getLogger(__name__)
 
 
-def all_providers() -> list[MockCameraProvider]:
-    return list(PROVIDERS)
+def _configured_real_providers() -> list[CameraProvider]:
+    providers: list[CameraProvider] = []
+    if settings.dahua_enabled:
+        providers.append(
+            DahuaProvider(
+                DahuaSettings(
+                    scheme=settings.dahua_scheme,
+                    host=settings.dahua_host,
+                    port=settings.dahua_port,
+                    username=settings.dahua_username,
+                    password=settings.dahua_password,
+                    serial=settings.dahua_serial,
+                    channels=settings.dahua_channels,
+                    timeout_seconds=settings.dahua_timeout_seconds,
+                    retries=settings.dahua_retries,
+                )
+            )
+        )
+    if settings.eufy_enabled:
+        providers.append(
+            EufyEdgeProvider(
+                EufySettings(
+                    adapter_url=settings.eufy_adapter_url,
+                    adapter_token=settings.eufy_adapter_token,
+                    timeout_seconds=settings.eufy_timeout_seconds,
+                    retries=settings.eufy_retries,
+                )
+            )
+        )
+    return providers
 
 
-def find_provider_for_camera(camera_id: str) -> MockCameraProvider | None:
-    for provider in PROVIDERS:
+def all_providers() -> list[CameraProvider]:
+    return [*MOCK_PROVIDERS, *_configured_real_providers()]
+
+
+def mock_providers() -> list[MockCameraProvider]:
+    return list(MOCK_PROVIDERS)
+
+
+def find_provider_for_camera(camera_id: str) -> CameraProvider | None:
+    for provider in all_providers():
         if provider.has_camera(camera_id):
             return provider
     return None
@@ -30,7 +70,7 @@ async def discover_all_cameras() -> list[dict]:
     provider is logged and skipped rather than raised, so the endpoint
     keeps serving cameras from the remaining providers."""
     cameras: list[dict] = []
-    for provider in PROVIDERS:
+    for provider in all_providers():
         try:
             cameras.extend(await provider.discover_devices())
         except ProviderUnavailableError as exc:
@@ -51,6 +91,6 @@ async def get_camera_or_raise(camera_id: str) -> dict:
 
 async def get_all_provider_health() -> list[dict]:
     health: list[dict] = []
-    for provider in PROVIDERS:
+    for provider in all_providers():
         health.append(await provider.get_health())
     return health

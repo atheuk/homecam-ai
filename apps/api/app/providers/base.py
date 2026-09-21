@@ -6,6 +6,7 @@ under ``app/providers/<name>/`` and implement the same shape so the frontend
 and orchestration code can treat every camera uniformly.
 """
 from enum import Enum
+from dataclasses import dataclass
 from typing import Protocol, TypedDict
 
 
@@ -53,6 +54,23 @@ class CameraOfflineError(RuntimeError):
     outage."""
 
 
+class ProviderConfigurationError(RuntimeError):
+    """Raised when a provider is enabled without the required local settings."""
+
+
+@dataclass(frozen=True)
+class ProviderRequestError(RuntimeError):
+    """Structured upstream provider failure safe to expose without secrets."""
+
+    provider_id: str
+    operation: str
+    message: str
+    retryable: bool = False
+
+    def __str__(self) -> str:
+        return f"{self.provider_id} {self.operation} failed: {self.message}"
+
+
 class CameraRecord(TypedDict):
     id: str
     provider_id: str
@@ -95,3 +113,5 @@ class CameraProvider(Protocol):
     async def get_live_stream(self, camera_id: str) -> str: ...
 
     async def get_health(self) -> ProviderHealth: ...
+
+    def has_camera(self, camera_id: str) -> bool: ...

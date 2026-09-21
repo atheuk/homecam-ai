@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..db import get_db
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from ..providers.mock import mock_eufy_provider, mock_provider
 from ..schemas import CameraBatteryIn, CameraStatusIn, MockEventIn, ProviderOutageIn
 from ..services import cameras as camera_service
 from ..services import events as event_service
@@ -23,9 +22,14 @@ from ..services.provider_registry import (
     discover_all_cameras,
     find_provider_for_camera,
     get_all_provider_health,
+    mock_providers,
 )
 
 router = APIRouter(prefix="/api/v1")
+
+
+def find_mock_provider_for_camera(camera_id: str):
+    return next((provider for provider in mock_providers() if provider.has_camera(camera_id)), None)
 
 
 @router.get("/providers")
@@ -109,7 +113,7 @@ async def live(camera_id: str):
         raise HTTPException(503, f"Camera '{camera_id}' is currently offline") from exc
     except ProviderUnavailableError as exc:
         raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
-    return {"camera_id": camera_id, "hls_url": hls_url, "mode": "mock"}
+    return {"camera_id": camera_id, "hls_url": hls_url, "stream_url": hls_url, "mode": provider.id, "provider_id": provider.id}
 
 
 @router.get("/events")
@@ -127,7 +131,7 @@ async def events(limit: int = 50, session: AsyncSession = Depends(get_db)):
 
 @router.post("/mock/events")
 async def create_event(payload: MockEventIn, session: AsyncSession = Depends(get_db)):
-    provider = find_provider_for_camera(payload.camera_id)
+    provider = find_mock_provider_for_camera(payload.camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     event = provider.event(payload.camera_id, payload.type)
@@ -139,7 +143,7 @@ async def create_event(payload: MockEventIn, session: AsyncSession = Depends(get
 async def set_camera_status(camera_id: str, payload: CameraStatusIn, session: AsyncSession = Depends(get_db)):
     """Development control to simulate a camera going offline/degraded
     (SPEC section 40/43)."""
-    provider = find_provider_for_camera(camera_id)
+    provider = find_mock_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
@@ -155,7 +159,7 @@ async def set_camera_battery(camera_id: str, payload: CameraBatteryIn, session: 
     """Development control to simulate battery drain; automatically raises
     a high-priority ``battery_low`` event under the configurable threshold
     (SPEC section 8.3)."""
-    provider = find_provider_for_camera(camera_id)
+    provider = find_mock_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
@@ -176,7 +180,7 @@ async def set_camera_battery(camera_id: str, payload: CameraBatteryIn, session: 
 async def set_provider_outage(provider_id: str, payload: ProviderOutageIn):
     """Development control to simulate an entire provider (e.g. the Eufy
     HomeBase) becoming unreachable, to verify provider failure isolation."""
-    provider = next((p for p in (mock_provider, mock_eufy_provider) if p.id == provider_id), None)
+    provider = next((p for p in mock_providers() if p.id == provider_id), None)
     if provider is None:
         raise HTTPException(404, "Provider not found")
     provider.simulate_outage(payload.unavailable)
@@ -218,4 +222,3 @@ async def sse():
             event_service.event_bus.unsubscribe(queue)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
-
