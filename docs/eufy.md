@@ -22,7 +22,39 @@ The archived/deprecated `bropat/eufy-security-client` project should be treated 
 
 ## HomeCam adapter contract
 
-All Eufy-specific HomeCam code is isolated under `apps/api/app/providers/eufy`. Enable it only when a local adapter is running:
+All Eufy-specific HomeCam code is isolated under `apps/api/app/providers/eufy`.
+
+### Runtime admin configuration (preferred)
+
+Configure the adapter connection at runtime through the authenticated admin
+API/UI instead of only via `.env` at process startup:
+
+- UI: sign in and open the **Settings** tab (Admin panel), fill in the
+  adapter base URL and adapter token, then click **Save**. Use **Test
+  Connection** to check the adapter's `/health` endpoint before or after
+  saving.
+- API: `POST /api/v1/admin/providers/eufy`, `PUT
+  /api/v1/admin/providers/eufy/{id}`, `POST
+  /api/v1/admin/providers/{id}/enabled`, `DELETE
+  /api/v1/admin/providers/{id}`, and `POST
+  /api/v1/admin/providers/eufy/test`, all behind the existing authenticated
+  session. `GET /api/v1/admin/providers` lists configs with the adapter token
+  redacted (`has_secret` only, never the value).
+- Update semantics: `adapter_token` is write-only; omitting it on an update
+  keeps the previously stored token.
+- Precedence: at most one Eufy config can be enabled at a time. An enabled DB
+  config always takes precedence over the `EUFY_*` environment variables
+  below, which become only an optional local seed/default when no Eufy
+  config is enabled in the database.
+- Auth scope: any authenticated HomeCam user is currently treated as admin
+  (single-user local system) — see the same limitation noted in
+  `docs/dahua.md`.
+- Secrets at rest: the adapter token is encrypted using the same
+  stdlib-only encrypt-then-MAC scheme described in `docs/dahua.md`
+  (`apps/api/app/crypto.py`), keyed from `SECRET_KEY`. Rotating `SECRET_KEY`
+  invalidates stored tokens.
+
+Enable the env-var seed only when a local adapter is running:
 
 ```dotenv
 EUFY_ENABLED=true
@@ -43,7 +75,7 @@ HomeCam maps only verified/adapter-reported targets: doorbell press, motion, per
 
 ## Tests
 
-CI uses mocked adapter responses only and never requires a Eufy account or HomeBase. The mocked contract tests verify capability mapping, health/auth-state reporting, snapshots, and optional live stream descriptors.
+CI uses mocked adapter responses only and never requires a Eufy account or HomeBase. The mocked contract tests verify capability mapping, health/auth-state reporting, snapshots, and optional live stream descriptors. `apps/api/tests/test_admin_provider_configs.py` additionally covers the admin CRUD/test-connection endpoints and provider-registry wiring using an unreachable adapter URL only (no real adapter/account contact).
 
 ## Known limitations
 

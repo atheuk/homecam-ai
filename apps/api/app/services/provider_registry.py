@@ -1,26 +1,61 @@
-"""Provider registry: aggregates all configured camera providers.
+﻿"""Provider registry: aggregates all configured camera providers.
 
 Iterates providers defensively so a single provider raising
 ``ProviderUnavailableError`` (e.g. a simulated HomeBase outage) never
 prevents cameras from other providers from being listed (SPEC 2.5 / 43).
+
+DB-backed provider configuration (``ProviderConfig``, see
+``app/services/provider_configs.py``) takes precedence over the env-var
+settings in ``app/config.py``: if an *enabled* DB config exists for a
+provider type, it is used and the corresponding env-var provider is not
+also constructed. Env vars remain an optional local seed/default that is
+only used when nothing has been configured at runtime yet. A single bad DB
+config (e.g. it fails to decrypt) is caught and dropped so it degrades to
+"not configured" rather than breaking every other provider.
 """
 from __future__ import annotations
 
 import logging
 
+from sqlalchemy import select
+
 from ..config import settings
+from ..db import SessionLocal
+from ..models.db import ProviderConfig
 from ..providers.base import CameraNotFoundError, CameraProvider, ProviderUnavailableError
 from ..providers.dahua import DahuaProvider, DahuaSettings
 from ..providers.eufy import EufyEdgeProvider, EufySettings
 from ..providers.mock import PROVIDERS as MOCK_PROVIDERS
 from ..providers.mock import MockCameraProvider
+from . import provider_configs as provider_config_service
 
 logger = logging.getLogger(__name__)
 
 
-def _configured_real_providers() -> list[CameraProvider]:
+async def _enabled_db_config(provider_type: str) -> ProviderConfig | None:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ProviderConfig).where(
+                ProviderConfig.provider_type == provider_type, ProviderConfig.enabled.is_(True)
+            )
+        )
+        return result.scalars().first()
+
+
+async def _configured_real_providers() -> list[CameraProvider]:
     providers: list[CameraProvider] = []
-    if settings.dahua_enabled:
+
+    try:
+        dahua_config = await _enabled_db_config(provider_config_service.DAHUA)
+    except Exception:  # noqa: BLE001 - a DB/decryption failure must not break other providers
+        logger.exception("failed to load Dahua provider config from database")
+        dahua_config = None
+    if dahua_config is not None:
+        try:
+            providers.append(DahuaProvider(provider_config_service.dahua_settings_from_config(dahua_config)))
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to build Dahua provider from stored config")
+    elif settings.dahua_enabled:
         providers.append(
             DahuaProvider(
                 DahuaSettings(
@@ -36,7 +71,18 @@ def _configured_real_providers() -> list[CameraProvider]:
                 )
             )
         )
-    if settings.eufy_enabled:
+
+    try:
+        eufy_config = await _enabled_db_config(provider_config_service.EUFY)
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to load Eufy provider config from database")
+        eufy_config = None
+    if eufy_config is not None:
+        try:
+            providers.append(EufyEdgeProvider(provider_config_service.eufy_settings_from_config(eufy_config)))
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to build Eufy provider from stored config")
+    elif settings.eufy_enabled:
         providers.append(
             EufyEdgeProvider(
                 EufySettings(
@@ -50,16 +96,16 @@ def _configured_real_providers() -> list[CameraProvider]:
     return providers
 
 
-def all_providers() -> list[CameraProvider]:
-    return [*MOCK_PROVIDERS, *_configured_real_providers()]
+async def all_providers() -> list[CameraProvider]:
+    return [*MOCK_PROVIDERS, *await _configured_real_providers()]
 
 
 def mock_providers() -> list[MockCameraProvider]:
     return list(MOCK_PROVIDERS)
 
 
-def find_provider_for_camera(camera_id: str) -> CameraProvider | None:
-    for provider in all_providers():
+async def find_provider_for_camera(camera_id: str) -> CameraProvider | None:
+    for provider in await all_providers():
         if provider.has_camera(camera_id):
             return provider
     return None
@@ -70,7 +116,7 @@ async def discover_all_cameras() -> list[dict]:
     provider is logged and skipped rather than raised, so the endpoint
     keeps serving cameras from the remaining providers."""
     cameras: list[dict] = []
-    for provider in all_providers():
+    for provider in await all_providers():
         try:
             cameras.extend(await provider.discover_devices())
         except ProviderUnavailableError as exc:
@@ -79,7 +125,7 @@ async def discover_all_cameras() -> list[dict]:
 
 
 async def get_camera_or_raise(camera_id: str) -> dict:
-    provider = find_provider_for_camera(camera_id)
+    provider = await find_provider_for_camera(camera_id)
     if provider is None:
         raise CameraNotFoundError(camera_id)
     cameras = await provider.discover_devices()
@@ -91,6 +137,17 @@ async def get_camera_or_raise(camera_id: str) -> dict:
 
 async def get_all_provider_health() -> list[dict]:
     health: list[dict] = []
-    for provider in all_providers():
-        health.append(await provider.get_health())
+    for provider in await all_providers():
+        try:
+            health.append(await provider.get_health())
+        except ProviderUnavailableError as exc:
+            health.append(
+                {
+                    "provider_id": provider.id,
+                    "status": "OFFLINE",
+                    "message": str(exc),
+                    "camera_count": 0,
+                    "online_camera_count": 0,
+                }
+            )
     return health

@@ -2,9 +2,54 @@
 
 Target hardware: Dahua DHI-NVR4204-P-4KS2, serial `5J006FCPAZ6B52A`.
 
-## Configuration
+## Runtime admin configuration (preferred)
 
-The provider is disabled by default. Enable it only on a trusted LAN and keep all credentials in the local `.env` file:
+The recommended way to configure Dahua is at runtime, through the authenticated
+admin API/UI, without restarting the process:
+
+- UI: sign in and open the **Settings** tab, which hosts the Admin panel. Fill
+  in scheme/host/port/username/password and the channel list, then click
+  **Save**. Use **Test Connection** to run a real (or currently stored)
+  auth/health check before or after saving; the result is shown inline and is
+  also persisted as the config's last test status/message.
+- API: `POST /api/v1/admin/providers/dahua` to create a config, `PUT
+  /api/v1/admin/providers/dahua/{id}` to update one, `POST
+  /api/v1/admin/providers/{id}/enabled` to enable/disable, `DELETE
+  /api/v1/admin/providers/{id}` to remove it, and `POST
+  /api/v1/admin/providers/dahua/test` to test either a config already saved
+  (`config_id`) or ad-hoc settings before saving. All of these require an
+  authenticated session (see "Auth scope" below). `GET
+  /api/v1/admin/providers` lists every configured provider with secrets
+  redacted (`has_secret` is a boolean flag, never the value).
+- Update semantics: `password` is write-only. Omitting it on an update keeps
+  the previously stored password; it is never returned by any GET/list
+  response.
+- Precedence: at most one Dahua config can be enabled at a time (enabling a
+  new one disables any other enabled Dahua config, keeping the `dahua-*`
+  camera IDs stable). An enabled DB config always takes precedence over the
+  `DAHUA_*` environment variables below. If no Dahua config is enabled in the
+  database, the environment variables act as an optional local seed/default.
+- Auth scope: in this phase, any authenticated HomeCam user is treated as
+  admin (HomeCam is a single-user local system today). This is a deliberate,
+  documented scope limitation, not silent privilege expansion — a real
+  role/permission check should be added before HomeCam supports multiple
+  accounts.
+- Secrets at rest: the stored password is encrypted (not stored in
+  plaintext) using a stdlib-only "encrypt-then-MAC" scheme in
+  `apps/api/app/crypto.py` (SHA-256-derived keystream + HMAC-SHA256 tag),
+  keyed from the app's `SECRET_KEY`. This was chosen because the `cryptography`
+  package (which would normally provide Fernet/AES) cannot currently be built
+  on this project's ARM64 Windows development host. **Tradeoff**: this is not
+  as thoroughly audited as a maintained AEAD library, and rotating
+  `SECRET_KEY` invalidates every stored secret (they must be re-entered). Swap
+  in `cryptography`'s `Fernet` (or another audited AEAD) once it can be
+  installed, without changing any caller of `encrypt_secret`/`decrypt_secret`.
+
+## Optional env-var seed (legacy / local default)
+
+Env vars are no longer required and are now only an optional seed used when
+no Dahua config is enabled in the database. Enable them only on a trusted LAN
+and keep all credentials in the local `.env` file:
 
 ```dotenv
 DAHUA_ENABLED=true
@@ -39,7 +84,7 @@ The core API continues to expose normalized HomeCam capabilities and health. If 
 
 ## Tests
 
-CI uses mocked HTTP transports only and does not require Dahua hardware. Real-hardware validation should be opt-in and run only with local environment variables set; do not paste credentials into test commands or logs.
+CI uses mocked HTTP transports only and does not require Dahua hardware. Real-hardware validation should be opt-in and run only with local environment variables set; do not paste credentials into test commands or logs. `apps/api/tests/test_admin_provider_configs.py` covers the admin CRUD/test-connection endpoints and provider-registry wiring using mocked/unreachable addresses only (no real device contact).
 
 Suggested local checks after configuring `.env`:
 
