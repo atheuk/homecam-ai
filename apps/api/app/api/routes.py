@@ -74,7 +74,7 @@ async def camera(camera_id: str, session: AsyncSession = Depends(get_db)):
 
 @router.get("/cameras/{camera_id}/capabilities")
 async def camera_capabilities(camera_id: str):
-    provider = find_provider_for_camera(camera_id)
+    provider = await find_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
@@ -87,7 +87,7 @@ async def camera_capabilities(camera_id: str):
 
 @router.get("/cameras/{camera_id}/snapshot")
 async def snapshot(camera_id: str):
-    provider = find_provider_for_camera(camera_id)
+    provider = await find_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
@@ -102,7 +102,7 @@ async def snapshot(camera_id: str):
 
 @router.get("/cameras/{camera_id}/live")
 async def live(camera_id: str):
-    provider = find_provider_for_camera(camera_id)
+    provider = await find_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:

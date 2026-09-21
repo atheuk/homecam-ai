@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.admin_routes import router as admin_router
 from .api.auth_routes import router as auth_router
 from .api.routes import router
 from .db import SessionLocal, init_db
@@ -30,6 +31,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

@@ -36,4 +36,29 @@ class AuthSession(Base):
     user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+class ProviderConfig(Base):
+    """Runtime (DB-backed) provider connection settings (SPEC admin plane).
+
+    A single table covers both supported provider types; fields unused by a
+    given ``provider_type`` stay ``NULL``. Secrets (Dahua password / Eufy
+    adapter token) are only ever stored encrypted in ``secret_encrypted`` and
+    are never included in API responses; see ``app/crypto.py``.
+    """
+    __tablename__ = "provider_configs"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider_type: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    scheme: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    username: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    channels: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    adapter_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    secret_encrypted: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    last_test_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_test_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
