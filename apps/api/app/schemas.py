@@ -31,6 +31,27 @@ class ProviderOutageIn(BaseModel):
     unavailable:bool = True
 
 
+class MockAudioIn(BaseModel):
+    """Raw mono 16-bit little-endian PCM, base64 encoded.
+
+    HomeCam never synthesizes audio: the caller (a provider adapter, or a
+    developer simulating one) supplies a real buffer.
+    """
+
+    pcm_base64: str = Field(min_length=1)
+    sample_rate: int = Field(default=16000, ge=4000, le=48000)
+
+
+class AudioAnalysisOut(BaseModel):
+    camera_id: str
+    speech_like: bool
+    rms: float
+    zero_crossing_rate: float
+    confidence: float
+    sample_count: int
+    event_id: str | None = None
+
+
 class RegisterIn(BaseModel):
     email:str
     password:str = Field(min_length=8, max_length=128)

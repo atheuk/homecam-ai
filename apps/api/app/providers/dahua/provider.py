@@ -18,6 +18,7 @@ from ..base import (
     ProviderStatus,
     ProviderUnavailableError,
 )
+from ..capabilities import AUDIO_DETECTION, audio_detection_status
 
 
 SUPPORTED = CapabilityStatus.SUPPORTED.value
@@ -189,6 +190,9 @@ class DahuaProvider:
             "battery": UNSUPPORTED,
             "ptz": UNKNOWN,
             "storageHealth": configured_status,
+            # No normalized audio-buffer API is exposed by this adapter yet,
+            # so the speech-like-activity stage has nothing to consume.
+            AUDIO_DETECTION: audio_detection_status(False, False),
         }
 
     async def get_snapshot(self, camera_id: str) -> bytes:

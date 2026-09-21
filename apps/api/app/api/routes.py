@@ -6,6 +6,8 @@ services layer so it survives beyond the in-process provider objects.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,8 +16,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
+from ..models.db import AIAnalysis, Event
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from ..schemas import CameraBatteryIn, CameraStatusIn, MockEventIn, ProviderOutageIn
+from ..providers.capabilities import AUDIO_DETECTION
+from ..schemas import (
+    AudioAnalysisOut,
+    CameraBatteryIn,
+    CameraStatusIn,
+    MockAudioIn,
+    MockEventIn,
+    ProviderOutageIn,
+)
+from ..ai.audio import analyze_pcm
+from ..services import activities as activity_service
 from ..services import cameras as camera_service
 from ..services import events as event_service
 from ..services.provider_registry import (
@@ -119,14 +132,50 @@ async def live(camera_id: str):
 @router.get("/events")
 async def events(limit: int = 50, session: AsyncSession = Depends(get_db)):
     rows = await event_service.list_events(session, limit)
-    return [
-        {
-            "id": row.id, "camera_id": row.camera_id, "type": row.type, "priority": row.priority,
-            "source": row.source, "start_time": row.start_time.isoformat(), "description": row.description,
-            "metadata": row.event_metadata,
-        }
-        for row in rows
-    ]
+    return [event_service.to_dict(row) for row in rows]
+
+
+@router.get("/events/{event_id}")
+async def event_detail(event_id: str, session: AsyncSession = Depends(get_db)):
+    row = await session.get(Event, event_id)
+    if row is None:
+        raise HTTPException(404, "Event not found")
+    payload = event_service.to_dict(row)
+    if row.ai_analysis_id:
+        analysis = await session.get(AIAnalysis, row.ai_analysis_id)
+        if analysis is not None:
+            payload["ai_analysis"] = {
+                "id": analysis.id,
+                "provider": analysis.provider,
+                "model": analysis.model,
+                "summary": analysis.summary,
+                "objects": analysis.objects,
+                "actions": analysis.actions,
+                "category": analysis.category,
+                "confidence": analysis.confidence,
+                "embedding_dimensions": analysis.embedding_dimensions,
+                "detections": analysis.detections,
+            }
+    return payload
+
+
+@router.get("/activities")
+async def activities(limit: int = 50, session: AsyncSession = Depends(get_db)):
+    """Cross-camera correlated activities (SPEC sections 18/19/33)."""
+    rows = await activity_service.list_activities(session, limit)
+    return [activity_service.to_dict(row) for row in rows]
+
+
+@router.get("/activities/{activity_id}")
+async def activity_detail(activity_id: str, session: AsyncSession = Depends(get_db)):
+    row = await activity_service.get_activity(session, activity_id)
+    if row is None:
+        raise HTTPException(404, "Activity not found")
+    payload = activity_service.to_dict(row)
+    events_result = await event_service.list_events(session, 200)
+    members = [event_service.to_dict(e) for e in events_result if e.id in set(payload["event_ids"])]
+    payload["events"] = sorted(members, key=lambda item: item["start_time"])
+    return payload
 
 
 @router.post("/mock/events")
@@ -176,6 +225,52 @@ async def set_camera_battery(camera_id: str, payload: CameraBatteryIn, session: 
     return updated
 
 
+@router.post("/cameras/{camera_id}/audio/analyze", response_model=AudioAnalysisOut)
+async def analyze_audio(
+    camera_id: str, payload: MockAudioIn, session: AsyncSession = Depends(get_db)
+):
+    """Analyze a supplied audio buffer for speech-like activity.
+
+    Gated by the ``audioDetection`` capability: a camera whose provider does
+    not expose an audio buffer (or that has the feature disabled) returns
+    ``503`` instead of HomeCam inventing audio. This detects *speech-like
+    audio activity* only — never transcription or speaker identity.
+    """
+    provider = await find_provider_for_camera(camera_id)
+    if provider is None:
+        raise HTTPException(404, "Camera not found")
+    try:
+        capabilities = await provider.get_capabilities(camera_id)
+    except CameraNotFoundError as exc:
+        raise HTTPException(404, "Camera not found") from exc
+    except ProviderUnavailableError as exc:
+        raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
+    if capabilities.get(AUDIO_DETECTION) != "SUPPORTED":
+        raise HTTPException(
+            503,
+            f"Audio detection is {capabilities.get(AUDIO_DETECTION, 'UNKNOWN')} for camera '{camera_id}'",
+        )
+    try:
+        pcm = base64.b64decode(payload.pcm_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(422, "pcm_base64 must be valid base64") from exc
+
+    analysis = analyze_pcm(pcm, settings.audio_energy_threshold)
+    event_id: str | None = None
+    if analysis.speech_like:
+        mock = find_mock_provider_for_camera(camera_id)
+        if mock is not None:
+            event = mock.event(camera_id, "motion")
+            event["description"] = (
+                f"Speech-like audio activity detected on {event.get('camera_name', camera_id)} "
+                f"(confidence {analysis.confidence:.2f}); no transcription performed."
+            )
+            event["tags"] = ["audio", "speech-like"]
+            row = await event_service.create_and_broadcast_event(session, event)
+            event_id = row.id
+    return AudioAnalysisOut(camera_id=camera_id, event_id=event_id, **analysis.as_dict())
+
+
 @router.post("/mock/providers/{provider_id}/outage")
 async def set_provider_outage(provider_id: str, payload: ProviderOutageIn):
     """Development control to simulate an entire provider (e.g. the Eufy
@@ -205,6 +300,11 @@ async def get_settings():
         "privacy_mode": "LOCAL ONLY",
         "retention_days": 30,
         "ai_provider": settings.ai_provider,
+        "ai_detector_backend": settings.ai_detector_backend,
+        "ai_analysis_enabled": settings.ai_analysis_enabled,
+        "audio_detection_enabled": settings.audio_detection_enabled,
+        "embedding_dimensions": settings.embedding_dimensions,
+        "parked_vehicle_seconds": settings.parked_vehicle_seconds,
         "low_battery_threshold": settings.low_battery_threshold,
     }
 

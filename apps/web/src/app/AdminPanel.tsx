@@ -22,6 +22,22 @@ type ProviderConfig = {
 
 type TestResult = { success: boolean; status: string; message: string };
 type ChannelRow = { channel: string; name: string };
+type CameraOption = { id: string; name: string };
+type CameraZone = {
+  id: string;
+  camera_id: string;
+  name: string;
+  kind: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
+
+/** Zone kinds the detection pipeline understands semantically
+ * (see docs/ai-pipeline.md). Any other name is stored and shown, it simply
+ * carries no extra meaning. */
+const ZONE_KINDS = ["driveway", "parking", "mailbox", "entry", "street", "garden", "other"];
 
 function authHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -80,6 +96,15 @@ export default function AdminPanel() {
   const [eufyTest, setEufyTest] = useState<TestResult | null>(null);
   const [eufyBusy, setEufyBusy] = useState(false);
 
+  const [cameras, setCameras] = useState<CameraOption[]>([]);
+  const [zoneCameraId, setZoneCameraId] = useState("");
+  const [zones, setZones] = useState<CameraZone[]>([]);
+  const [zoneName, setZoneName] = useState("driveway");
+  const [zoneKind, setZoneKind] = useState("driveway");
+  const [zoneBox, setZoneBox] = useState({ x1: "0.0", y1: "0.5", x2: "0.6", y2: "1.0" });
+  const [zoneStatus, setZoneStatus] = useState<string | null>(null);
+  const [zoneBusy, setZoneBusy] = useState(false);
+
   async function loadConfigs(activeToken: string) {
     const r = await fetch(`${API}/api/v1/admin/providers`, { headers: authHeaders(activeToken) });
     if (r.status === 401) {
@@ -98,6 +123,79 @@ export default function AdminPanel() {
     if (token) loadConfigs(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    (async () => {
+      const r = await fetch(`${API}/api/v1/cameras`);
+      if (!r.ok || cancelled) return;
+      const body = (await r.json()) as CameraOption[];
+      setCameras(body);
+      setZoneCameraId((current) => current || body[0]?.id || "");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  async function loadZones(cameraId: string, activeToken: string) {
+    if (!cameraId) {
+      setZones([]);
+      return;
+    }
+    const r = await fetch(`${API}/api/v1/admin/cameras/${cameraId}/zones`, {
+      headers: authHeaders(activeToken),
+    });
+    if (!r.ok) {
+      setZones([]);
+      return;
+    }
+    setZones(await r.json());
+  }
+
+  useEffect(() => {
+    if (token && zoneCameraId) loadZones(zoneCameraId, token);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, zoneCameraId]);
+
+  async function saveZone(e: FormEvent) {
+    e.preventDefault();
+    if (!token || !zoneCameraId) return;
+    setZoneBusy(true);
+    setZoneStatus(null);
+    try {
+      const r = await fetch(`${API}/api/v1/admin/cameras/${zoneCameraId}/zones`, {
+        method: "POST",
+        headers: authHeaders(token),
+        body: JSON.stringify({
+          name: zoneName,
+          kind: zoneKind,
+          x1: Number(zoneBox.x1),
+          y1: Number(zoneBox.y1),
+          x2: Number(zoneBox.x2),
+          y2: Number(zoneBox.y2),
+        }),
+      });
+      if (!r.ok) {
+        setZoneStatus("Could not save the zone. Coordinates must be between 0 and 1, with x1 < x2 and y1 < y2.");
+        return;
+      }
+      setZoneStatus("Zone saved.");
+      await loadZones(zoneCameraId, token);
+    } finally {
+      setZoneBusy(false);
+    }
+  }
+
+  async function removeZone(zone: CameraZone) {
+    if (!token) return;
+    await fetch(`${API}/api/v1/admin/cameras/${zone.camera_id}/zones/${zone.id}`, {
+      method: "DELETE",
+      headers: authHeaders(token),
+    });
+    await loadZones(zone.camera_id, token);
+  }
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -483,6 +581,83 @@ export default function AdminPanel() {
             </p>
           )}
         </form>
+      </section>
+
+      <section className="panel admin-panel">
+        <h3>Detection zones</h3>
+        <p className="muted">
+          Zones are labelled rectangles in normalized image coordinates (0–1, origin top-left). The AI pipeline uses
+          them to turn raw detections into meaningful events: a person in a <code>driveway</code> zone, a car parked in
+          a <code>parking</code> zone, or activity at the <code>mailbox</code>. See docs/ai-pipeline.md.
+        </p>
+        <form onSubmit={saveZone} className="admin-form">
+          <label>
+            Camera
+            <select value={zoneCameraId} onChange={(e) => setZoneCameraId(e.target.value)}>
+              {cameras.map((camera) => (
+                <option key={camera.id} value={camera.id}>
+                  {camera.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Zone name
+            <input value={zoneName} onChange={(e) => setZoneName(e.target.value)} required />
+          </label>
+          <label>
+            Zone kind
+            <select value={zoneKind} onChange={(e) => setZoneKind(e.target.value)}>
+              {ZONE_KINDS.map((kind) => (
+                <option key={kind} value={kind}>
+                  {kind}
+                </option>
+              ))}
+            </select>
+          </label>
+          <fieldset className="channel-editor">
+            <legend>Rectangle (normalized 0–1)</legend>
+            <div className="channel-row">
+              {(["x1", "y1", "x2", "y2"] as const).map((field) => (
+                <input
+                  key={field}
+                  aria-label={`Zone ${field}`}
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  max={1}
+                  value={zoneBox[field]}
+                  onChange={(e) => setZoneBox((box) => ({ ...box, [field]: e.target.value }))}
+                />
+              ))}
+            </div>
+          </fieldset>
+          <div className="admin-actions">
+            <button type="submit" disabled={zoneBusy || !zoneCameraId}>
+              Add zone
+            </button>
+          </div>
+          {zoneStatus && <p>{zoneStatus}</p>}
+        </form>
+        {zones.length === 0 ? (
+          <p className="muted">No zones configured for this camera yet.</p>
+        ) : (
+          <ul className="provider-list">
+            {zones.map((zone) => (
+              <li key={zone.id} className="provider-row">
+                <span className="provider-type">{zone.kind}</span>
+                <span className="provider-summary">
+                  {zone.name} — [{zone.x1}, {zone.y1}] → [{zone.x2}, {zone.y2}]
+                </span>
+                <div className="provider-row-actions">
+                  <button type="button" onClick={() => removeZone(zone)} aria-label={`Delete zone ${zone.name}`}>
+                    Delete
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="panel admin-panel">

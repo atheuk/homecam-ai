@@ -19,6 +19,9 @@ from ..auth.dependencies import get_current_user
 from ..db import get_db
 from ..models.db import ProviderConfig, User
 from ..schemas_admin import (
+    CameraZoneIn,
+    CameraZoneOut,
+    CameraZoneUpdate,
     DahuaProviderConfigIn,
     DahuaProviderConfigUpdate,
     DahuaTestIn,
@@ -30,8 +33,10 @@ from ..schemas_admin import (
     ProviderTestResult,
 )
 from ..services import provider_configs as service
+from ..services import zones as zone_service
 
 router = APIRouter(prefix="/api/v1/admin/providers", tags=["admin"])
+zones_router = APIRouter(prefix="/api/v1/admin/cameras", tags=["admin"])
 
 
 async def _get_config_or_404(session: AsyncSession, config_id: str, provider_type: str | None = None) -> ProviderConfig:
@@ -145,3 +150,67 @@ async def test_eufy_config(
     result = await service.test_eufy_connection(settings)
     await service.record_test_result(session, config, result)
     return result
+
+
+# --- Camera zones (AI pipeline admin plane) ---------------------------------
+# Zones are labelled rectangles in normalized image coordinates used by the
+# detection pipeline (see app/ai/zones.py and docs/ai-pipeline.md). They are
+# plain configuration, so the same auth model as provider configuration
+# applies: any authenticated user may manage them in this single-user build.
+
+
+async def _get_zone_or_404(session: AsyncSession, zone_id: str):
+    zone = await zone_service.get_zone(session, zone_id)
+    if zone is None:
+        raise HTTPException(404, "Zone not found")
+    return zone
+
+
+@zones_router.get("/{camera_id}/zones", response_model=list[CameraZoneOut])
+async def list_camera_zones(
+    camera_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return await zone_service.list_zones(session, camera_id)
+
+
+@zones_router.post("/{camera_id}/zones", response_model=CameraZoneOut, status_code=201)
+async def create_camera_zone(
+    camera_id: str,
+    payload: CameraZoneIn,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return await zone_service.create_zone(session, camera_id, payload)
+
+
+@zones_router.put("/{camera_id}/zones/{zone_id}", response_model=CameraZoneOut)
+async def update_camera_zone(
+    camera_id: str,
+    zone_id: str,
+    payload: CameraZoneUpdate,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    zone = await _get_zone_or_404(session, zone_id)
+    if zone.camera_id != camera_id:
+        raise HTTPException(404, "Zone not found")
+    try:
+        return await zone_service.update_zone(session, zone, payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@zones_router.delete("/{camera_id}/zones/{zone_id}", status_code=204)
+async def delete_camera_zone(
+    camera_id: str,
+    zone_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    zone = await _get_zone_or_404(session, zone_id)
+    if zone.camera_id != camera_id:
+        raise HTTPException(404, "Zone not found")
+    await zone_service.delete_zone(session, zone)
+    return None

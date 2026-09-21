@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DahuaProviderConfigIn(BaseModel):
@@ -98,3 +98,47 @@ class ProviderTestResult(BaseModel):
     success: bool
     status: str
     message: str
+
+
+class CameraZoneIn(BaseModel):
+    """Named rectangle in normalized (0..1) image coordinates.
+
+    Zone geometry is validated here so the pipeline can assume every stored
+    zone is a well-formed box.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    kind: str = Field(default="other", max_length=32)
+    x1: float = Field(ge=0.0, le=1.0)
+    y1: float = Field(ge=0.0, le=1.0)
+    x2: float = Field(ge=0.0, le=1.0)
+    y2: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def check_box(self) -> "CameraZoneIn":
+        if self.x1 >= self.x2 or self.y1 >= self.y2:
+            raise ValueError("zone must satisfy x1 < x2 and y1 < y2")
+        return self
+
+
+class CameraZoneUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    kind: str | None = Field(default=None, max_length=32)
+    x1: float | None = Field(default=None, ge=0.0, le=1.0)
+    y1: float | None = Field(default=None, ge=0.0, le=1.0)
+    x2: float | None = Field(default=None, ge=0.0, le=1.0)
+    y2: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CameraZoneOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    camera_id: str
+    name: str
+    kind: str
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    created_at: datetime
+    updated_at: datetime

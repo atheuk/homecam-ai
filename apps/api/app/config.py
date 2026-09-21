@@ -6,7 +6,22 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./homecam.db"
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "development-only"
+    media_root: str = "./media"
     ai_provider: str = "mock"
+    # AI pipeline (SPEC sections 12-15). Defaults keep HomeCam fully local,
+    # deterministic and dependency-free; real backends are strictly opt-in.
+    ai_detector_backend: str = "mock"
+    ai_detector_model_path: str = ""
+    ai_analysis_enabled: bool = True
+    embedding_dimensions: int = Field(default=384, ge=8, le=4096)
+    best_photo_frames: int = Field(default=3, ge=1, le=10)
+    best_photo_enabled: bool = True
+    zone_min_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
+    parked_vehicle_seconds: float = Field(default=60.0, gt=0.0)
+    audio_detection_enabled: bool = False
+    audio_energy_threshold: float = Field(default=0.02, gt=0.0, le=1.0)
+    activity_correlation_enabled: bool = True
+    activity_correlation_window_seconds: float = Field(default=120.0, gt=0.0)
     mediamtx_url: str = "http://localhost:8889"
     low_battery_threshold: int = 20
     session_ttl_minutes: int = 60 * 12

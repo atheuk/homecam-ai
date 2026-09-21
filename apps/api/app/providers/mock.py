@@ -25,6 +25,7 @@ from .base import (
     ProviderStatus,
     ProviderUnavailableError,
 )
+from .capabilities import AUDIO_DETECTION, audio_detection_status
 
 SUPPORTED = CapabilityStatus.SUPPORTED.value
 UNSUPPORTED = CapabilityStatus.UNSUPPORTED.value
@@ -58,11 +59,28 @@ class MockCameraProvider:
 
     async def discover_devices(self) -> list[dict]:
         self._require_available()
-        return [dict(c) for c in self._cameras.values()]
+        return [self._camera_record(camera) for camera in self._cameras.values()]
+
+    def _camera_record(self, camera: dict) -> dict:
+        record = dict(camera)
+        record["capabilities"] = self._capabilities_for(camera)
+        return record
+
+    def _capabilities_for(self, camera: dict) -> dict[str, str]:
+        from ..config import settings
+
+        capabilities = dict(camera["capabilities"])
+        capabilities[AUDIO_DETECTION] = audio_detection_status(
+            bool(camera.get("supports_audio")), settings.audio_detection_enabled
+        )
+        return capabilities
+
+    def supports_audio(self, camera_id: str) -> bool:
+        return bool(self._require_camera(camera_id).get("supports_audio"))
 
     async def get_capabilities(self, camera_id: str) -> dict[str, str]:
         self._require_available()
-        return dict(self._require_camera(camera_id)["capabilities"])
+        return self._capabilities_for(self._require_camera(camera_id))
 
     async def get_snapshot(self, camera_id: str) -> bytes:
         self._require_available()
@@ -109,6 +127,7 @@ class MockCameraProvider:
         return {
             "id": event_id,
             "camera_id": camera_id,
+            "camera_name": camera["name"],
             "type": type,
             "priority": priority,
             "source": "provider",
@@ -121,20 +140,20 @@ class MockCameraProvider:
         camera = self._require_camera(camera_id)
         camera["status"] = status
         camera["online"] = status == CameraStatus.ONLINE.value
-        return dict(camera)
+        return self._camera_record(camera)
 
     def simulate_battery(self, camera_id: str, battery_level: int) -> dict:
         camera = self._require_camera(camera_id)
         if camera["battery_level"] is None:
             raise ValueError(f"camera '{camera_id}' does not support battery reporting")
         camera["battery_level"] = max(0, min(100, battery_level))
-        return dict(camera)
+        return self._camera_record(camera)
 
     def simulate_outage(self, unavailable: bool) -> None:
         self._unavailable = unavailable
 
     def get_camera(self, camera_id: str) -> dict:
-        return dict(self._require_camera(camera_id))
+        return self._camera_record(self._require_camera(camera_id))
 
     def has_camera(self, camera_id: str) -> bool:
         return camera_id in self._cameras
@@ -148,6 +167,7 @@ mock_provider = MockCameraProvider(
         {
             "id": "mock-front-door", "name": "Front Door", "type": "camera", "model": "MockCam Pro",
             "status": CameraStatus.ONLINE.value, "online": True, "battery_level": None,
+            "supports_audio": True,
             "capabilities": {
                 "snapshot": SUPPORTED, "liveStream": SUPPORTED, "recordings": SUPPORTED,
                 "motionEvents": SUPPORTED, "personEvents": SUPPORTED, "vehicleEvents": SUPPORTED,
@@ -192,6 +212,7 @@ mock_eufy_provider = MockCameraProvider(
         {
             "id": "mock-eufy-doorbell", "name": "Front Doorbell", "type": "doorbell", "model": "T8210",
             "status": CameraStatus.ONLINE.value, "online": True, "battery_level": 82,
+            "supports_audio": True,
             "capabilities": {
                 "snapshot": SUPPORTED, "liveStream": SUPPORTED, "recordings": SUPPORTED,
                 "motionEvents": SUPPORTED, "personEvents": SUPPORTED, "vehicleEvents": UNSUPPORTED,
