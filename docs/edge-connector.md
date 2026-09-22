@@ -58,11 +58,19 @@ curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER   # log out/in after this
 ```
 
-If you run Home Assistant OS instead of Raspberry Pi OS, run this compose
-stack on a separate lightweight host on the same LAN (e.g. a Docker
-add-on host, or any spare Pi/NAS) rather than inside HAOS's own
-supervisor, since HAOS does not run arbitrary `docker compose` stacks
-directly.
+If you run Home Assistant OS instead of Raspberry Pi OS, do **not** run an
+unmanaged `docker compose` stack through the Supervisor host. Install the
+repository's managed **HomeCam Dahua edge connector** add-on instead:
+
+1. In **Settings → Apps → App store → ⋮ → Repositories**, add
+   `https://github.com/atheuk/homecam-ai`.
+2. Install **HomeCam Dahua edge connector**.
+3. Configure its Dahua settings, connector token, and Tailscale HLS base URL
+   in the add-on UI; then start it.
+
+The add-on is in `homecam-edge/` and runs the same connector/MediaMTX design
+as the Compose deployment. Use `apps/edge/docker-compose.yml` only on
+Raspberry Pi OS or another ordinary Docker host.
 
 ## 2. Install Tailscale on that host
 
