@@ -1,38 +1,59 @@
 """Admin provider-configuration schemas (SPEC admin plane).
 
-Secrets (``password`` / ``adapter_token``) are write-only: they are accepted
-on create/update requests but never appear on any output model. Omitting the
-secret field on an update preserves the previously stored value.
+Secrets (``password`` / ``adapter_token`` / ``edge_token``) are write-only:
+they are accepted on create/update requests but never appear on any output
+model. Omitting the secret field on an update preserves the previously
+stored value.
 """
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DahuaProviderConfigIn(BaseModel):
     name: str = "Dahua NVR"
+    # "direct": raw LAN HTTP/RTSP (existing behavior). "edge": talk to a
+    # Home Assistant/Raspberry Pi edge connector over a private VPN/overlay
+    # (Tailscale recommended) instead — see docs/edge-connector.md.
+    mode: Literal["direct", "edge"] = "direct"
     scheme: str = Field(default="http", pattern="^(http|https)$")
-    host: str = Field(min_length=1, max_length=255)
+    host: str | None = Field(default=None, min_length=1, max_length=255)
     port: int = Field(default=80, ge=1, le=65535)
-    username: str = Field(min_length=1, max_length=120)
+    username: str | None = Field(default=None, min_length=1, max_length=120)
     password: str | None = Field(default=None, max_length=512)
     channels: str = ""
+    edge_base_url: str | None = Field(default=None, min_length=1, max_length=255)
+    edge_token: str | None = Field(default=None, max_length=512)
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def check_mode_requirements(self) -> "DahuaProviderConfigIn":
+        if self.mode == "direct":
+            if not self.host or not self.username:
+                raise ValueError("mode 'direct' requires 'host' and 'username'")
+        elif self.mode == "edge":
+            if not self.edge_base_url:
+                raise ValueError("mode 'edge' requires 'edge_base_url'")
+        return self
 
 
 class DahuaProviderConfigUpdate(BaseModel):
-    """Partial update; omitted fields (including ``password``) keep their
+    """Partial update; omitted fields (including secrets) keep their
     previously stored value."""
 
     name: str | None = None
+    mode: Literal["direct", "edge"] | None = None
     scheme: str | None = Field(default=None, pattern="^(http|https)$")
     host: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = Field(default=None, min_length=1, max_length=120)
     password: str | None = Field(default=None, max_length=512)
     channels: str | None = None
+    edge_base_url: str | None = Field(default=None, min_length=1, max_length=255)
+    edge_token: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
 
 
@@ -56,6 +77,7 @@ class ProviderConfigOut(BaseModel):
     provider_type: str
     name: str
     enabled: bool
+    mode: str | None = None
     scheme: str | None = None
     host: str | None = None
     port: int | None = None
@@ -76,16 +98,21 @@ class ProviderEnabledIn(BaseModel):
 
 class DahuaTestIn(BaseModel):
     """Test-connection input. If ``config_id`` is set, any omitted field
-    (including ``password``) falls back to the stored configuration so a
-    saved config can be re-tested without re-entering the password."""
+    (including secrets) falls back to the stored configuration so a saved
+    config can be re-tested without re-entering the password/token. If
+    ``mode`` is omitted, it falls back to the stored config's mode (or
+    "direct" for an ad-hoc test with no ``config_id``)."""
 
     config_id: str | None = None
+    mode: Literal["direct", "edge"] | None = None
     scheme: str | None = Field(default=None, pattern="^(http|https)$")
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = None
     password: str | None = None
     channels: str | None = None
+    edge_base_url: str | None = None
+    edge_token: str | None = None
 
 
 class EufyTestIn(BaseModel):

@@ -1,0 +1,43 @@
+version: "3.8"
+
+# HomeCam edge connector stack for a Raspberry Pi / Home Assistant host
+# (or an adjacent Docker/Compose host on the same LAN as the Dahua NVR).
+# See docs/edge-connector.md for the full setup, including installing
+# Tailscale on this host and entering its address/token into the Azure
+# Admin UI.
+#
+# Services:
+#   - edge:     token-authed HTTP contract Azure calls (never forwards
+#               Dahua credentials or raw RTSP to Azure/the browser).
+#   - mediamtx: pulls the credentialed Dahua RTSP feed on this LAN and
+#               re-serves it as browser-safe HLS. Credentials only ever
+#               exist in this compose stack's env, never in Azure.
+#
+# Only the private overlay network address (Tailscale) of this host
+# should ever be given to Azure -- do not port-forward these ports on
+# your home router.
+
+services:
+  edge:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - STREAM_BASE_URL=${STREAM_BASE_URL:-http://127.0.0.1:8888}
+    ports:
+      - "8443:8443"
+    depends_on:
+      - mediamtx
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8888:8888" # HLS
+      - "8554:8554" # RTSP (LAN-only; do not expose publicly)
+      - "8189:8189/udp" # WebRTC/ICE (optional)

@@ -66,6 +66,10 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
               { name: 'APP_ENV', value: 'production' }
               { name: 'AI_PROVIDER', value: 'mock' }
               { name: 'DAHUA_ENABLED', value: 'false' }
+              // Non-secret default only. Edge base URL/token should be set at
+              // runtime via the admin API/UI (DB-backed config), not here, so
+              // they can change without redeploying. See docs/edge-connector.md.
+              { name: 'DAHUA_MODE', value: 'direct' }
               { name: 'EUFY_ENABLED', value: 'false' }
               { name: 'MEDIAMTX_URL', value: 'http://${mediaName}:8889' }
               { name: 'CORS_ORIGINS', value: 'https://${webName}.${environmentDomain}' }

@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     dahua_channels: str = ""
     dahua_timeout_seconds: float = Field(default=5.0, gt=0)
     dahua_retries: int = Field(default=1, ge=0, le=5)
+    # Edge connector mode (Home Assistant/Raspberry Pi bridge, see
+    # docs/edge-connector.md). "direct" keeps the existing behavior above;
+    # "edge" talks to a local edge connector over a private VPN/overlay
+    # (Tailscale recommended) instead of the raw Dahua HTTP/RTSP surface.
+    dahua_mode: str = "direct"
+    dahua_edge_url: str | None = None
+    dahua_edge_token: str | None = None
+    dahua_edge_timeout_seconds: float = Field(default=5.0, gt=0)
+    dahua_edge_retries: int = Field(default=1, ge=0, le=5)
     eufy_enabled: bool = False
     eufy_adapter_url: str | None = None
     eufy_adapter_token: str | None = None

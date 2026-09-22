@@ -121,6 +121,10 @@ class ProviderConfig(Base):
     provider_type: Mapped[str] = mapped_column(String(16), index=True)
     name: Mapped[str] = mapped_column(String(120))
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Dahua only: "direct" (raw LAN HTTP/RTSP, default) or "edge" (Home
+    # Assistant/Raspberry Pi edge connector over a private VPN/overlay).
+    # Unused (NULL) for Eufy, which is always adapter/edge-shaped.
+    mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     scheme: Mapped[str | None] = mapped_column(String(8), nullable=True)
     host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)

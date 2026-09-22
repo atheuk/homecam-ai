@@ -45,6 +45,27 @@ def find_mock_provider_for_camera(camera_id: str):
     return next((provider for provider in mock_providers() if provider.has_camera(camera_id)), None)
 
 
+def _classify_stream_url(stream_url: str) -> tuple[str, bool]:
+    """Classify a provider-returned stream URL for safe browser rendering.
+
+    Never used to sanitize credentials out of a URL: providers must not
+    return credentialed URLs to this endpoint in the first place (direct
+    Dahua mode returns a plain ``rtsp://host/...`` with no embedded auth;
+    edge mode never returns raw RTSP at all). This only tells the frontend
+    which kind of player (if any) is safe/possible to use.
+    """
+    lowered = stream_url.lower()
+    if lowered.startswith("rtsp://"):
+        return "rtsp", False
+    if ".m3u8" in lowered or lowered.startswith("hls:"):
+        return "hls", True
+    if "webrtc" in lowered or lowered.startswith("whep:") or lowered.startswith("whip:"):
+        return "webrtc", True
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return "link", True
+    return "unknown", False
+
+
 @router.get("/providers")
 async def providers():
     return await get_all_provider_health()
@@ -119,14 +140,23 @@ async def live(camera_id: str):
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
-        hls_url = await provider.get_live_stream(camera_id)
+        stream_url = await provider.get_live_stream(camera_id)
     except CameraNotFoundError as exc:
         raise HTTPException(404, "Camera not found") from exc
     except CameraOfflineError as exc:
         raise HTTPException(503, f"Camera '{camera_id}' is currently offline") from exc
     except ProviderUnavailableError as exc:
         raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
-    return {"camera_id": camera_id, "hls_url": hls_url, "stream_url": hls_url, "mode": provider.id, "provider_id": provider.id}
+    kind, browser_playable = _classify_stream_url(stream_url)
+    return {
+        "camera_id": camera_id,
+        "hls_url": stream_url,
+        "stream_url": stream_url,
+        "mode": provider.id,
+        "provider_id": provider.id,
+        "kind": kind,
+        "browser_playable": browser_playable,
+    }
 
 
 @router.get("/events")

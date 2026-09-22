@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..crypto import SecretDecryptionError, decrypt_secret, encrypt_secret
 from ..models.db import ProviderConfig
 from ..providers.base import ProviderUnavailableError
-from ..providers.dahua import DahuaProvider, DahuaSettings
+from ..providers.dahua import DahuaEdgeProvider, DahuaEdgeSettings, DahuaProvider, DahuaSettings
 from ..providers.eufy import EufyEdgeProvider, EufySettings
 from ..schemas_admin import (
     DahuaProviderConfigIn,
@@ -35,6 +35,8 @@ from ..schemas_admin import (
 
 DAHUA = "dahua"
 EUFY = "eufy"
+DAHUA_MODE_DIRECT = "direct"
+DAHUA_MODE_EDGE = "edge"
 
 # The "test connection" action is a quick interactive admin probe, not a
 # long-running discovery loop: use a short timeout and no retries so a
@@ -50,6 +52,7 @@ def to_out(config: ProviderConfig) -> ProviderConfigOut:
         provider_type=config.provider_type,
         name=config.name,
         enabled=config.enabled,
+        mode=config.mode,
         scheme=config.scheme,
         host=config.host,
         port=config.port,
@@ -86,17 +89,20 @@ async def _disable_other_enabled(session: AsyncSession, provider_type: str, keep
 
 async def create_dahua(session: AsyncSession, payload: DahuaProviderConfigIn) -> ProviderConfig:
     now = datetime.now(timezone.utc)
+    secret = payload.edge_token if payload.mode == DAHUA_MODE_EDGE else payload.password
     config = ProviderConfig(
         id=str(uuid.uuid4()),
         provider_type=DAHUA,
         name=payload.name,
         enabled=payload.enabled,
+        mode=payload.mode,
         scheme=payload.scheme,
         host=payload.host,
         port=payload.port,
         username=payload.username,
         channels=payload.channels,
-        secret_encrypted=encrypt_secret(payload.password) if payload.password else None,
+        adapter_url=payload.edge_base_url if payload.mode == DAHUA_MODE_EDGE else None,
+        secret_encrypted=encrypt_secret(secret) if secret else None,
         created_at=now,
         updated_at=now,
     )
@@ -112,6 +118,8 @@ async def create_dahua(session: AsyncSession, payload: DahuaProviderConfigIn) ->
 async def update_dahua(session: AsyncSession, config: ProviderConfig, payload: DahuaProviderConfigUpdate) -> ProviderConfig:
     if payload.name is not None:
         config.name = payload.name
+    if payload.mode is not None:
+        config.mode = payload.mode
     if payload.scheme is not None:
         config.scheme = payload.scheme
     if payload.host is not None:
@@ -122,7 +130,13 @@ async def update_dahua(session: AsyncSession, config: ProviderConfig, payload: D
         config.username = payload.username
     if payload.channels is not None:
         config.channels = payload.channels
-    if payload.password:
+    if payload.edge_base_url is not None:
+        config.adapter_url = payload.edge_base_url
+    effective_mode = config.mode or DAHUA_MODE_DIRECT
+    if effective_mode == DAHUA_MODE_EDGE:
+        if payload.edge_token:
+            config.secret_encrypted = encrypt_secret(payload.edge_token)
+    elif payload.password:
         config.secret_encrypted = encrypt_secret(payload.password)
     if payload.enabled is not None:
         config.enabled = payload.enabled
@@ -207,6 +221,20 @@ def dahua_settings_from_config(config: ProviderConfig) -> DahuaSettings:
     )
 
 
+def dahua_edge_settings_from_config(config: ProviderConfig) -> DahuaEdgeSettings:
+    """Edge-mode counterpart of :func:`dahua_settings_from_config`.
+
+    ``adapter_url``/``secret_encrypted`` are shared columns with the direct
+    Dahua settings above and with Eufy's adapter settings: which value they
+    represent depends on ``provider_type``/``mode``, not on separate schema
+    columns.
+    """
+    return DahuaEdgeSettings(
+        base_url=config.adapter_url,
+        token=_decrypt_or_none(config.secret_encrypted),
+    )
+
+
 def eufy_settings_from_config(config: ProviderConfig) -> EufySettings:
     return EufySettings(
         adapter_url=config.adapter_url,
@@ -214,28 +242,47 @@ def eufy_settings_from_config(config: ProviderConfig) -> EufySettings:
     )
 
 
-async def resolve_dahua_test_settings(session: AsyncSession, payload: DahuaTestIn) -> tuple[DahuaSettings, ProviderConfig | None]:
+async def resolve_dahua_test_settings(
+    session: AsyncSession, payload: DahuaTestIn
+) -> tuple[str, DahuaSettings | DahuaEdgeSettings, ProviderConfig | None]:
+    """Resolve the effective mode plus settings to test.
+
+    Returns ``(mode, settings, config)`` where ``settings`` is a
+    :class:`DahuaSettings` for ``mode == "direct"`` or a
+    :class:`DahuaEdgeSettings` for ``mode == "edge"``.
+    """
     config: ProviderConfig | None = None
-    base = DahuaSettings()
+    mode = payload.mode or DAHUA_MODE_DIRECT
     if payload.config_id:
         config = await get_config(session, payload.config_id)
         if config is None or config.provider_type != DAHUA:
             raise LookupError(payload.config_id)
-        base = dahua_settings_from_config(config)
-    resolved_password = payload.password if payload.password is not None else base.password
-    return (
-        DahuaSettings(
-            scheme=payload.scheme or base.scheme,
-            host=payload.host if payload.host is not None else base.host,
-            port=payload.port if payload.port is not None else base.port,
-            username=payload.username if payload.username is not None else base.username,
-            password=resolved_password,
-            channels=payload.channels if payload.channels is not None else base.channels,
+        mode = payload.mode or config.mode or DAHUA_MODE_DIRECT
+
+    if mode == DAHUA_MODE_EDGE:
+        base_edge = dahua_edge_settings_from_config(config) if config is not None else DahuaEdgeSettings()
+        resolved_token = payload.edge_token if payload.edge_token is not None else base_edge.token
+        edge_settings = DahuaEdgeSettings(
+            base_url=payload.edge_base_url if payload.edge_base_url is not None else base_edge.base_url,
+            token=resolved_token,
             timeout_seconds=TEST_TIMEOUT_SECONDS,
             retries=TEST_RETRIES,
-        ),
-        config,
+        )
+        return mode, edge_settings, config
+
+    base = dahua_settings_from_config(config) if config is not None else DahuaSettings()
+    resolved_password = payload.password if payload.password is not None else base.password
+    direct_settings = DahuaSettings(
+        scheme=payload.scheme or base.scheme,
+        host=payload.host if payload.host is not None else base.host,
+        port=payload.port if payload.port is not None else base.port,
+        username=payload.username if payload.username is not None else base.username,
+        password=resolved_password,
+        channels=payload.channels if payload.channels is not None else base.channels,
+        timeout_seconds=TEST_TIMEOUT_SECONDS,
+        retries=TEST_RETRIES,
     )
+    return mode, direct_settings, config
 
 
 async def resolve_eufy_test_settings(session: AsyncSession, payload: EufyTestIn) -> tuple[EufySettings, ProviderConfig | None]:
@@ -266,8 +313,9 @@ async def _run_health_check(provider) -> ProviderTestResult:
     return ProviderTestResult(success=success, status=health["status"], message=health["message"])
 
 
-async def test_dahua_connection(settings: DahuaSettings) -> ProviderTestResult:
-    return await _run_health_check(DahuaProvider(settings))
+async def test_dahua_connection(mode: str, settings: DahuaSettings | DahuaEdgeSettings) -> ProviderTestResult:
+    provider = DahuaEdgeProvider(settings) if mode == DAHUA_MODE_EDGE else DahuaProvider(settings)
+    return await _run_health_check(provider)
 
 
 async def test_eufy_connection(settings: EufySettings) -> ProviderTestResult:

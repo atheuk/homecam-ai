@@ -1,0 +1,27 @@
+# MediaMTX config: pulls the credentialed Dahua RTSP feed on this LAN and
+# re-serves it as HLS (and optionally WebRTC) for the edge connector to
+# hand out browser-safe URLs from. MediaMTX supports ${ENV_VAR}
+# substitution directly in this file, so it reads DAHUA_* from the same
+# .env file the edge connector uses -- credentials are never duplicated
+# or sent anywhere else.
+#
+# Add one `paths` entry per DAHUA_CHANNELS entry you configured for the
+# edge connector; the path name must be `dahua-<channel>` to match what
+# app.py's /channels/{n}/live returns.
+
+hls: yes
+hlsAddress: :8888
+webrtc: yes
+webrtcAddress: :8189
+
+paths:
+  dahua-1:
+    source: rtsp://${DAHUA_USERNAME}:${DAHUA_PASSWORD}@${DAHUA_HOST}:554/cam/realmonitor?channel=1&subtype=0
+    sourceOnDemand: yes
+
+  dahua-2:
+    source: rtsp://${DAHUA_USERNAME}:${DAHUA_PASSWORD}@${DAHUA_HOST}:554/cam/realmonitor?channel=2&subtype=0
+    sourceOnDemand: yes
+
+  # Add more `dahua-<channel>` entries here to match additional
+  # DAHUA_CHANNELS configured for the edge connector.

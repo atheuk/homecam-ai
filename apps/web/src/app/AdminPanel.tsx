@@ -8,6 +8,7 @@ type ProviderConfig = {
   provider_type: string;
   name: string;
   enabled: boolean;
+  mode?: string | null;
   scheme?: string | null;
   host?: string | null;
   port?: number | null;
@@ -77,6 +78,7 @@ export default function AdminPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [dahuaEditingId, setDahuaEditingId] = useState<string | null>(null);
+  const [dahuaMode, setDahuaMode] = useState<"direct" | "edge">("direct");
   const [dahuaName, setDahuaName] = useState("Dahua NVR");
   const [dahuaScheme, setDahuaScheme] = useState("http");
   const [dahuaHost, setDahuaHost] = useState("");
@@ -84,6 +86,8 @@ export default function AdminPanel() {
   const [dahuaUsername, setDahuaUsername] = useState("");
   const [dahuaPassword, setDahuaPassword] = useState("");
   const [dahuaChannels, setDahuaChannels] = useState<ChannelRow[]>([{ channel: "1", name: "Front Door" }]);
+  const [dahuaEdgeBaseUrl, setDahuaEdgeBaseUrl] = useState("");
+  const [dahuaEdgeToken, setDahuaEdgeToken] = useState("");
   const [dahuaStatus, setDahuaStatus] = useState<string | null>(null);
   const [dahuaTest, setDahuaTest] = useState<TestResult | null>(null);
   const [dahuaBusy, setDahuaBusy] = useState(false);
@@ -215,6 +219,7 @@ export default function AdminPanel() {
 
   function resetDahuaForm() {
     setDahuaEditingId(null);
+    setDahuaMode("direct");
     setDahuaName("Dahua NVR");
     setDahuaScheme("http");
     setDahuaHost("");
@@ -222,11 +227,14 @@ export default function AdminPanel() {
     setDahuaUsername("");
     setDahuaPassword("");
     setDahuaChannels([{ channel: "1", name: "Front Door" }]);
+    setDahuaEdgeBaseUrl("");
+    setDahuaEdgeToken("");
     setDahuaTest(null);
   }
 
   function editDahua(config: ProviderConfig) {
     setDahuaEditingId(config.id);
+    setDahuaMode(config.mode === "edge" ? "edge" : "direct");
     setDahuaName(config.name);
     setDahuaScheme(config.scheme || "http");
     setDahuaHost(config.host || "");
@@ -234,6 +242,10 @@ export default function AdminPanel() {
     setDahuaUsername(config.username || "");
     setDahuaPassword("");
     setDahuaChannels(channelsToRows(config.channels || ""));
+    // The edge base URL is stored in the same column as the direct-mode
+    // adapter_url is for Eufy; only meaningful when mode === "edge".
+    setDahuaEdgeBaseUrl(config.mode === "edge" ? config.adapter_url || "" : "");
+    setDahuaEdgeToken("");
     setDahuaTest(null);
     setDahuaStatus(null);
   }
@@ -253,14 +265,20 @@ export default function AdminPanel() {
   function dahuaPayload(): Record<string, unknown> {
     const payload: Record<string, unknown> = {
       name: dahuaName,
-      scheme: dahuaScheme,
-      host: dahuaHost,
-      port: Number(dahuaPort) || 80,
-      username: dahuaUsername,
-      channels: rowsToChannels(dahuaChannels),
+      mode: dahuaMode,
       enabled: true,
     };
-    if (dahuaPassword) payload.password = dahuaPassword;
+    if (dahuaMode === "edge") {
+      payload.edge_base_url = dahuaEdgeBaseUrl;
+      if (dahuaEdgeToken) payload.edge_token = dahuaEdgeToken;
+    } else {
+      payload.scheme = dahuaScheme;
+      payload.host = dahuaHost;
+      payload.port = Number(dahuaPort) || 80;
+      payload.username = dahuaUsername;
+      payload.channels = rowsToChannels(dahuaChannels);
+      if (dahuaPassword) payload.password = dahuaPassword;
+    }
     return payload;
   }
 
@@ -297,16 +315,28 @@ export default function AdminPanel() {
     setDahuaBusy(true);
     setDahuaTest(null);
     try {
-      const payload: Record<string, unknown> = dahuaEditingId
-        ? { config_id: dahuaEditingId, ...(dahuaPassword ? { password: dahuaPassword } : {}) }
-        : {
-            scheme: dahuaScheme,
-            host: dahuaHost,
-            port: Number(dahuaPort) || 80,
-            username: dahuaUsername,
-            password: dahuaPassword,
-            channels: rowsToChannels(dahuaChannels),
-          };
+      let payload: Record<string, unknown>;
+      if (dahuaEditingId) {
+        payload = {
+          config_id: dahuaEditingId,
+          mode: dahuaMode,
+          ...(dahuaMode === "edge"
+            ? { edge_base_url: dahuaEdgeBaseUrl, ...(dahuaEdgeToken ? { edge_token: dahuaEdgeToken } : {}) }
+            : { ...(dahuaPassword ? { password: dahuaPassword } : {}) }),
+        };
+      } else if (dahuaMode === "edge") {
+        payload = { mode: "edge", edge_base_url: dahuaEdgeBaseUrl, edge_token: dahuaEdgeToken };
+      } else {
+        payload = {
+          mode: "direct",
+          scheme: dahuaScheme,
+          host: dahuaHost,
+          port: Number(dahuaPort) || 80,
+          username: dahuaUsername,
+          password: dahuaPassword,
+          channels: rowsToChannels(dahuaChannels),
+        };
+      }
       const r = await fetch(`${API}/api/v1/admin/providers/dahua/test`, {
         method: "POST",
         headers: authHeaders(token),
@@ -457,63 +487,109 @@ export default function AdminPanel() {
             <input value={dahuaName} onChange={(e) => setDahuaName(e.target.value)} />
           </label>
           <label>
-            Scheme
-            <select value={dahuaScheme} onChange={(e) => setDahuaScheme(e.target.value)}>
-              <option value="http">http</option>
-              <option value="https">https</option>
+            Connection mode
+            <select value={dahuaMode} onChange={(e) => setDahuaMode(e.target.value as "direct" | "edge")}>
+              <option value="direct">Direct (LAN host/RTSP, needs private network access to the NVR)</option>
+              <option value="edge">Home Assistant / Raspberry Pi edge connector (Tailscale, recommended)</option>
             </select>
           </label>
-          <label>
-            Host
-            <input value={dahuaHost} onChange={(e) => setDahuaHost(e.target.value)} placeholder="192.168.x.x" required />
-          </label>
-          <label>
-            Port
-            <input
-              type="number"
-              value={dahuaPort}
-              onChange={(e) => setDahuaPort(e.target.value)}
-              min={1}
-              max={65535}
-            />
-          </label>
-          <label>
-            Username
-            <input value={dahuaUsername} onChange={(e) => setDahuaUsername(e.target.value)} required />
-          </label>
-          <label>
-            Password
-            <input
-              type="password"
-              value={dahuaPassword}
-              onChange={(e) => setDahuaPassword(e.target.value)}
-              placeholder={dahuaEditingId ? "Leave blank to keep the stored password" : ""}
-            />
-          </label>
-          <fieldset className="channel-editor">
-            <legend>Channels</legend>
-            {dahuaChannels.map((row, index) => (
-              <div className="channel-row" key={index}>
+          {dahuaMode === "edge" ? (
+            <>
+              <p className="hint">
+                Point this at the edge connector you deployed on Home Assistant/Raspberry Pi (see
+                docs/edge-connector.md), reachable over Tailscale or another private VPN/overlay. HomeCam never
+                sees your Dahua username/password in this mode.
+              </p>
+              <label>
+                Edge connector base URL
                 <input
-                  aria-label={`Channel ${index + 1} number`}
-                  value={row.channel}
-                  onChange={(e) => updateChannelRow(index, "channel", e.target.value)}
+                  value={dahuaEdgeBaseUrl}
+                  onChange={(e) => setDahuaEdgeBaseUrl(e.target.value)}
+                  placeholder="https://raspberrypi.your-tailnet.ts.net:8443"
+                  required
                 />
+              </label>
+              <label>
+                Edge connector token
                 <input
-                  aria-label={`Channel ${index + 1} name`}
-                  value={row.name}
-                  onChange={(e) => updateChannelRow(index, "name", e.target.value)}
-                  placeholder="Front Door"
+                  type="password"
+                  value={dahuaEdgeToken}
+                  onChange={(e) => setDahuaEdgeToken(e.target.value)}
+                  placeholder={dahuaEditingId ? "Leave blank to keep the stored token" : ""}
                 />
-                <button type="button" onClick={() => removeChannelRow(index)} aria-label={`Remove channel ${index + 1}`}>
-                  Remove
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                Scheme
+                <select value={dahuaScheme} onChange={(e) => setDahuaScheme(e.target.value)}>
+                  <option value="http">http</option>
+                  <option value="https">https</option>
+                </select>
+              </label>
+              <label>
+                Host
+                <input
+                  value={dahuaHost}
+                  onChange={(e) => setDahuaHost(e.target.value)}
+                  placeholder="192.168.x.x"
+                  required
+                />
+              </label>
+              <label>
+                Port
+                <input
+                  type="number"
+                  value={dahuaPort}
+                  onChange={(e) => setDahuaPort(e.target.value)}
+                  min={1}
+                  max={65535}
+                />
+              </label>
+              <label>
+                Username
+                <input value={dahuaUsername} onChange={(e) => setDahuaUsername(e.target.value)} required />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={dahuaPassword}
+                  onChange={(e) => setDahuaPassword(e.target.value)}
+                  placeholder={dahuaEditingId ? "Leave blank to keep the stored password" : ""}
+                />
+              </label>
+              <fieldset className="channel-editor">
+                <legend>Channels</legend>
+                {dahuaChannels.map((row, index) => (
+                  <div className="channel-row" key={index}>
+                    <input
+                      aria-label={`Channel ${index + 1} number`}
+                      value={row.channel}
+                      onChange={(e) => updateChannelRow(index, "channel", e.target.value)}
+                    />
+                    <input
+                      aria-label={`Channel ${index + 1} name`}
+                      value={row.name}
+                      onChange={(e) => updateChannelRow(index, "name", e.target.value)}
+                      placeholder="Front Door"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeChannelRow(index)}
+                      aria-label={`Remove channel ${index + 1}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button type="button" onClick={addChannelRow}>
+                  Add channel
                 </button>
-              </div>
-            ))}
-            <button type="button" onClick={addChannelRow}>
-              Add channel
-            </button>
-          </fieldset>
+              </fieldset>
+            </>
+          )}
           <div className="admin-actions">
             <button type="submit" disabled={dahuaBusy}>
               Save
@@ -668,10 +744,15 @@ export default function AdminPanel() {
           <ul className="provider-list">
             {configs.map((config) => (
               <li key={config.id} className="provider-row">
-                <span className="provider-type">{config.provider_type}</span>
+                <span className="provider-type">
+                  {config.provider_type}
+                  {config.provider_type === "dahua" && config.mode ? ` (${config.mode})` : ""}
+                </span>
                 <span className="provider-summary">
                   {config.provider_type === "dahua"
-                    ? `${config.scheme}://${config.host}:${config.port}`
+                    ? config.mode === "edge"
+                      ? config.adapter_url || "(no edge base URL set)"
+                      : `${config.scheme}://${config.host}:${config.port}`
                     : config.adapter_url}
                 </span>
                 <span className={config.enabled ? "success" : "muted"}>{config.enabled ? "Enabled" : "Disabled"}</span>
