@@ -8,6 +8,7 @@ from .api.admin_routes import router as admin_router
 from .api.admin_routes import zones_router as admin_zones_router
 from .api.auth_routes import router as auth_router
 from .api.routes import router
+from .config import settings
 from .db import SessionLocal, init_db
 from .services.cameras import sync_cameras
 from .services.provider_registry import discover_all_cameras
@@ -26,7 +27,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="HomeCam AI API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )

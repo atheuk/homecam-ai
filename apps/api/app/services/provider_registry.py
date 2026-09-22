@@ -23,7 +23,7 @@ from ..config import settings
 from ..db import SessionLocal
 from ..models.db import ProviderConfig
 from ..providers.base import CameraNotFoundError, CameraProvider, ProviderUnavailableError
-from ..providers.dahua import DahuaProvider, DahuaSettings
+from ..providers.dahua import DahuaEdgeProvider, DahuaEdgeSettings, DahuaProvider, DahuaSettings
 from ..providers.eufy import EufyEdgeProvider, EufySettings
 from ..providers.mock import PROVIDERS as MOCK_PROVIDERS
 from ..providers.mock import MockCameraProvider
@@ -52,9 +52,25 @@ async def _configured_real_providers() -> list[CameraProvider]:
         dahua_config = None
     if dahua_config is not None:
         try:
-            providers.append(DahuaProvider(provider_config_service.dahua_settings_from_config(dahua_config)))
+            if dahua_config.mode == provider_config_service.DAHUA_MODE_EDGE:
+                providers.append(
+                    DahuaEdgeProvider(provider_config_service.dahua_edge_settings_from_config(dahua_config))
+                )
+            else:
+                providers.append(DahuaProvider(provider_config_service.dahua_settings_from_config(dahua_config)))
         except Exception:  # noqa: BLE001
             logger.exception("failed to build Dahua provider from stored config")
+    elif settings.dahua_mode == provider_config_service.DAHUA_MODE_EDGE and settings.dahua_edge_url:
+        providers.append(
+            DahuaEdgeProvider(
+                DahuaEdgeSettings(
+                    base_url=settings.dahua_edge_url,
+                    token=settings.dahua_edge_token,
+                    timeout_seconds=settings.dahua_edge_timeout_seconds,
+                    retries=settings.dahua_edge_retries,
+                )
+            )
+        )
     elif settings.dahua_enabled:
         providers.append(
             DahuaProvider(

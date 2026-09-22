@@ -306,6 +306,113 @@ async def test_test_connection_by_config_id_uses_stored_secret(client):
 
 
 @pytest.mark.asyncio
+async def test_create_update_delete_dahua_edge_config(client):
+    """Edge mode reuses the ``adapter_url``/``secret_encrypted`` columns
+    (as ``edge_base_url``/``edge_token`` in the API surface) instead of the
+    direct-mode host/username/password fields, and never leaks the token."""
+    headers = await _authed_headers(client)
+
+    create = await client.post(
+        "/api/v1/admin/providers/dahua",
+        json={
+            "name": "Pi Edge Connector",
+            "mode": "edge",
+            "edge_base_url": "https://raspberrypi.tailnet.ts.net:8443",
+            "edge_token": "not-the-real-edge-token",
+            "enabled": False,
+        },
+        headers=headers,
+    )
+    assert create.status_code == 201
+    body = create.json()
+    _assert_no_secret_leak(body)
+    assert body["mode"] == "edge"
+    assert body["has_secret"] is True
+    config_id = body["id"]
+
+    update = await client.put(
+        f"/api/v1/admin/providers/dahua/{config_id}",
+        json={"edge_base_url": "https://raspberrypi.tailnet.ts.net:9443"},
+        headers=headers,
+    )
+    assert update.status_code == 200
+    updated_body = update.json()
+    _assert_no_secret_leak(updated_body)
+    assert updated_body["mode"] == "edge"
+    # Secret was preserved even though the update omitted it.
+    assert updated_body["has_secret"] is True
+
+    delete = await client.delete(f"/api/v1/admin/providers/{config_id}", headers=headers)
+    assert delete.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_dahua_config_requires_fields_for_its_mode(client):
+    headers = await _authed_headers(client)
+
+    missing_edge_url = await client.post(
+        "/api/v1/admin/providers/dahua",
+        json={"mode": "edge", "edge_token": "t"},
+        headers=headers,
+    )
+    assert missing_edge_url.status_code == 422
+
+    missing_direct_host = await client.post(
+        "/api/v1/admin/providers/dahua",
+        json={"mode": "direct", "password": "p"},
+        headers=headers,
+    )
+    assert missing_direct_host.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_dahua_edge_test_connection_reports_failure_without_leaking_token(client):
+    headers = await _authed_headers(client)
+
+    result = await client.post(
+        "/api/v1/admin/providers/dahua/test",
+        json={
+            "mode": "edge",
+            "edge_base_url": "https://192.0.2.249:8443",
+            "edge_token": "super-secret-edge-token",
+        },
+        headers=headers,
+    )
+    assert result.status_code == 200
+    body = result.json()
+    assert body["success"] is False
+    assert body["status"] in {"OFFLINE", "DEGRADED"}
+    assert "super-secret-edge-token" not in body["message"]
+
+
+@pytest.mark.asyncio
+async def test_dahua_edge_registry_wiring_does_not_break_other_providers(client):
+    from app.services.provider_registry import discover_all_cameras, get_all_provider_health
+
+    headers = await _authed_headers(client)
+
+    await client.post(
+        "/api/v1/admin/providers/dahua",
+        json={
+            "mode": "edge",
+            "edge_base_url": "https://192.0.2.248:8443",
+            "edge_token": "t",
+            "enabled": True,
+        },
+        headers=headers,
+    )
+
+    cameras = await discover_all_cameras()
+    ids = {c["id"] for c in cameras}
+    assert {"mock-front-door", "mock-driveway", "mock-backyard", "mock-garden"} <= ids
+
+    health = await get_all_provider_health()
+    by_id = {h["provider_id"]: h for h in health}
+    assert by_id["mock"]["status"] == "ONLINE"
+    assert by_id["dahua"]["status"] in {"OFFLINE", "DEGRADED"}
+
+
+@pytest.mark.asyncio
 async def test_unknown_config_id_returns_404(client):
     headers = await _authed_headers(client)
     r = await client.put(

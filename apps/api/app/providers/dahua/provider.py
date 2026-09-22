@@ -236,7 +236,12 @@ class DahuaProvider:
             return {
                 "provider_id": self.id,
                 "status": ProviderStatus.DEGRADED.value,
-                "message": "Dahua enabled but LAN host and/or local credentials are not configured.",
+                "message": (
+                    "Dahua enabled but LAN host and/or local credentials are not configured. "
+                    "QR/DMSS P2P serial pairing alone does not give HomeCam network access: set a "
+                    "direct LAN host here, or switch this configuration to edge mode and point it at "
+                    "a Home Assistant/Raspberry Pi edge connector."
+                ),
                 "camera_count": len(self._channels),
                 "online_camera_count": 0,
             }

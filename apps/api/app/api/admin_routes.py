@@ -129,10 +129,10 @@ async def test_dahua_config(
     _user: User = Depends(get_current_user),
 ):
     try:
-        settings, config = await service.resolve_dahua_test_settings(session, payload)
+        mode, settings, config = await service.resolve_dahua_test_settings(session, payload)
     except LookupError as exc:
         raise HTTPException(404, "Provider configuration not found") from exc
-    result = await service.test_dahua_connection(settings)
+    result = await service.test_dahua_connection(mode, settings)
     await service.record_test_result(session, config, result)
     return result
 

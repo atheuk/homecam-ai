@@ -115,6 +115,47 @@ describe("AdminPanel",()=>{
     await waitFor(()=>expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/admin/providers/cfg-1/enabled"),expect.objectContaining({method:"POST"})));
   });
 
+  it("switches the Dahua form to edge-connector mode and hides direct-mode fields", async()=>{
+    await signIn();
+    expect(screen.getByLabelText("Host")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Connection mode"),{target:{value:"edge"}});
+    expect(screen.queryByLabelText("Host")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Edge connector base URL")).toBeInTheDocument();
+    expect(screen.getByLabelText("Edge connector token")).toBeInTheDocument();
+  });
+
+  it("submits an edge-mode Dahua config with edge_base_url/edge_token and no direct-mode fields", async()=>{
+    let capturedBody:Record<string,unknown>|null=null;
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/admin/providers/dahua":(init)=>{capturedBody=JSON.parse(String(init?.body));return jsonResponse({id:"cfg-2",provider_type:"dahua",name:"Pi Edge Connector",enabled:true,mode:"edge",adapter_url:"https://pi.tailnet.ts.net:8443",has_secret:true,last_test_status:null,last_test_message:null,last_test_at:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString()},201);},
+      "/admin/providers":()=>jsonResponse([]),
+    });
+    await signIn();
+    fireEvent.change(screen.getByLabelText("Connection mode"),{target:{value:"edge"}});
+    fireEvent.change(screen.getByLabelText("Edge connector base URL"),{target:{value:"https://pi.tailnet.ts.net:8443"}});
+    fireEvent.change(screen.getByLabelText("Edge connector token"),{target:{value:"edge-secret-token"}});
+    fireEvent.click(screen.getAllByText("Save")[0]);
+    await waitFor(()=>expect(capturedBody).not.toBeNull());
+    expect(capturedBody!.mode).toBe("edge");
+    expect(capturedBody!.edge_base_url).toBe("https://pi.tailnet.ts.net:8443");
+    expect(capturedBody!.edge_token).toBe("edge-secret-token");
+    expect(capturedBody!.host).toBeUndefined();
+    expect(capturedBody!.password).toBeUndefined();
+    await screen.findByText("Saved.");
+  });
+
+  it("shows the stored mode in the configured providers list", async()=>{
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/admin/providers":()=>jsonResponse([{id:"cfg-2",provider_type:"dahua",name:"Pi Edge Connector",enabled:true,mode:"edge",adapter_url:"https://pi.tailnet.ts.net:8443",has_secret:true,last_test_status:null,last_test_message:null,last_test_at:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString()}]),
+    });
+    await signIn();
+    expect(await screen.findByText("dahua (edge)")).toBeInTheDocument();
+    expect(screen.getByText("https://pi.tailnet.ts.net:8443")).toBeInTheDocument();
+  });
+
   const zoneHandlers={
     "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
     "/api/v1/cameras":()=>jsonResponse([{id:"mock-front-door",name:"Front Door"}]),

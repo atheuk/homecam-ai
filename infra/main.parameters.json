@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "homecam-ai-dev-82ac" },
+    "location": { "value": "northeurope" },
+    "sessionId": { "value": "82accc32-dcbc-4f18-b2f1-0318ac2ad7c8" },
+    "deployedBy": { "value": "Ate Heukels" },
+    "createdAt": { "value": "2026-09-21T11:14:40.9727842+02:00" },
+    "deployerObjectId": { "value": "c36eb1e3-fdf9-477a-9d16-1cd18f56889b" }
+  }
+}
