@@ -72,6 +72,16 @@ PY
 
 /usr/local/bin/mediamtx /tmp/mediamtx.yml &
 mediamtx_pid=$!
-trap 'kill "$mediamtx_pid" 2>/dev/null || true' EXIT INT TERM
+uvicorn_pid=""
 
-exec uvicorn app:app --host 0.0.0.0 --port 8443
+shutdown() {
+  [ -n "$uvicorn_pid" ] && kill "$uvicorn_pid" 2>/dev/null || true
+  kill "$mediamtx_pid" 2>/dev/null || true
+  wait "$uvicorn_pid" 2>/dev/null || true
+  wait "$mediamtx_pid" 2>/dev/null || true
+}
+trap shutdown EXIT INT TERM
+
+uvicorn app:app --host 0.0.0.0 --port 8443 &
+uvicorn_pid=$!
+wait "$uvicorn_pid"
