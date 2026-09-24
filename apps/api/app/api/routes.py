@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import json
+import os
+import time
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,6 +69,55 @@ def _classify_stream_url(stream_url: str) -> tuple[str, bool]:
     if lowered.startswith("http://") or lowered.startswith("https://"):
         return "link", True
     return "unknown", False
+
+
+def _is_private_host(url: str) -> bool:
+    """Whether ``url``'s host is only reachable from inside the private
+    overlay network (Tailscale MagicDNS, ``localhost``, or an RFC1918/
+    loopback/link-local address) and therefore unreachable by a real
+    browser, which is never on the tailnet."""
+    host = urlsplit(url).hostname
+    if not host:
+        return True
+    if host == "localhost" or host.endswith(".ts.net"):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback or addr.is_link_local
+
+
+# Cache of the last-resolved upstream live-stream URL per camera. HLS
+# playback polls the manifest and fetches several segments per interval;
+# without this cache each of those requests would re-trigger a live-stream
+# lookup against the (often capacity-limited) edge connector/provider.
+_LIVE_STREAM_CACHE_TTL_SECONDS = 30.0
+_live_stream_cache: dict[str, tuple[float, str]] = {}
+
+
+async def _cached_live_stream(provider, camera_id: str) -> str:
+    cached = _live_stream_cache.get(camera_id)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _LIVE_STREAM_CACHE_TTL_SECONDS:
+        return cached[1]
+    url = await provider.get_live_stream(camera_id)
+    _live_stream_cache[camera_id] = (now, url)
+    return url
+
+
+def _rewrite_hls_manifest(text: str) -> str:
+    """Rewrite any absolute upstream URLs in an HLS manifest to bare
+    filenames, so relative resolution against our own proxy route (rather
+    than the private upstream host) is used for sub-playlists/segments.
+    Manifests that already use relative references (the common case) are
+    returned unchanged."""
+    out_lines = []
+    for line in text.splitlines():
+        if line and not line.startswith("#") and "://" in line:
+            line = line.rsplit("/", 1)[-1]
+        out_lines.append(line)
+    return "\n".join(out_lines) + "\n"
 
 
 @router.get("/providers")
@@ -135,12 +189,12 @@ async def snapshot(camera_id: str):
 
 
 @router.get("/cameras/{camera_id}/live")
-async def live(camera_id: str):
+async def live(camera_id: str, request: Request):
     provider = await find_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
-        stream_url = await provider.get_live_stream(camera_id)
+        stream_url = await _cached_live_stream(provider, camera_id)
     except CameraNotFoundError as exc:
         raise HTTPException(404, "Camera not found") from exc
     except CameraOfflineError as exc:
@@ -148,15 +202,70 @@ async def live(camera_id: str):
     except ProviderUnavailableError as exc:
         raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
     kind, browser_playable = _classify_stream_url(stream_url)
+    public_url = stream_url
+    if kind == "hls" and _is_private_host(stream_url):
+        # The provider's stream URL is only reachable over the private
+        # overlay network (Tailscale tailnet, or a container-local address).
+        # A real browser has no route to it, so hand back our own public
+        # HLS proxy path instead of the raw upstream URL.
+        base = settings.public_api_base_url or f"https://{request.headers.get('host') or request.url.netloc}"
+        public_url = f"{base.rstrip('/')}/api/v1/cameras/{camera_id}/hls/index.m3u8"
+        browser_playable = True
     return {
         "camera_id": camera_id,
-        "hls_url": stream_url,
-        "stream_url": stream_url,
+        "hls_url": public_url,
+        "stream_url": public_url,
         "mode": provider.id,
         "provider_id": provider.id,
         "kind": kind,
         "browser_playable": browser_playable,
     }
+
+
+@router.get("/cameras/{camera_id}/hls/{path:path}")
+async def hls_proxy(camera_id: str, path: str):
+    """Public HLS relay for cameras whose real stream lives on the private
+    overlay network. Streams the manifest/segments through the API's own
+    (already tailnet-connected) network path so the browser only ever talks
+    to the public Azure API domain, never a private tailnet/localhost host.
+    """
+    provider = await find_provider_for_camera(camera_id)
+    if provider is None:
+        raise HTTPException(404, "Camera not found")
+    try:
+        upstream_manifest_url = await _cached_live_stream(provider, camera_id)
+    except CameraNotFoundError as exc:
+        raise HTTPException(404, "Camera not found") from exc
+    except CameraOfflineError as exc:
+        raise HTTPException(503, f"Camera '{camera_id}' is currently offline") from exc
+    except ProviderUnavailableError as exc:
+        raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
+    kind, _ = _classify_stream_url(upstream_manifest_url)
+    if kind != "hls":
+        raise HTTPException(409, f"Camera '{camera_id}' does not expose an HLS stream to proxy")
+    upstream_base = upstream_manifest_url.rsplit("/", 1)[0]
+    target_url = f"{upstream_base}/{path}" if path else upstream_manifest_url
+
+    client_options: dict = {"timeout": 10.0, "follow_redirects": True}
+    proxy_url = os.environ.get("TAILSCALE_HTTP_PROXY")
+    if proxy_url:
+        client_options["proxy"] = proxy_url
+    try:
+        async with httpx.AsyncClient(**client_options) as client:
+            upstream_response = await client.get(target_url)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
+    if upstream_response.status_code >= 400:
+        raise HTTPException(
+            upstream_response.status_code if upstream_response.status_code < 500 else 503,
+            f"Upstream HLS resource for '{camera_id}' returned HTTP {upstream_response.status_code}",
+        )
+    content_type = upstream_response.headers.get("content-type") or "application/octet-stream"
+    body = upstream_response.content
+    if path.endswith(".m3u8") or "mpegurl" in content_type.lower():
+        body = _rewrite_hls_manifest(body.decode("utf-8", errors="replace")).encode("utf-8")
+        content_type = "application/vnd.apple.mpegurl"
+    return Response(content=body, media_type=content_type)
 
 
 @router.get("/events")

@@ -81,6 +81,10 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
                 { name: 'EUFY_ENABLED', value: 'false' }
                 { name: 'MEDIAMTX_URL', value: 'http://${mediaName}:8889' }
                 { name: 'CORS_ORIGINS', value: 'https://${webName}.${environmentDomain}' }
+                // Own public FQDN, used to rewrite private-only (tailnet/localhost)
+                // live-stream URLs into a publicly reachable proxy path so a real
+                // browser (never on the tailnet) can fetch HLS manifests/segments.
+                { name: 'PUBLIC_API_BASE_URL', value: 'https://${name}.${environmentDomain}' }
                 { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsightsConnectionString }
               ],
               isPlaceholder ? [] : [
