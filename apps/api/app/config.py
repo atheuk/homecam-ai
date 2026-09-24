@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     activity_correlation_enabled: bool = True
     activity_correlation_window_seconds: float = Field(default=120.0, gt=0.0)
     mediamtx_url: str = "http://localhost:8889"
+    # Own public FQDN (e.g. the Container App's https://... ingress URL). Used
+    # to rewrite private-only (Tailscale tailnet / container-localhost) live
+    # stream URLs into a public HLS proxy path a real browser can reach.
+    public_api_base_url: str | None = None
     low_battery_threshold: int = 20
     session_ttl_minutes: int = 60 * 12
     dahua_enabled: bool = False

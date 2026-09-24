@@ -126,6 +126,8 @@ module api './modules/api.bicep' = {
     containerImage: empty(apiImage) ? containerImage : apiImage
     isPlaceholder: isPlaceholder
     appInsightsConnectionString: appInsights.outputs.connectionString
+    #disable-next-line no-hardcoded-env-urls
+    tailscaleAuthKeySecretUri: 'https://${kvName}.vault.azure.net/secrets/tailscale-auth-key'
   }
 }
 module worker './modules/worker.bicep' = {

@@ -29,6 +29,7 @@ liveness probe) must carry ``Authorization: Bearer <HOME_CAM_EDGE_TOKEN>``.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 
 import httpx
@@ -67,6 +68,7 @@ class DahuaEdgeSettings:
     token: str | None = None
     timeout_seconds: float = 5.0
     retries: int = 1
+    proxy_url: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -110,11 +112,17 @@ class DahuaEdgeProvider:
         last_error: Exception | None = None
         for attempt in range(self.settings.retries + 1):
             try:
-                async with httpx.AsyncClient(
-                    timeout=self.settings.timeout_seconds,
-                    transport=self._transport,
-                    follow_redirects=False,
-                ) as client:
+                client_options: dict = {
+                    "timeout": self.settings.timeout_seconds,
+                    "follow_redirects": False,
+                }
+                if self._transport is not None:
+                    client_options["transport"] = self._transport
+                else:
+                    proxy_url = self.settings.proxy_url or os.environ.get("TAILSCALE_HTTP_PROXY")
+                    if proxy_url:
+                        client_options["proxy"] = proxy_url
+                async with httpx.AsyncClient(**client_options) as client:
                     response = await client.get(url, headers=self._headers())
                 if response.status_code in (401, 403):
                     raise ProviderRequestError(self.id, operation, "edge connector authentication rejected", retryable=False)
