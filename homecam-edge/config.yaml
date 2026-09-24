@@ -22,7 +22,7 @@ options:
   home_cam_edge_token: ""
   stream_base_url: ""
   dahua_timeout_seconds: 5
-  dahua_stream_subtype: 1
+  dahua_stream_subtype: 0
 schema:
   dahua_scheme: list(http|https)
   dahua_host: str
