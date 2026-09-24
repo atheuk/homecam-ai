@@ -6,8 +6,10 @@ the standalone Compose application's source during the image build.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -33,6 +35,7 @@ class EdgeSettings:
     edge_token: str | None = None
     stream_base_url: str = "http://127.0.0.1:8888"
     timeout_seconds: float = 5.0
+    channel_liveness_ttl_seconds: float = 60.0
 
     @property
     def dahua_configured(self) -> bool:
@@ -75,6 +78,7 @@ def settings_from_env() -> EdgeSettings:
         edge_token=os.environ.get("HOME_CAM_EDGE_TOKEN") or None,
         stream_base_url=os.environ.get("STREAM_BASE_URL", "http://127.0.0.1:8888").rstrip("/"),
         timeout_seconds=float(os.environ.get("DAHUA_TIMEOUT_SECONDS", "5")),
+        channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
     )
 
 
@@ -82,16 +86,25 @@ def settings_from_env() -> EdgeSettings:
 class DahuaClient:
     settings: EdgeSettings
     transport: httpx.AsyncBaseTransport | None = field(default=None)
+    # This NVR's embedded HTTP server only sustains ~1-2 concurrent CGI
+    # sessions. Continuous AI-ingestion polling (Azure side) and per-channel
+    # liveness probing both now add extra callers on top of real viewer
+    # snapshot/stream requests, so every outbound call is serialized here
+    # rather than relying on each caller to coordinate; overlapping requests
+    # otherwise make the NVR reject *all* of them, including ones for
+    # channels that are genuinely online.
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def _auth(self) -> httpx.DigestAuth:
         assert self.settings.dahua_username and self.settings.dahua_password
         return httpx.DigestAuth(self.settings.dahua_username, self.settings.dahua_password)
 
     async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
-        async with httpx.AsyncClient(
-            timeout=self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
-        ) as client:
-            return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
+        async with self._lock:
+            async with httpx.AsyncClient(
+                timeout=self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
+            ) as client:
+                return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
 
     async def probe(self) -> tuple[bool, str]:
         if not self.settings.dahua_configured:
@@ -107,14 +120,58 @@ class DahuaClient:
         return True, "reachable"
 
     async def snapshot(self, channel: int) -> bytes:
-        response = await self._get("/cgi-bin/snapshot.cgi", {"channel": channel})
-        response.raise_for_status()
-        return response.content
+        # Cheap Dahua NVRs' embedded HTTP servers frequently reject a
+        # snapshot.cgi request with a transient error if another request
+        # (even a concurrent /health or /channels probe) is already in
+        # flight. A short bounded retry absorbs that instead of surfacing
+        # it to Azure as "camera unavailable".
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(0.15 * attempt)
+            try:
+                response = await self._get("/cgi-bin/snapshot.cgi", {"channel": channel})
+                response.raise_for_status()
+                return response.content
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
+
+
+@dataclass
+class ChannelLivenessTracker:
+    """Real per-channel connectivity, cached with a TTL (mirrors
+    ``apps/edge/app.py``; see that file for the full rationale)."""
+
+    client: DahuaClient
+    ttl_seconds: float = 60.0
+    _cache: dict[int, tuple[bool, float]] = field(default_factory=dict)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def is_online(self, channel: int) -> bool:
+        now = time.monotonic()
+        cached = self._cache.get(channel)
+        if cached is not None and (now - cached[1]) < self.ttl_seconds:
+            return cached[0]
+        async with self._lock:
+            cached = self._cache.get(channel)
+            now = time.monotonic()
+            if cached is not None and (now - cached[1]) < self.ttl_seconds:
+                return cached[0]
+            try:
+                await self.client.snapshot(channel)
+                online = True
+            except Exception:  # noqa: BLE001 - any failure means "not live"
+                online = False
+            self._cache[channel] = (online, time.monotonic())
+            return online
 
 
 def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     client = DahuaClient(settings, transport=transport)
+    liveness = ChannelLivenessTracker(client=client, ttl_seconds=settings.channel_liveness_ttl_seconds)
     app = FastAPI(title="HomeCam edge connector", version="1.0.0")
 
     def require_token(authorization: str | None) -> None:
@@ -137,10 +194,13 @@ def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseT
     async def channels(authorization: str | None = Header(default=None)):
         require_token(authorization)
         dahua_reachable, _ = await client.probe()
+        statuses = []
+        for c in settings.channels:
+            statuses.append(dahua_reachable and await liveness.is_online(c.channel))
         return {
             "channels": [
-                {"channel": c.channel, "name": c.name, "type": c.type, "online": dahua_reachable}
-                for c in settings.channels
+                {"channel": c.channel, "name": c.name, "type": c.type, "online": online}
+                for c, online in zip(settings.channels, statuses)
             ]
         }
 

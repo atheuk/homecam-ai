@@ -1,5 +1,5 @@
 name: HomeCam Dahua edge connector
-version: "1.0.0"
+version: "1.1.0"
 slug: homecam_dahua_edge
 description: Token-authenticated Dahua LAN bridge with browser-safe HLS relay
 url: https://github.com/atheuk/homecam-ai/tree/atheuk-ha-pi-edge-connector/homecam-edge
@@ -22,6 +22,7 @@ options:
   home_cam_edge_token: ""
   stream_base_url: ""
   dahua_timeout_seconds: 5
+  dahua_stream_subtype: 0
 schema:
   dahua_scheme: list(http|https)
   dahua_host: str
@@ -32,3 +33,4 @@ schema:
   home_cam_edge_token: password
   stream_base_url: str?
   dahua_timeout_seconds: float
+  dahua_stream_subtype: int(0,1)
