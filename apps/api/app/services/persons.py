@@ -298,6 +298,14 @@ async def _detach_from_person(session: AsyncSession, event: Event, person_id: st
         person.cover_event_id = await _next_cover_event(session, person_id, exclude=event.id)
     person.updated_at = datetime.now(timezone.utc)
 
+    # An identity whose last sighting was just reassigned no longer refers to
+    # anyone. Keeping it would leave an "Unknown person" with no photo and no
+    # sightings sitting in the roster forever, which reads as a bug to the
+    # user. Named identities are kept: the name is human intent, and the
+    # person may simply not have been seen again yet.
+    if not remaining and person.sighting_count == 0 and not person.name:
+        await session.delete(person)
+
 
 async def _next_cover_event(session: AsyncSession, person_id: str, exclude: str) -> str | None:
     result = await session.execute(

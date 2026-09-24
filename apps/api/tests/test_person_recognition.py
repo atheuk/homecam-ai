@@ -384,3 +384,29 @@ async def test_real_descriptions_and_missing_captions_still_count_as_people() ->
     # No second opinion available (captioning off or the call failed) means we
     # keep trusting the detector instead of dropping genuine sightings.
     assert caption_confirms_person(None) is True
+
+
+async def test_reassignment_does_not_leave_an_empty_ghost_identity(client) -> None:
+    """Correcting an auto-match must not strand an empty "Unknown person".
+
+    Observed in production: naming a detection moved it to a new identity and
+    left the original sitting in the roster with no photo and no sightings.
+    """
+    event_id = await _make_event(camera_id="cam-ghost")
+    embedder = LocalImageEmbedder()
+    vector = await embedder.embed_image(b"ghost-subject-bytes")
+    async with SessionLocal() as session:
+        event = await session.get(Event, event_id)
+        match = await person_service.record_sighting(session, event, vector)
+        auto_id = match.person.id
+        await session.commit()
+
+    response = await client.post(f"/api/v1/events/{event_id}/person", json={"name": "Named Later"})
+    assert response.status_code == 200
+    new_id = response.json()["id"]
+    assert new_id != auto_id
+
+    listing = await client.get("/api/v1/persons")
+    ids = {person["id"] for person in listing.json()["persons"]}
+    assert auto_id not in ids, "emptied auto-created identity should be removed"
+    assert new_id in ids
