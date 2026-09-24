@@ -142,7 +142,7 @@ async def provider_detail(provider_id: str):
 
 @router.get("/cameras")
 async def cameras(session: AsyncSession = Depends(get_db)):
-    discovered = await discover_all_cameras()
+    discovered = await discover_all_cameras(settings.camera_discovery_cache_seconds)
     await camera_service.sync_cameras(session, discovered)
     rows = await camera_service.list_cameras(session)
     return [

@@ -1,4 +1,4 @@
-import httpx
+﻿import httpx
 import pytest
 
 from app import DahuaClient, EdgeSettings, create_app
@@ -218,3 +218,76 @@ async def test_snapshot_gives_up_after_persistent_nvr_failures():
     async with build_client(settings, httpx.MockTransport(handler)) as client:
         r = await client.get("/channels/1/snapshot", headers={"Authorization": "Bearer secret"})
         assert r.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_transient_nvr_blip_does_not_blank_a_recently_live_channel():
+    """Regression: a single failed reachability probe used to be cached for
+    the full probe TTL and forced *every* channel to report offline, so the
+    web app hid cameras that were demonstrably working seconds earlier."""
+    state = {"serial_ok": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n") if state["serial_ok"] else httpx.Response(503)
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            channel = request.url.params.get("channel")
+            return httpx.Response(200, content=b"JPEGDATA") if channel == "1" else httpx.Response(503)
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door,2:Disconnected",
+        probe_ttl_seconds=0.0,
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        headers = {"Authorization": "Bearer secret"}
+        first = (await client.get("/channels", headers=headers)).json()["channels"]
+        assert {c["channel"]: c["online"] for c in first} == {1: True, 2: False}
+
+        state["serial_ok"] = False
+        during_blip = (await client.get("/channels", headers=headers)).json()["channels"]
+        # Channel 1 produced a real snapshot moments ago, so it stays online;
+        # channel 2 has no such evidence and stays offline.
+        assert {c["channel"]: c["online"] for c in during_blip} == {1: True, 2: False}
+
+
+@pytest.mark.asyncio
+async def test_channel_goes_offline_once_its_liveness_evidence_expires():
+    """The blip tolerance above must not become "online forever": once the
+    cached snapshot result ages out and the NVR is still unreachable, the
+    channel is reported offline."""
+    state = {"serial_ok": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n") if state["serial_ok"] else httpx.Response(503)
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            return httpx.Response(200, content=b"JPEGDATA")
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door",
+        probe_ttl_seconds=0.0,
+        channel_liveness_ttl_seconds=0.0,
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        headers = {"Authorization": "Bearer secret"}
+        assert (await client.get("/channels", headers=headers)).json()["channels"][0]["online"] is True
+        state["serial_ok"] = False
+        assert (await client.get("/channels", headers=headers)).json()["channels"][0]["online"] is False
+
+
+@pytest.mark.asyncio
+async def test_failed_probe_is_retried_sooner_than_a_successful_one():
+    settings = EdgeSettings(probe_ttl_seconds=30.0, probe_failure_ttl_seconds=5.0)
+    client = DahuaClient(settings)
+    assert client._ttl_for(True) == 30.0
+    assert client._ttl_for(False) == 5.0

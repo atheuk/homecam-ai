@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     foundry_embedding_model_version: str = "2023-04-15"
     foundry_timeout_seconds: float = Field(default=20.0, gt=0)
     person_recognition_enabled: bool = True
+    # How long a camera-discovery sweep is reused by frequently-polled
+    # callers (``GET /cameras`` and the ingestion loop). Discovery reaches
+    # through to the Dahua NVR, which only sustains ~1-2 concurrent CGI
+    # sessions, so re-discovering on every browser poll exhausted it and
+    # made it report *all* channels offline for as long as the edge
+    # connector cached that failure.
+    camera_discovery_cache_seconds: float = Field(default=10.0, ge=0.0)
     # Cosine similarity above which a new sighting is considered the *same*
     # person as an existing identity.
     #

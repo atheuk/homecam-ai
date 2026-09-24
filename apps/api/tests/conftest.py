@@ -41,7 +41,9 @@ def event_loop():
 @pytest.fixture(autouse=True)
 def _reset_provider_state():
     from app.providers.mock import mock_eufy_provider, mock_provider
+    from app.services.provider_registry import reset_discovery_cache
 
+    reset_discovery_cache()
     snapshots = {
         mock_provider.id: copy.deepcopy(mock_provider._cameras),
         mock_eufy_provider.id: copy.deepcopy(mock_eufy_provider._cameras),
@@ -51,6 +53,7 @@ def _reset_provider_state():
     mock_provider._unavailable = False
     mock_eufy_provider._cameras = copy.deepcopy(snapshots[mock_eufy_provider.id])
     mock_eufy_provider._unavailable = False
+    reset_discovery_cache()
 
 
 @pytest.fixture(autouse=True)

@@ -56,7 +56,7 @@ async def poll_once(session_factory=SessionLocal) -> int:
     """
     detector = get_detector()
     created = 0
-    for camera in await discover_all_cameras():
+    for camera in await discover_all_cameras(settings.camera_discovery_cache_seconds):
         camera_id = camera.get("id")
         if not camera_id or not camera.get("online"):
             continue

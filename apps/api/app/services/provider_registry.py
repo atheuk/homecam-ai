@@ -16,6 +16,7 @@ config (e.g. it fails to decrypt) is caught and dropped so it degrades to
 from __future__ import annotations
 
 import logging
+import time
 
 from sqlalchemy import select
 
@@ -30,6 +31,10 @@ from ..providers.mock import MockCameraProvider
 from . import provider_configs as provider_config_service
 
 logger = logging.getLogger(__name__)
+
+# (cameras, monotonic timestamp) of the last discovery sweep; see
+# ``discover_all_cameras``.
+_discovery_cache: tuple[list[dict], float] | None = None
 
 
 async def _enabled_db_config(provider_type: str) -> ProviderConfig | None:
@@ -127,17 +132,39 @@ async def find_provider_for_camera(camera_id: str) -> CameraProvider | None:
     return None
 
 
-async def discover_all_cameras() -> list[dict]:
+async def discover_all_cameras(cache_ttl_seconds: float = 0.0) -> list[dict]:
     """Return cameras from every healthy provider. A single failing
     provider is logged and skipped rather than raised, so the endpoint
-    keeps serving cameras from the remaining providers."""
+    keeps serving cameras from the remaining providers.
+
+    ``cache_ttl_seconds`` lets frequently-polled callers (the ``/cameras``
+    endpoint, which the dashboard refreshes continuously) reuse a recent
+    result. Discovery reaches all the way through to the Dahua NVR, whose
+    embedded HTTP server only sustains ~1-2 concurrent CGI sessions, so
+    re-discovering on literally every browser poll is what pushed it into
+    refusing sessions in the first place. Defaults to no caching so tests
+    and one-off callers always see live state.
+    """
+    global _discovery_cache
+    if cache_ttl_seconds > 0:
+        cached = _discovery_cache
+        if cached is not None and (time.monotonic() - cached[1]) < cache_ttl_seconds:
+            return cached[0]
     cameras: list[dict] = []
     for provider in await all_providers():
         try:
             cameras.extend(await provider.discover_devices())
         except ProviderUnavailableError as exc:
             logger.warning("provider %s unavailable: %s", provider.id, exc)
+    _discovery_cache = (cameras, time.monotonic())
     return cameras
+
+
+def reset_discovery_cache() -> None:
+    """Drop the cached discovery result (used by tests and after a provider
+    configuration change, where stale state would be misleading)."""
+    global _discovery_cache
+    _discovery_cache = None
 
 
 async def get_camera_or_raise(camera_id: str) -> dict:

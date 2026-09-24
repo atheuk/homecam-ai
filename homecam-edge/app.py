@@ -37,6 +37,9 @@ class EdgeSettings:
     timeout_seconds: float = 5.0
     channel_liveness_ttl_seconds: float = 60.0
     probe_ttl_seconds: float = 30.0
+    # A failed reachability probe is cached far more briefly than a
+    # successful one; see apps/edge/app.py for the full rationale.
+    probe_failure_ttl_seconds: float = 5.0
 
     @property
     def dahua_configured(self) -> bool:
@@ -81,6 +84,7 @@ def settings_from_env() -> EdgeSettings:
         timeout_seconds=float(os.environ.get("DAHUA_TIMEOUT_SECONDS", "5")),
         channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
         probe_ttl_seconds=float(os.environ.get("DAHUA_PROBE_TTL_SECONDS", "30")),
+        probe_failure_ttl_seconds=float(os.environ.get("DAHUA_PROBE_FAILURE_TTL_SECONDS", "5")),
     )
 
 
@@ -109,12 +113,15 @@ class DahuaClient:
             ) as client:
                 return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
 
+    def _ttl_for(self, reachable: bool) -> float:
+        return self.settings.probe_ttl_seconds if reachable else self.settings.probe_failure_ttl_seconds
+
     async def probe(self) -> tuple[bool, str]:
         if not self.settings.dahua_configured:
             return False, "DAHUA_HOST/DAHUA_USERNAME/DAHUA_PASSWORD not configured on the edge connector"
         now = time.monotonic()
         cached = self._probe_cache
-        if cached is not None and (now - cached[2]) < self.settings.probe_ttl_seconds:
+        if cached is not None and (now - cached[2]) < self._ttl_for(cached[0]):
             return cached[0], cached[1]
         try:
             response = await self._get("/cgi-bin/magicBox.cgi", {"action": "getSerialNo"})
@@ -162,15 +169,13 @@ class ChannelLivenessTracker:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def is_online(self, channel: int) -> bool:
-        now = time.monotonic()
-        cached = self._cache.get(channel)
-        if cached is not None and (now - cached[1]) < self.ttl_seconds:
-            return cached[0]
+        cached = self.cached_online(channel)
+        if cached is not None:
+            return cached
         async with self._lock:
-            cached = self._cache.get(channel)
-            now = time.monotonic()
-            if cached is not None and (now - cached[1]) < self.ttl_seconds:
-                return cached[0]
+            cached = self.cached_online(channel)
+            if cached is not None:
+                return cached
             try:
                 await self.client.snapshot(channel)
                 online = True
@@ -178,6 +183,13 @@ class ChannelLivenessTracker:
                 online = False
             self._cache[channel] = (online, time.monotonic())
             return online
+
+    def cached_online(self, channel: int) -> bool | None:
+        """Last known liveness, or ``None`` when unknown/expired. Never calls out."""
+        cached = self._cache.get(channel)
+        if cached is None or (time.monotonic() - cached[1]) >= self.ttl_seconds:
+            return None
+        return cached[0]
 
 
 def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -208,7 +220,13 @@ def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseT
         dahua_reachable, _ = await client.probe()
         statuses = []
         for c in settings.channels:
-            statuses.append(dahua_reachable and await liveness.is_online(c.channel))
+            if dahua_reachable:
+                statuses.append(await liveness.is_online(c.channel))
+            else:
+                # A failed reachability probe is not proof a camera went
+                # away; keep trusting a recent successful snapshot rather
+                # than blanking every camera out of the web app.
+                statuses.append(liveness.cached_online(c.channel) is True)
         return {
             "channels": [
                 {"channel": c.channel, "name": c.name, "type": c.type, "online": online}

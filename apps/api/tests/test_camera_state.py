@@ -45,3 +45,38 @@ async def test_invalid_status_value_is_422(client):
 async def test_status_for_unknown_camera_404(client):
     r = await client.post("/api/v1/mock/cameras/does-not-exist/status", json={"status": "offline"})
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_discovery_cache_reuses_a_recent_sweep():
+    """Regression: /cameras re-discovered on every request, and discovery
+    reaches through to the Dahua NVR, which only sustains ~1-2 concurrent
+    CGI sessions. Continuous dashboard polling exhausted it, which made the
+    edge connector report every channel offline and blanked working cameras
+    out of the UI."""
+    from app.services import provider_registry
+
+    provider_registry.reset_discovery_cache()
+    first = await provider_registry.discover_all_cameras(cache_ttl_seconds=60)
+    assert first, "expected the mock providers to discover cameras"
+
+    calls = {"n": 0}
+    original = provider_registry.all_providers
+
+    async def counting_all_providers():
+        calls["n"] += 1
+        return await original()
+
+    provider_registry.all_providers = counting_all_providers
+    try:
+        cached = await provider_registry.discover_all_cameras(cache_ttl_seconds=60)
+        assert cached == first
+        assert calls["n"] == 0, "cached sweep must not touch any provider"
+
+        # A zero TTL (the default everywhere except the polled callers) must
+        # always go back to the providers.
+        await provider_registry.discover_all_cameras()
+        assert calls["n"] == 1
+    finally:
+        provider_registry.all_providers = original
+        provider_registry.reset_discovery_cache()
