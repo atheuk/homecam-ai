@@ -62,6 +62,12 @@ class EdgeSettings:
     # RTSP/CGI sessions, so per-channel probing must be infrequent and
     # serial, never on every /channels request.
     channel_liveness_ttl_seconds: float = 60.0
+    # How long the whole-NVR reachability probe (getSerialNo) is cached.
+    # /channels is polled frequently (webapp refresh, AI-ingestion loop),
+    # and until this was added every single poll issued its own CGI call
+    # on top of per-channel snapshot probing, which visibly worsened this
+    # NVR's CGI session exhaustion.
+    probe_ttl_seconds: float = 30.0
 
     @property
     def dahua_configured(self) -> bool:
@@ -105,6 +111,7 @@ def settings_from_env() -> EdgeSettings:
         stream_base_url=os.environ.get("STREAM_BASE_URL", "http://127.0.0.1:8888").rstrip("/"),
         timeout_seconds=float(os.environ.get("DAHUA_TIMEOUT_SECONDS", "5")),
         channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
+        probe_ttl_seconds=float(os.environ.get("DAHUA_PROBE_TTL_SECONDS", "30")),
     )
 
 
@@ -127,6 +134,7 @@ class DahuaClient:
     # otherwise make the NVR reject *all* of them, including ones for
     # channels that are genuinely online.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _probe_cache: tuple[bool, str, float] | None = field(default=None, init=False, repr=False)
 
     def _auth(self) -> httpx.DigestAuth:
         assert self.settings.dahua_username and self.settings.dahua_password
@@ -142,15 +150,24 @@ class DahuaClient:
     async def probe(self) -> tuple[bool, str]:
         if not self.settings.dahua_configured:
             return False, "DAHUA_HOST/DAHUA_USERNAME/DAHUA_PASSWORD not configured on the edge connector"
+        now = time.monotonic()
+        cached = self._probe_cache
+        if cached is not None and (now - cached[2]) < self.settings.probe_ttl_seconds:
+            return cached[0], cached[1]
         try:
             response = await self._get("/cgi-bin/magicBox.cgi", {"action": "getSerialNo"})
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            return False, f"cannot reach Dahua NVR on the LAN: {exc}"
+            result = (False, f"cannot reach Dahua NVR on the LAN: {exc}")
+            self._probe_cache = (result[0], result[1], time.monotonic())
+            return result
         if response.status_code in (401, 403):
-            return False, "Dahua NVR rejected the configured credentials"
-        if response.status_code >= 400:
-            return False, f"Dahua NVR returned HTTP {response.status_code}"
-        return True, "reachable"
+            result = (False, "Dahua NVR rejected the configured credentials")
+        elif response.status_code >= 400:
+            result = (False, f"Dahua NVR returned HTTP {response.status_code}")
+        else:
+            result = (True, "reachable")
+        self._probe_cache = (result[0], result[1], time.monotonic())
+        return result
 
     async def snapshot(self, channel: int) -> bytes:
         # Cheap Dahua NVRs' embedded HTTP servers frequently reject a
