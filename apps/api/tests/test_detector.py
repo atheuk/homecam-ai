@@ -62,9 +62,12 @@ def test_onnx_backend_without_model_falls_back_to_mock():
     assert build_detector("onnx", model_path="") is mock_detector()
 
 
-def test_opencv_backend_without_cv2_falls_back_to_mock():
-    """No prebuilt cv2 wheel on this host (e.g. Windows ARM64 dev): the
-    backend must degrade exactly like the onnx backend does, never crash."""
+def test_opencv_backend_without_cv2_falls_back_to_mock(monkeypatch):
+    """No prebuilt cv2 wheel on some hosts (e.g. Windows ARM64 dev): the
+    backend must degrade exactly like the onnx backend does, never crash.
+    Forces the absence rather than depending on the test environment,
+    since CI (unlike this host) does have opencv installed."""
+    monkeypatch.setitem(sys.modules, "cv2", None)
     assert build_detector("opencv") is mock_detector()
 
 
