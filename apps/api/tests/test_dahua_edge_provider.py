@@ -1,7 +1,8 @@
-import httpx
+﻿import httpx
 import pytest
 
 from app.providers.dahua import DahuaEdgeProvider, DahuaEdgeSettings
+from app.providers.dahua import edge_provider
 
 
 def dahua_edge_transport(dahua_reachable: bool = True, online: bool = True) -> httpx.MockTransport:
@@ -132,3 +133,61 @@ async def test_dahua_edge_provider_uses_dedicated_tailscale_proxy(monkeypatch):
     await provider.discover_devices()
 
     assert captured["proxy"] == "http://127.0.0.1:1055"
+
+
+def _flapping_transport(state: dict) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/channels":
+            return httpx.Response(
+                200,
+                json={
+                    "channels": [
+                        {"channel": 1, "name": "Front Door", "type": "camera", "online": state["online"]},
+                        {"channel": 4, "name": "Disconnected", "type": "camera", "online": False},
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_a_briefly_flapping_channel_keeps_its_online_status():
+    """Regression measured against the deployed system: the NVR behind the
+    edge connector refuses a CGI session whenever it is busy, so channels
+    that were streaming fine flipped to offline and back, hiding working
+    cameras from the web app."""
+    state = {"online": True}
+    provider = DahuaEdgeProvider(
+        DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),
+        transport=_flapping_transport(state),
+    )
+
+    async def status() -> dict[str, bool]:
+        return {c["id"]: c["online"] for c in await provider.discover_devices()}
+
+    assert await status() == {"dahua-channel-1": True, "dahua-channel-4": False}
+
+    state["online"] = False
+    assert await status() == {"dahua-channel-1": True, "dahua-channel-4": False}, (
+        "a channel confirmed online moments ago must survive a blip, and a channel "
+        "never seen online must not be invented"
+    )
+
+    state["online"] = True
+    assert await status() == {"dahua-channel-1": True, "dahua-channel-4": False}
+
+
+@pytest.mark.asyncio
+async def test_a_channel_that_stays_offline_past_the_grace_window_goes_offline(monkeypatch):
+    state = {"online": True}
+    provider = DahuaEdgeProvider(
+        DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),
+        transport=_flapping_transport(state),
+    )
+    assert (await provider.discover_devices())[0]["online"] is True
+
+    state["online"] = False
+    monkeypatch.setattr(edge_provider, "EDGE_OFFLINE_GRACE_SECONDS", 0.0)
+    assert (await provider.discover_devices())[0]["online"] is False

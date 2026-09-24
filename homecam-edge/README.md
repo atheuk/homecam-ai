@@ -37,3 +37,16 @@ evidence expires without a successful probe it does drop to offline.
 Failed reachability probes are re-checked after
 `DAHUA_PROBE_FAILURE_TTL_SECONDS` (default 5) rather than being cached for
 the full `DAHUA_PROBE_TTL_SECONDS` (default 30).
+
+The same reasoning applies to the per-channel snapshot probe, which is the
+dominant cause of cameras flickering offline: a *successful* snapshot
+proves the camera is there, but a *failed* one usually just means the NVR
+was busy. A channel that is currently known online therefore needs
+`CHANNEL_FAILURE_THRESHOLD` (default 3) consecutive failed probes, retried
+`CHANNEL_FAILURE_RETRY_SECONDS` (default 5) apart, before it is reported
+offline. A channel that has never been seen online costs exactly one probe
+per TTL, so genuinely disconnected channels stay cheap and are reported
+offline immediately.
+
+If cameras still flicker on your NVR, raise `CHANNEL_FAILURE_THRESHOLD` or
+`CHANNEL_FAILURE_RETRY_SECONDS`.

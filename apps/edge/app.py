@@ -74,6 +74,11 @@ class EdgeSettings:
     # every channel offline for 30s at a time, which blanked working cameras
     # out of the web app.
     probe_failure_ttl_seconds: float = 5.0
+    # A channel that is currently online must fail this many consecutive
+    # snapshot probes (re-tried this many seconds apart) before it is
+    # reported offline; see ChannelLivenessTracker.
+    channel_failure_threshold: int = 3
+    channel_failure_retry_seconds: float = 5.0
 
     @property
     def dahua_configured(self) -> bool:
@@ -119,6 +124,8 @@ def settings_from_env() -> EdgeSettings:
         channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
         probe_ttl_seconds=float(os.environ.get("DAHUA_PROBE_TTL_SECONDS", "30")),
         probe_failure_ttl_seconds=float(os.environ.get("DAHUA_PROBE_FAILURE_TTL_SECONDS", "5")),
+        channel_failure_threshold=int(os.environ.get("CHANNEL_FAILURE_THRESHOLD", "3")),
+        channel_failure_retry_seconds=float(os.environ.get("CHANNEL_FAILURE_RETRY_SECONDS", "5")),
     )
 
 
@@ -212,11 +219,27 @@ class ChannelLivenessTracker:
     snapshot, there is nothing to show for it and it should not be reported
     as online. Probes are cached and never run concurrently across channels
     to respect this NVR's ~1-2 concurrent session limit.
+
+    Failure is treated as weaker evidence than success. This NVR refuses a
+    CGI session whenever it is busy, so a *single* failed snapshot on a
+    channel that was live moments ago is far more likely to be contention
+    than a camera disappearing. Measured against the deployed system: the
+    edge connector kept reporting the NVR reachable while every channel
+    flipped to offline and back, which hid working cameras from the web app
+    for a minute at a time. A channel that is currently known-online
+    therefore needs ``failure_threshold`` consecutive failures before it is
+    reported offline, re-probing after ``failure_retry_seconds`` in the
+    meantime. Channels that are already offline (or have never been seen)
+    are unaffected, so a genuinely disconnected channel still costs exactly
+    one probe per TTL.
     """
 
     client: DahuaClient
     ttl_seconds: float = 60.0
-    _cache: dict[int, tuple[bool, float]] = field(default_factory=dict)
+    failure_threshold: int = 3
+    failure_retry_seconds: float = 5.0
+    # channel -> (online, expires_at, consecutive_failures)
+    _cache: dict[int, tuple[bool, float, int]] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def is_online(self, channel: int) -> bool:
@@ -231,17 +254,23 @@ class ChannelLivenessTracker:
                 return cached
             try:
                 await self.client.snapshot(channel)
-                online = True
+                succeeded = True
             except Exception:  # noqa: BLE001 - any failure means "not live"
-                online = False
-            self._cache[channel] = (online, time.monotonic())
+                succeeded = False
+            previous = self._cache.get(channel)
+            failures = 0 if succeeded else (previous[2] if previous else 0) + 1
+            was_online = previous is not None and previous[0]
+            tolerating = not succeeded and was_online and failures < self.failure_threshold
+            online = succeeded or tolerating
+            ttl = self.failure_retry_seconds if tolerating else self.ttl_seconds
+            self._cache[channel] = (online, time.monotonic() + ttl, failures)
             return online
 
     def cached_online(self, channel: int) -> bool | None:
         """Last known liveness for ``channel``, or ``None`` if it has never
         been probed or the cached result has expired. Never issues a call."""
         cached = self._cache.get(channel)
-        if cached is None or (time.monotonic() - cached[1]) >= self.ttl_seconds:
+        if cached is None or time.monotonic() >= cached[1]:
             return None
         return cached[0]
 
@@ -249,7 +278,12 @@ class ChannelLivenessTracker:
 def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     client = DahuaClient(settings, transport=transport)
-    liveness = ChannelLivenessTracker(client=client, ttl_seconds=settings.channel_liveness_ttl_seconds)
+    liveness = ChannelLivenessTracker(
+        client=client,
+        ttl_seconds=settings.channel_liveness_ttl_seconds,
+        failure_threshold=settings.channel_failure_threshold,
+        failure_retry_seconds=settings.channel_failure_retry_seconds,
+    )
     app = FastAPI(title="HomeCam edge connector", version="1.0.0")
 
     def require_token(authorization: str | None) -> None:

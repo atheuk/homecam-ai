@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -51,6 +52,10 @@ SUPPORTED = CapabilityStatus.SUPPORTED.value
 UNSUPPORTED = CapabilityStatus.UNSUPPORTED.value
 UNKNOWN = CapabilityStatus.UNKNOWN.value
 UNAVAILABLE = CapabilityStatus.UNAVAILABLE.value
+
+# How long a channel the edge connector previously reported online keeps
+# that status while the connector reports it offline. See _refresh_channels.
+EDGE_OFFLINE_GRACE_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,9 @@ class DahuaEdgeProvider:
         self.settings = settings
         self._transport = transport
         self._channels: dict[str, dict] = {}
+        # camera_id -> monotonic timestamp of the last time the edge
+        # connector reported this channel online. See _refresh_channels.
+        self._last_online_at: dict[str, float] = {}
 
     async def get_provider_info(self) -> ProviderInfo:
         return {"id": self.id, "name": "Dahua NVR (edge connector)", "manufacturer": "Dahua"}
@@ -178,11 +186,32 @@ class DahuaEdgeProvider:
         for raw in raw_channels:
             channel_number = int(raw["channel"])
             camera_id = f"dahua-channel-{channel_number}"
+            reported_online = bool(raw.get("online", True))
+            # The NVR behind the edge connector only sustains ~1-2 concurrent
+            # CGI sessions and refuses one whenever it is busy, which the
+            # connector cannot always distinguish from a camera going away.
+            # Measured against the deployed system, channels that were
+            # streaming fine flipped to offline and back repeatedly, which
+            # hid working cameras from the web app. A channel the connector
+            # confirmed online within the grace window is therefore still
+            # reported online; once the window lapses without a single
+            # confirmation it does go offline. Channels that have never been
+            # seen online (no camera attached) are unaffected.
+            #
+            # Newer edge connectors apply their own hysteresis, so in
+            # practice this only matters until the Home Assistant add-on is
+            # updated -- but it must stay correct either way.
+            if reported_online:
+                self._last_online_at[camera_id] = time.monotonic()
+                online = True
+            else:
+                last_seen = self._last_online_at.get(camera_id)
+                online = last_seen is not None and (time.monotonic() - last_seen) < EDGE_OFFLINE_GRACE_SECONDS
             channels[camera_id] = {
                 "channel": channel_number,
                 "name": str(raw.get("name") or f"Dahua channel {channel_number}"),
                 "type": str(raw.get("type") or "camera"),
-                "online": bool(raw.get("online", True)),
+                "online": online,
             }
         self._channels = channels
 

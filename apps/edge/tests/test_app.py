@@ -291,3 +291,75 @@ async def test_failed_probe_is_retried_sooner_than_a_successful_one():
     client = DahuaClient(settings)
     assert client._ttl_for(True) == 30.0
     assert client._ttl_for(False) == 5.0
+
+
+@pytest.mark.asyncio
+async def test_a_single_busy_nvr_blip_does_not_take_a_live_channel_offline():
+    """Regression measured against the deployed system: the edge connector
+    reported the NVR reachable while every channel flipped offline, because
+    one contended snapshot pinned a working camera offline for the whole
+    liveness TTL. A known-online channel now needs consecutive failures."""
+    state = {"snapshot_ok": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n")
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            return httpx.Response(200, content=b"JPEGDATA") if state["snapshot_ok"] else httpx.Response(503)
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door",
+        probe_ttl_seconds=0.0,
+        channel_liveness_ttl_seconds=0.0,
+        channel_failure_retry_seconds=0.0,
+        channel_failure_threshold=3,
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        headers = {"Authorization": "Bearer secret"}
+
+        async def online() -> bool:
+            body = (await client.get("/channels", headers=headers)).json()["channels"]
+            return body[0]["online"]
+
+        assert await online() is True
+        state["snapshot_ok"] = False
+        assert await online() is True, "first failure is treated as NVR contention"
+        assert await online() is True, "second failure is still tolerated"
+        assert await online() is False, "third consecutive failure is believed"
+
+        # ...and it recovers as soon as the camera answers again.
+        state["snapshot_ok"] = True
+        assert await online() is True
+
+
+@pytest.mark.asyncio
+async def test_a_channel_that_was_never_live_is_reported_offline_immediately():
+    """Hysteresis must not delay the truth for a genuinely disconnected
+    channel, nor cost it extra probes against a session-limited NVR."""
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n")
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            attempts["n"] += 1
+            return httpx.Response(503)
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="4:Disconnected",
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        headers = {"Authorization": "Bearer secret"}
+        body = (await client.get("/channels", headers=headers)).json()["channels"]
+        assert body[0]["online"] is False
+        assert attempts["n"] == 3, "one probe (with its own internal retries), not one per threshold step"
