@@ -87,7 +87,7 @@ Path("/tmp/mediamtx.yml").write_text(
     # (rtspAddress: :8554, rtmpAddress: :1935 by default) are unused here
     # and can collide with unrelated add-ons/services already bound to
     # those host ports.
-    "hls: yes\nhlsAddress: :8888\nwebrtc: yes\nwebrtcAddress: :8189\nrtsp: no\nrtmp: no\npaths:\n"
+    "logLevel: debug\nhls: yes\nhlsAddress: :8888\nwebrtc: yes\nwebrtcAddress: :8189\nrtsp: no\nrtmp: no\npaths:\n"
     + "\n".join(paths),
     encoding="utf-8",
 )
