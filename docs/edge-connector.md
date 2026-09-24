@@ -130,23 +130,29 @@ Bicep parameters or committed to source control.
 
 ### Connecting Azure to your tailnet
 
-The Azure Container Apps environment itself also needs a path onto your
-tailnet to reach the Pi's Tailscale address. The two common options are:
+The production API Container App includes a Tailscale userspace-networking
+sidecar. It exposes an HTTP CONNECT proxy only on the shared container-app
+localhost interface (`127.0.0.1:1055`), so it needs neither `/dev/net/tun`
+nor privileged `NET_ADMIN` access. The API applies that proxy only to Dahua
+edge-provider requests; database, Redis, telemetry, and other outbound
+traffic keep their existing paths.
 
-1. **Tailscale subnet router / Azure Container App sidecar**: run a
-   Tailscale client as a sidecar (or a small container instance) inside
-   the same Container Apps environment, advertising itself as an exit
-   node/subnet router into your tailnet, and route the API's outbound
-   calls to the edge connector through it.
-2. **Tailscale Funnel/Serve on the Pi** (simpler, slightly less private):
-   expose the edge connector through Tailscale Funnel so it gets a public
-   HTTPS hostname that still requires your `HOME_CAM_EDGE_TOKEN` bearer
-   token to do anything beyond `/healthz`. This avoids needing tailnet
-   connectivity from Azure at the cost of the endpoint being technically
-   internet-reachable (still credential-gated).
+The sidecar authenticates as the tagged node `tag:homecam-azure`. Its auth
+key is stored in Azure Key Vault as `tailscale-auth-key` and referenced by
+the Container App secret named `tailscale-auth-key`; the value must never
+be placed in Bicep parameters, source control, or logs.
 
-Pick whichever matches your risk tolerance; both keep the Dahua NVR
-itself off the public internet, which is the actual goal here.
+The edge service advertised as `svc:homecam-edge` is reached through its
+stable service MagicDNS URL:
+
+```text
+https://homecam-edge.<tailnet-name>.ts.net:8443
+```
+
+Use that URL as `edge_base_url` in the admin API/UI. Tailscale ACLs should
+permit `tag:homecam-azure` to reach only `svc:homecam-edge` on TCP 8443.
+No Tailscale Funnel, public port forwarding, or public edge ingress is
+required.
 
 ## 5. Secrets guidance (Key Vault / Container Apps)
 

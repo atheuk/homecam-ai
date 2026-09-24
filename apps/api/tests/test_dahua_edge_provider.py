@@ -105,3 +105,30 @@ async def test_dahua_edge_provider_rejects_bad_token_as_offline():
 
     health = await provider.get_health()
     assert health["status"] == "OFFLINE"
+
+
+@pytest.mark.asyncio
+async def test_dahua_edge_provider_uses_dedicated_tailscale_proxy(monkeypatch):
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, headers):
+            assert headers["Authorization"]
+            return httpx.Response(200, json={"channels": []})
+
+    monkeypatch.setenv("TAILSCALE_HTTP_PROXY", "http://127.0.0.1:1055")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    provider = DahuaEdgeProvider(DahuaEdgeSettings(base_url="https://homecam-edge.example.ts.net", token="token"))
+    await provider.discover_devices()
+
+    assert captured["proxy"] == "http://127.0.0.1:1055"
