@@ -1,4 +1,4 @@
-"""Shared pytest fixtures.
+﻿"""Shared pytest fixtures.
 
 Two isolation concerns matter for these tests:
 
@@ -40,10 +40,12 @@ def event_loop():
 
 @pytest.fixture(autouse=True)
 def _reset_provider_state():
+    from app.providers.dahua.edge_provider import reset_liveness_evidence
     from app.providers.mock import mock_eufy_provider, mock_provider
     from app.services.provider_registry import reset_discovery_cache
 
     reset_discovery_cache()
+    reset_liveness_evidence()
     snapshots = {
         mock_provider.id: copy.deepcopy(mock_provider._cameras),
         mock_eufy_provider.id: copy.deepcopy(mock_eufy_provider._cameras),
@@ -54,6 +56,7 @@ def _reset_provider_state():
     mock_eufy_provider._cameras = copy.deepcopy(snapshots[mock_eufy_provider.id])
     mock_eufy_provider._unavailable = False
     reset_discovery_cache()
+    reset_liveness_evidence()
 
 
 @pytest.fixture(autouse=True)
@@ -86,4 +89,5 @@ def pytest_sessionfinish(session, exitstatus):
     except OSError:
         pass
     shutil.rmtree(_media_root, ignore_errors=True)
+
 

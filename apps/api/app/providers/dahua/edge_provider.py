@@ -1,4 +1,4 @@
-"""Dahua "edge connector" mode (Home Assistant / Raspberry Pi bridge).
+﻿"""Dahua "edge connector" mode (Home Assistant / Raspberry Pi bridge).
 
 Some users cannot (and should not) forward the Dahua NVR's HTTP/RTSP ports
 to the public internet. Instead, they run a small edge connector process on
@@ -61,6 +61,23 @@ EDGE_OFFLINE_GRACE_SECONDS = 180.0
 # asking it for media. See _verify_one_offline_channel.
 VERIFY_INTERVAL_SECONDS = 120.0
 
+# Evidence about the cameras, deliberately kept at module level rather than
+# on the instance: a DahuaEdgeProvider is rebuilt from stored config on
+# every request, so per-instance state would be discarded each time -- the
+# grace window would never hold and the verification rate limit would never
+# apply, re-creating the NVR contention this is meant to avoid.
+#
+# camera_id -> monotonic timestamp this channel was last confirmed live.
+_ONLINE_EVIDENCE: dict[str, float] = {}
+# camera_id -> monotonic timestamp of the last verification probe.
+_VERIFY_ATTEMPTS: dict[str, float] = {}
+
+
+def reset_liveness_evidence() -> None:
+    """Forget what we know about which channels are live (tests)."""
+    _ONLINE_EVIDENCE.clear()
+    _VERIFY_ATTEMPTS.clear()
+
 
 @dataclass(frozen=True)
 class DahuaEdgeSettings:
@@ -103,11 +120,6 @@ class DahuaEdgeProvider:
         self.settings = settings
         self._transport = transport
         self._channels: dict[str, dict] = {}
-        # camera_id -> monotonic timestamp of the last time the edge
-        # connector reported this channel online. See _refresh_channels.
-        self._last_online_at: dict[str, float] = {}
-        # camera_id -> monotonic timestamp of the last verification probe.
-        self._last_verified_at: dict[str, float] = {}
 
     async def get_provider_info(self) -> ProviderInfo:
         return {"id": self.id, "name": "Dahua NVR (edge connector)", "manufacturer": "Dahua"}
@@ -208,10 +220,10 @@ class DahuaEdgeProvider:
             # practice this only matters until the Home Assistant add-on is
             # updated -- but it must stay correct either way.
             if reported_online:
-                self._last_online_at[camera_id] = time.monotonic()
+                _ONLINE_EVIDENCE[camera_id] = time.monotonic()
                 online = True
             else:
-                last_seen = self._last_online_at.get(camera_id)
+                last_seen = _ONLINE_EVIDENCE.get(camera_id)
                 online = last_seen is not None and (time.monotonic() - last_seen) < EDGE_OFFLINE_GRACE_SECONDS
             channels[camera_id] = {
                 "channel": channel_number,
@@ -240,12 +252,12 @@ class DahuaEdgeProvider:
         candidates = [
             camera_id
             for camera_id, info in self._channels.items()
-            if not info["online"] and now - self._last_verified_at.get(camera_id, 0.0) >= VERIFY_INTERVAL_SECONDS
+            if not info["online"] and now - _VERIFY_ATTEMPTS.get(camera_id, 0.0) >= VERIFY_INTERVAL_SECONDS
         ]
         if not candidates:
             return
-        camera_id = min(candidates, key=lambda c: self._last_verified_at.get(c, 0.0))
-        self._last_verified_at[camera_id] = now
+        camera_id = min(candidates, key=lambda c: _VERIFY_ATTEMPTS.get(c, 0.0))
+        _VERIFY_ATTEMPTS[camera_id] = now
         channel = self._channels[camera_id]["channel"]
         try:
             response = await self._request("verification snapshot", f"/channels/{channel}/snapshot")
@@ -274,7 +286,7 @@ class DahuaEdgeProvider:
         by _refresh_channels lets the camera list converge on what actually
         works rather than on what the NVR had spare capacity to confirm.
         """
-        self._last_online_at[camera_id] = time.monotonic()
+        _ONLINE_EVIDENCE[camera_id] = time.monotonic()
         info = self._channels.get(camera_id)
         if info is not None:
             info["online"] = True
@@ -391,3 +403,4 @@ class DahuaEdgeProvider:
             "camera_count": camera_count,
             "online_camera_count": online_count,
         }
+

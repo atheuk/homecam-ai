@@ -255,3 +255,23 @@ async def test_a_wrongly_flagged_camera_is_rediscovered_without_hammering_the_nv
     # own) and is not re-probed again until the interval lapses.
     assert calls.count("/channels/1/snapshot") == 1, calls
     assert calls.count("/channels/4/snapshot") <= 2, calls
+
+
+@pytest.mark.asyncio
+async def test_liveness_evidence_survives_the_provider_being_rebuilt():
+    """The registry constructs a fresh DahuaEdgeProvider from stored config
+    on every request, so per-instance evidence would be discarded each time
+    and the grace window would never actually hold."""
+    calls: list = []
+
+    def build() -> DahuaEdgeProvider:
+        return DahuaEdgeProvider(
+            DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),
+            transport=_verify_transport(calls),
+        )
+
+    await build().discover_devices()
+    cameras = {c["id"]: c["online"] for c in await build().discover_devices()}
+
+    assert cameras["dahua-channel-1"] is True, "a different instance must still know channel 1 is live"
+    assert calls.count("/channels/1/snapshot") == 1, "and must not re-probe it"
