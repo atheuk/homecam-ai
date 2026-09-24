@@ -44,8 +44,12 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 channels = os.environ["DAHUA_CHANNELS"].split(",")
+username = quote(os.environ["DAHUA_USERNAME"], safe="")
+password = quote(os.environ["DAHUA_PASSWORD"], safe="")
+host = os.environ["DAHUA_HOST"]
 paths = []
 for raw in channels:
     match = re.fullmatch(r"\s*(\d+)(?::[^:]+)?(?::(?:camera|doorbell))?\s*", raw)
@@ -56,7 +60,7 @@ for raw in channels:
         f"  dahua-{channel}:",
         (
             "    source: "
-            f"rtsp://${{DAHUA_USERNAME}}:${{DAHUA_PASSWORD}}@${{DAHUA_HOST}}:554/"
+            f"rtsp://{username}:{password}@{host}:554/"
             f"cam/realmonitor?channel={channel}&subtype=0"
         ),
         "    sourceOnDemand: yes",

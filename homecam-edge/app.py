@@ -6,6 +6,7 @@ the standalone Compose application's source during the image build.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass, field
@@ -107,9 +108,23 @@ class DahuaClient:
         return True, "reachable"
 
     async def snapshot(self, channel: int) -> bytes:
-        response = await self._get("/cgi-bin/snapshot.cgi", {"channel": channel})
-        response.raise_for_status()
-        return response.content
+        # Cheap Dahua NVRs' embedded HTTP servers frequently reject a
+        # snapshot.cgi request with a transient error if another request
+        # (even a concurrent /health or /channels probe) is already in
+        # flight. A short bounded retry absorbs that instead of surfacing
+        # it to Azure as "camera unavailable".
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(0.15 * attempt)
+            try:
+                response = await self._get("/cgi-bin/snapshot.cgi", {"channel": channel})
+                response.raise_for_status()
+                return response.content
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
 
 
 def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:

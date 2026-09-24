@@ -116,3 +116,53 @@ def test_dahua_client_requires_credentials_before_making_requests():
     settings = EdgeSettings(dahua_host="192.0.2.1", dahua_username="u", dahua_password="p")
     client = DahuaClient(settings)
     assert settings.dahua_configured is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_retries_transient_nvr_failures_before_succeeding():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n")
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            attempts += 1
+            if attempts < 3:
+                return httpx.Response(503)
+            return httpx.Response(200, content=b"JPEGDATA")
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door",
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        r = await client.get("/channels/1/snapshot", headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 200
+        assert r.content == b"JPEGDATA"
+        assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_snapshot_gives_up_after_persistent_nvr_failures():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n")
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            return httpx.Response(503)
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door",
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        r = await client.get("/channels/1/snapshot", headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 503
