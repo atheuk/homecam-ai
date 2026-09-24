@@ -100,4 +100,17 @@ describe("dashboard",()=>{
     fireEvent.click(screen.getByText("Live"));
     expect(await screen.findByText(/WebRTC client required/i)).toBeInTheDocument();
   });
+
+  it("hides offline/disconnected cameras from Overview and Live",async()=>{
+    const mixedCams=[
+      ...cameraFixture,
+      {id:"dahua-channel-3",name:"Back Yard 2",type:"camera",online:false,status:"offline",battery_level:null,capabilities:{}},
+    ];
+    mockFetchSequence(mixedCams,[]);
+    render(<Home/>);
+    await waitFor(()=>expect(screen.getByText("Front Door")).toBeInTheDocument());
+    expect(screen.queryByText("Back Yard 2")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Live"));
+    expect(screen.queryByText("Back Yard 2")).not.toBeInTheDocument();
+  });
 });

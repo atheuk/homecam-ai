@@ -73,6 +73,12 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
               [
                 { name: 'APP_ENV', value: 'production' }
                 { name: 'AI_PROVIDER', value: 'mock' }
+                // Real (non-scripted) person detection, SPEC 13/43: HOG+SVM
+                // bundled in opencv-python-headless, no external model needed.
+                { name: 'AI_DETECTOR_BACKEND', value: 'opencv' }
+                // Periodically snapshots every online camera and creates a real
+                // event when the detector actually sees something (SPEC 12).
+                { name: 'EVENT_INGESTION_ENABLED', value: 'true' }
                 { name: 'DAHUA_ENABLED', value: 'false' }
                 // Non-secret default only. Edge base URL/token should be set at
                 // runtime via the admin API/UI (DB-backed config), not here, so

@@ -148,6 +148,58 @@ async def test_snapshot_retries_transient_nvr_failures_before_succeeding():
 
 
 @pytest.mark.asyncio
+async def test_channels_report_individual_liveness_not_a_blanket_nvr_status():
+    """SPEC: a channel with no camera physically attached must report
+    ``online: false`` even though the NVR itself (and other channels) are
+    perfectly reachable."""
+    probe_count = {"1": 0, "2": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/magicBox.cgi":
+            return httpx.Response(200, text="sn=TESTSERIAL123\n")
+        if request.url.path == "/cgi-bin/snapshot.cgi":
+            channel = request.url.params.get("channel")
+            probe_count[channel] += 1
+            if channel == "1":
+                return httpx.Response(200, content=b"JPEGDATA")
+            return httpx.Response(503)
+        return httpx.Response(404)
+
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door,2:Disconnected",
+    )
+    async with build_client(settings, httpx.MockTransport(handler)) as client:
+        headers = {"Authorization": "Bearer secret"}
+        body = (await client.get("/channels", headers=headers)).json()["channels"]
+        by_channel = {c["channel"]: c["online"] for c in body}
+        assert by_channel == {1: True, 2: False}
+
+        # Second call within the TTL window must reuse the cached result
+        # instead of re-probing (respects the NVR's ~1-2 session limit).
+        await client.get("/channels", headers=headers)
+        assert probe_count["1"] == 1
+        assert probe_count["2"] == 3  # one probe, but its own internal 3x retry
+
+
+@pytest.mark.asyncio
+async def test_channels_report_all_offline_when_nvr_itself_is_unreachable():
+    settings = EdgeSettings(
+        edge_token="secret",
+        dahua_host="192.0.2.1",
+        dahua_username="u",
+        dahua_password="p",
+        dahua_channels="1:Front Door",
+    )
+    async with build_client(settings, dahua_mock_transport(serial_ok=False)) as client:
+        body = (await client.get("/channels", headers={"Authorization": "Bearer secret"})).json()["channels"]
+        assert body[0]["online"] is False
+
+
+@pytest.mark.asyncio
 async def test_snapshot_gives_up_after_persistent_nvr_failures():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/cgi-bin/magicBox.cgi":
