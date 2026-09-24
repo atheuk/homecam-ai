@@ -1,6 +1,6 @@
 # Azure Deployment Plan
 
-> **Status:** Validated
+> **Status:** Deployment Blocked
 
 Generated: 2026-09-24T09:14:40+02:00
 
@@ -136,12 +136,32 @@ No new Azure resource instance is created. The existing API Container App gains 
 - [x] Update status to `Validated`
 
 ### Phase 4: Deployment
-- [ ] Commit source and IaC changes
-- [ ] Invoke `azure-deploy`
-- [ ] Deploy the API image and Container App revision
-- [ ] Validate API health, Tailscale health, and private edge connectivity
+- [x] Commit source and IaC changes
+- [x] Invoke `azure-deploy`
+- [x] Deploy the API image and Container App revision
+- [x] Validate API health and live Azure RBAC
+- [ ] Validate tagged Tailscale identity and private edge connectivity
 - [ ] Persist Dahua edge runtime configuration only if the local edge token is securely available
 - [ ] Update status to `Deployed`
+
+### Deployment Blocker
+
+- The supplied Tailscale auth key was a one-time key and has been consumed.
+- The node initially joined as a user-owned node with no `tag:homecam-azure`; explicitly requesting that tag was rejected by the tailnet as invalid/not permitted.
+- Container Apps replicas use non-persistent local Tailscale state, so a reusable (preferably reusable + ephemeral) key authorized for `tag:homecam-azure` is required.
+- The replacement key staging file requested at `C:\Users\atheukel\tailscale_auth_key.txt` is not available.
+- HomeCam admin credentials were also not available through a secure handoff, so the existing authenticated admin API cannot yet persist the edge runtime config. The edge bearer token itself is securely available at the host path and has not been printed.
+
+### Deployed and Verified Portions
+
+- API image `crhomecamaidev82ac.azurecr.io/api:tailnet-ee7eaeb` built successfully.
+- API module deployed as revision `ca-api-homecam-ai-dev-82ac--0000005`.
+- Public API ingress remains HTTPS-only (`allowInsecure: false`); no edge or Dahua public ingress was added.
+- API health returned `{"status":"ok"}`.
+- Live RBAC confirmed `AcrPull` on ACR and `Key Vault Secrets User` on Key Vault for the existing user-assigned identity.
+- Key Vault secret reference `tailscale-auth-key` is present; the original staging file was securely removed after storage.
+- Sidecar image and userspace proxy configuration were deployed and validated, including Container Apps-specific `TS_KUBE_SECRET=""`.
+- Private connectivity cannot be claimed until the correctly tagged reusable key is supplied and the sidecar stays authenticated.
 
 ---
 
@@ -191,4 +211,4 @@ Redeploy the previous API Container App template or revision, removing the sidec
 
 ## 11. Next Step
 
-Commit the validated changes and run the mandatory `azure-deploy` workflow.
+Supply a reusable, preferably ephemeral Tailscale auth key authorized for `tag:homecam-azure`, rotate the Key Vault secret, restart the revision, and complete private endpoint/admin API verification.
