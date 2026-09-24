@@ -13,7 +13,13 @@ import pytest
 from PIL import Image
 from sqlalchemy import select
 
-from app.ai.vision import LocalImageEmbedder, cosine_similarity, normalize
+from app.ai.vision import (
+    NO_PERSON_CAPTION,
+    LocalImageEmbedder,
+    caption_confirms_person,
+    cosine_similarity,
+    normalize,
+)
 from app.db import SessionLocal
 from app.models.db import Event, EventPhoto, Person, PersonSighting
 from app.services import persons as person_service
@@ -359,3 +365,22 @@ async def test_real_ingestion_stores_a_viewable_photo_and_an_identity(client):
     assert person["sighting_count"] >= 1
     assert event_id in {event["id"] for event in person["events"]}
 
+
+
+async def test_sentinel_caption_is_not_treated_as_a_person() -> None:
+    """A false-positive detection must not mint an identity.
+
+    The local detector fires on shadows and foliage; production produced a
+    "person" event whose crop was an empty garden. The caption model is the
+    second opinion that catches it.
+    """
+    assert caption_confirms_person(NO_PERSON_CAPTION) is False
+    assert caption_confirms_person("no clear view of a person") is False
+    assert caption_confirms_person("  No clear view of a person  ") is False
+
+
+async def test_real_descriptions_and_missing_captions_still_count_as_people() -> None:
+    assert caption_confirms_person("Adult in a dark coat carrying a parcel.") is True
+    # No second opinion available (captioning off or the call failed) means we
+    # keep trusting the detector instead of dropping genuine sightings.
+    assert caption_confirms_person(None) is True

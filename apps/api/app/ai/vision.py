@@ -38,13 +38,31 @@ logger = logging.getLogger(__name__)
 # two are at least storage-compatible.
 AZURE_IMAGE_EMBEDDING_DIMENSIONS = 1024
 
+# The exact sentence the captioner must produce when the crop contains no
+# visible person. It doubles as a false-positive signal: the local detector
+# fires on shadows and foliage, and a caption model looking at the same crop
+# is a far better judge of whether there is really someone there.
+NO_PERSON_CAPTION = "No clear view of a person."
+
 CAPTION_SYSTEM_PROMPT = (
     "You are labelling a still frame from a home security camera for the "
     "homeowner. Describe only what is visibly true about the person: rough "
     "build, clothing colours, and anything they are carrying. One short "
     "sentence, under 20 words. Never guess identity, name, age, ethnicity or "
-    "intent. If no person is clearly visible, reply exactly: No clear view of a person."
+    f"intent. If no person is clearly visible, reply exactly: {NO_PERSON_CAPTION}"
 )
+
+
+def caption_confirms_person(caption: str | None) -> bool:
+    """Whether ``caption`` describes a genuinely visible person.
+
+    A missing caption returns ``True``: when captioning is disabled or the
+    call failed we have no second opinion, so we keep trusting the detector
+    rather than silently dropping real sightings.
+    """
+    if caption is None:
+        return True
+    return caption.strip().rstrip(".").casefold() != NO_PERSON_CAPTION.rstrip(".").casefold()
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:

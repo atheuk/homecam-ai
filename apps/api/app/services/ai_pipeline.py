@@ -30,7 +30,7 @@ from ..ai.dwell import dwell_tracker
 from ..ai.provider import AnalysisContext, get_ai_provider
 from ..ai.schemas import GroundingError
 from ..ai.semantics import derive_semantics
-from ..ai.vision import get_image_captioner, get_image_embedder
+from ..ai.vision import caption_confirms_person, get_image_captioner, get_image_embedder
 from ..config import settings
 from ..models.db import AIAnalysis, Event, EventPhoto
 from ..providers.base import CameraOfflineError, CameraNotFoundError, ProviderUnavailableError
@@ -215,7 +215,7 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
                 metadata["photo_caption"] = caption
             row.event_metadata = metadata
 
-            if is_person_photo:
+            if is_person_photo and caption_confirms_person(caption):
                 embedding = await _embed_photo(photo)
                 if embedding:
                     try:
