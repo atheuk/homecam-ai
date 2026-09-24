@@ -57,6 +57,10 @@ UNAVAILABLE = CapabilityStatus.UNAVAILABLE.value
 # that status while the connector reports it offline. See _refresh_channels.
 EDGE_OFFLINE_GRACE_SECONDS = 180.0
 
+# How often a channel the connector flags offline is re-checked by actually
+# asking it for media. See _verify_one_offline_channel.
+VERIFY_INTERVAL_SECONDS = 120.0
+
 
 @dataclass(frozen=True)
 class DahuaEdgeSettings:
@@ -102,6 +106,8 @@ class DahuaEdgeProvider:
         # camera_id -> monotonic timestamp of the last time the edge
         # connector reported this channel online. See _refresh_channels.
         self._last_online_at: dict[str, float] = {}
+        # camera_id -> monotonic timestamp of the last verification probe.
+        self._last_verified_at: dict[str, float] = {}
 
     async def get_provider_info(self) -> ProviderInfo:
         return {"id": self.id, "name": "Dahua NVR (edge connector)", "manufacturer": "Dahua"}
@@ -214,6 +220,39 @@ class DahuaEdgeProvider:
                 "online": online,
             }
         self._channels = channels
+        await self._verify_one_offline_channel()
+
+    async def _verify_one_offline_channel(self) -> None:
+        """Ask the NVR for real media from *one* channel flagged offline.
+
+        The web app hides offline cameras, so it never requests media from
+        them -- without this the "media proves the camera is live" rule
+        could never fire for a camera the connector had wrongly flagged,
+        and a working camera would stay hidden forever.
+
+        Only one channel is verified per refresh, and each is re-checked at
+        most every VERIFY_INTERVAL_SECONDS, because a verification costs one
+        of the NVR's ~1-2 concurrent CGI sessions -- the very contention
+        that produces the wrong flag in the first place. Channels with no
+        camera attached simply keep failing this cheaply and stay offline.
+        """
+        now = time.monotonic()
+        candidates = [
+            camera_id
+            for camera_id, info in self._channels.items()
+            if not info["online"] and now - self._last_verified_at.get(camera_id, 0.0) >= VERIFY_INTERVAL_SECONDS
+        ]
+        if not candidates:
+            return
+        camera_id = min(candidates, key=lambda c: self._last_verified_at.get(c, 0.0))
+        self._last_verified_at[camera_id] = now
+        channel = self._channels[camera_id]["channel"]
+        try:
+            response = await self._request("verification snapshot", f"/channels/{channel}/snapshot")
+        except Exception:
+            return
+        if response.content:
+            self._mark_online(camera_id)
 
     def has_camera(self, camera_id: str) -> bool:
         return camera_id in self._channels or camera_id.startswith("dahua-channel-")
@@ -225,6 +264,20 @@ class DahuaEdgeProvider:
         if info is None:
             raise CameraNotFoundError(camera_id)
         return info
+
+    def _mark_online(self, camera_id: str) -> None:
+        """Record that this channel just produced real media.
+
+        Delivering a snapshot or a stream descriptor is the strongest
+        evidence a camera exists, and it is stronger than the connector's
+        own advisory flag. Feeding it back into the same grace window used
+        by _refresh_channels lets the camera list converge on what actually
+        works rather than on what the NVR had spare capacity to confirm.
+        """
+        self._last_online_at[camera_id] = time.monotonic()
+        info = self._channels.get(camera_id)
+        if info is not None:
+            info["online"] = True
 
     async def discover_devices(self) -> list[dict]:
         if not self.settings.configured:
@@ -250,11 +303,17 @@ class DahuaEdgeProvider:
 
     async def get_snapshot(self, camera_id: str) -> bytes:
         info = await self._channel(camera_id)
-        if not info.get("online", True):
-            raise CameraOfflineError(camera_id)
+        # Deliberately not gated on info["online"]. Measured against the
+        # deployed NVR, the connector reported channel 1 online while its
+        # snapshot returned 503 and channel 2 offline while it returned a
+        # real 1.5MB JPEG: the flag tracks whether the NVR had a spare CGI
+        # session at probe time, not whether a camera is attached. Gating on
+        # it was self-fulfilling -- we refused to ask, so we never learned
+        # the camera was fine. Ask, and let a genuine failure surface.
         response = await self._request("snapshot", f"/channels/{info['channel']}/snapshot")
         if not response.content:
             raise CameraOfflineError(camera_id)
+        self._mark_online(camera_id)
         return response.content
 
     async def get_live_stream(self, camera_id: str) -> str:
@@ -266,13 +325,14 @@ class DahuaEdgeProvider:
         raw Dahua RTSP URL or credentials in this mode.
         """
         info = await self._channel(camera_id)
-        if not info.get("online", True):
-            raise CameraOfflineError(camera_id)
+        # Not gated on info["online"] -- see get_snapshot for why that flag
+        # cannot be trusted to refuse work.
         response = await self._request("live stream descriptor", f"/channels/{info['channel']}/live")
         payload = response.json()
         url = payload.get("url")
         if not url:
             raise ProviderUnavailableError("Dahua edge connector did not return a stream URL")
+        self._mark_online(camera_id)
         return str(url)
 
     async def get_health(self) -> ProviderHealth:

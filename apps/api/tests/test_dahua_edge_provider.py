@@ -191,3 +191,67 @@ async def test_a_channel_that_stays_offline_past_the_grace_window_goes_offline(m
     state["online"] = False
     monkeypatch.setattr(edge_provider, "EDGE_OFFLINE_GRACE_SECONDS", 0.0)
     assert (await provider.discover_devices())[0]["online"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_camera_that_delivers_media_is_not_refused_for_being_flagged_offline():
+    """Measured against the deployed NVR: the connector reported channel 2
+    offline while it returned a real 1.5MB JPEG. Gating the fetch on that
+    flag was self-fulfilling -- we refused to ask, so we never learned the
+    camera was fine."""
+    provider = DahuaEdgeProvider(
+        DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),
+        transport=dahua_edge_transport(online=False),
+    )
+
+    assert await provider.get_snapshot("dahua-channel-1") == b"DAHUA-EDGE-SNAPSHOT"
+
+    cameras = {c["id"]: c["online"] for c in await provider.discover_devices()}
+    assert cameras["dahua-channel-1"] is True, "real media must count as proof the camera is live"
+    assert cameras["dahua-channel-2"] is False, "a channel that never delivered media stays offline"
+
+
+def _verify_transport(calls: list) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/channels":
+            return httpx.Response(
+                200,
+                json={
+                    "channels": [
+                        {"channel": 1, "name": "Front", "type": "camera", "online": False},
+                        {"channel": 4, "name": "Empty", "type": "camera", "online": False},
+                    ]
+                },
+            )
+        if request.url.path == "/channels/1/snapshot":
+            return httpx.Response(200, content=b"REAL-JPEG")
+        if request.url.path == "/channels/4/snapshot":
+            return httpx.Response(503, json={"detail": "no camera"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_a_wrongly_flagged_camera_is_rediscovered_without_hammering_the_nvr():
+    """The web app hides offline cameras, so it never asks them for media.
+    The provider must therefore confirm for itself -- but at a bounded rate,
+    because each check costs one of the NVR's ~1-2 CGI sessions."""
+    calls: list = []
+    provider = DahuaEdgeProvider(
+        DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),
+        transport=_verify_transport(calls),
+    )
+
+    await provider.discover_devices()
+    await provider.discover_devices()
+    cameras = {c["id"]: c["online"] for c in await provider.discover_devices()}
+
+    assert cameras["dahua-channel-1"] is True, "a channel that delivers a real JPEG must come back"
+    assert cameras["dahua-channel-4"] is False, "a channel with no camera stays offline"
+    # channel 1 is verified once and then held online by the grace window;
+    # channel 4 gets a single verification round (its retry is _request's
+    # own) and is not re-probed again until the interval lapses.
+    assert calls.count("/channels/1/snapshot") == 1, calls
+    assert calls.count("/channels/4/snapshot") <= 2, calls
