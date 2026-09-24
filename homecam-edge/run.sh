@@ -68,7 +68,12 @@ for raw in channels:
     ]
 
 Path("/tmp/mediamtx.yml").write_text(
-    "hls: yes\nhlsAddress: :8888\nwebrtc: yes\nwebrtcAddress: :8189\npaths:\n"
+    # rtsp is disabled: we only need MediaMTX to *pull* each Dahua
+    # channel's RTSP feed as a client (the `source:` entries below) and
+    # re-serve it as HLS/WebRTC. Its own RTSP re-serving listener
+    # (rtspAddress: :8554 by default) is unused here and can collide
+    # with unrelated add-ons/services already bound to that host port.
+    "hls: yes\nhlsAddress: :8888\nwebrtc: yes\nwebrtcAddress: :8189\nrtsp: no\npaths:\n"
     + "\n".join(paths),
     encoding="utf-8",
 )
