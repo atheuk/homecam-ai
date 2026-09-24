@@ -157,6 +157,60 @@ Cameras whose provider advertises `audioDetection` as `UNAVAILABLE`/
 currently report `UNAVAILABLE`; the extension point is the provider's
 capability map plus a call into `analyze_pcm`.
 
+## Continuous event ingestion (real, not just `/mock/events`)
+
+Historically nothing in this codebase *triggered* the pipeline from real
+camera activity — events only ever appeared through the `/mock/events` test
+endpoint. `app/services/ingestion.py` closes that gap: an opt-in background
+loop (started from the FastAPI `lifespan`, alongside the API's own
+Tailscale-connected provider access) periodically snapshots every online,
+snapshot-capable camera across every provider, runs it through the configured
+local detector, and creates a real event whenever the detector actually sees
+something. A per-camera cooldown (`EVENT_COOLDOWN_SECONDS`) stops continued
+presence from creating a new event every poll interval.
+
+Every ingested event still flows through the same
+`create_and_broadcast_event` → `enrich_event` pipeline as any other event
+source, so its final `type`/`zone`/`tags`/best photo/AI analysis is
+recomputed from a fresh snapshot rather than trusted verbatim.
+
+Because `MockDetector` cannot see pixels and intentionally returns no
+detections for a bare/unlabeled poll, this loop is a safe no-op under the
+default `mock` backend. Enabling `EVENT_INGESTION_ENABLED` only becomes
+useful once a pixel-aware backend (`opencv` or `onnx`) is also configured.
+
+```bash
+export EVENT_INGESTION_ENABLED=true
+export AI_DETECTOR_BACKEND=opencv   # or onnx
+```
+
+## Enabling the OpenCV detector (opt-in, no model download)
+
+`opencv` is the easiest way to get **real, pixel-based person detection**
+("start with people", SPEC 13/43): it uses the HOG + linear-SVM pedestrian
+detector bundled inside the `opencv-python-headless` wheel itself
+(`cv2.HOGDescriptor_getDefaultPeopleDetector()`), so there is no external
+model file to source, license or download.
+
+```bash
+pip install opencv-python-headless numpy
+export AI_DETECTOR_BACKEND=opencv
+```
+
+Detection confidences come from the HOG SVM's decision-function weights,
+passed through a sigmoid and thresholded at `confidence_threshold=0.35` — a
+reasonable default, not calibrated against a labelled dataset. Only the
+`person` class is produced by this backend today (SPEC 13's "start with
+people"); it does not detect vehicles/animals/packages the way the mock or
+ONNX backends' scripted/model-based paths can.
+
+`opencv-python-headless` has no prebuilt wheel for Windows ARM64 as of this
+writing; `requirements.txt` gates the dependency with a PEP 508 environment
+marker so local dev/CI on that platform simply skips it and stays on the
+mock backend, while CI (`ubuntu-latest`) and the deployed Linux containers
+install and use it normally. Like every opt-in backend here, a missing/failed
+`cv2` import falls back to the mock backend rather than crashing a request.
+
 ## Enabling the real ONNX detector (opt-in)
 
 The default backend is `mock`: deterministic, zero extra dependencies, used by
@@ -183,7 +237,7 @@ request.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AI_DETECTOR_BACKEND` | `mock` | `mock` or `onnx`. |
+| `AI_DETECTOR_BACKEND` | `mock` | `mock`, `opencv`, or `onnx`. |
 | `AI_DETECTOR_MODEL_PATH` | *(empty)* | ONNX model path (opt-in backend only). |
 | `AI_ANALYSIS_ENABLED` | `true` | Master switch for the enrichment stages. |
 | `EMBEDDING_DIMENSIONS` | `384` | Width of stored embeddings. |
@@ -196,6 +250,9 @@ request.
 | `AUDIO_ENERGY_THRESHOLD` | `0.02` | RMS floor for speech-like audio. |
 | `ACTIVITY_CORRELATION_ENABLED` | `true` | Group related events into activities. |
 | `ACTIVITY_CORRELATION_WINDOW_SECONDS` | `120` | Temporal grouping window. |
+| `EVENT_INGESTION_ENABLED` | `false` | Background loop that creates real events from live camera snapshots. |
+| `EVENT_POLL_INTERVAL_SECONDS` | `20` | Seconds between ingestion passes. |
+| `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera. |
 
 ## Known limitations
 
@@ -207,8 +264,12 @@ request.
   this repository.
 - **Mock detector cannot see the frame.** It derives detections from the event
   type and reports nothing for a bare motion trigger rather than inventing an
-  object class. Real recognition for unlabelled motion requires the ONNX
-  backend.
+  object class. Real recognition for unlabelled motion (including continuous
+  event ingestion, see above) requires the `opencv` or `onnx` backend.
+- **The `opencv` backend only detects people today.** It is the HOG+SVM
+  pedestrian detector bundled in the OpenCV wheel; vehicles/animals/packages
+  still need the `onnx` backend with a suitable multi-class model, or remain
+  scripted-only via `/mock/events`.
 - **Embeddings are JSON arrays, not a native pgvector column** (see above), so
   similarity search is not yet index-accelerated.
 - **Dwell state is in-process**, so a restart costs at most one dwell window

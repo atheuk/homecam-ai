@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -56,6 +57,11 @@ class EdgeSettings:
     # this connector (typically http://<this-host-tailscale-addr>:8888).
     stream_base_url: str = "http://127.0.0.1:8888"
     timeout_seconds: float = 5.0
+    # How long a per-channel liveness result is trusted before re-probing.
+    # Kept fairly high on purpose: this NVR can only sustain ~1-2 concurrent
+    # RTSP/CGI sessions, so per-channel probing must be infrequent and
+    # serial, never on every /channels request.
+    channel_liveness_ttl_seconds: float = 60.0
 
     @property
     def dahua_configured(self) -> bool:
@@ -98,6 +104,7 @@ def settings_from_env() -> EdgeSettings:
         edge_token=os.environ.get("HOME_CAM_EDGE_TOKEN") or None,
         stream_base_url=os.environ.get("STREAM_BASE_URL", "http://127.0.0.1:8888").rstrip("/"),
         timeout_seconds=float(os.environ.get("DAHUA_TIMEOUT_SECONDS", "5")),
+        channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
     )
 
 
@@ -156,9 +163,51 @@ class DahuaClient:
         raise last_exc
 
 
+@dataclass
+class ChannelLivenessTracker:
+    """Real per-channel connectivity, cached with a TTL.
+
+    ``/health``'s whole-NVR reachability probe says nothing about whether a
+    *specific* channel actually has a camera attached: a 4-channel NVR with
+    only 2 cameras physically connected still answers ``getSerialNo`` fine,
+    so every channel previously reported "online" regardless. This reuses
+    the same proven snapshot.cgi call (with its own retry handling) as the
+    real ``/channels/{n}/snapshot`` endpoint: if a channel can't produce a
+    snapshot, there is nothing to show for it and it should not be reported
+    as online. Probes are cached and never run concurrently across channels
+    to respect this NVR's ~1-2 concurrent session limit.
+    """
+
+    client: DahuaClient
+    ttl_seconds: float = 60.0
+    _cache: dict[int, tuple[bool, float]] = field(default_factory=dict)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def is_online(self, channel: int) -> bool:
+        now = time.monotonic()
+        cached = self._cache.get(channel)
+        if cached is not None and (now - cached[1]) < self.ttl_seconds:
+            return cached[0]
+        async with self._lock:
+            # Re-check after acquiring the lock: another request may have
+            # just refreshed this channel while we were waiting.
+            cached = self._cache.get(channel)
+            now = time.monotonic()
+            if cached is not None and (now - cached[1]) < self.ttl_seconds:
+                return cached[0]
+            try:
+                await self.client.snapshot(channel)
+                online = True
+            except Exception:  # noqa: BLE001 - any failure means "not live"
+                online = False
+            self._cache[channel] = (online, time.monotonic())
+            return online
+
+
 def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     client = DahuaClient(settings, transport=transport)
+    liveness = ChannelLivenessTracker(client=client, ttl_seconds=settings.channel_liveness_ttl_seconds)
     app = FastAPI(title="HomeCam edge connector", version="1.0.0")
 
     def require_token(authorization: str | None) -> None:
@@ -186,10 +235,16 @@ def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseT
     async def channels(authorization: str | None = Header(default=None)):
         require_token(authorization)
         dahua_reachable, _ = await client.probe()
+        statuses = []
+        for c in settings.channels:
+            # Skip probing entirely (and count every channel offline) when
+            # the whole NVR is unreachable, rather than issuing per-channel
+            # snapshot attempts doomed to time out one at a time.
+            statuses.append(dahua_reachable and await liveness.is_online(c.channel))
         return {
             "channels": [
-                {"channel": c.channel, "name": c.name, "type": c.type, "online": dahua_reachable}
-                for c in settings.channels
+                {"channel": c.channel, "name": c.name, "type": c.type, "online": online}
+                for c, online in zip(settings.channels, statuses)
             ]
         }
 

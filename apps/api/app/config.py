@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     audio_energy_threshold: float = Field(default=0.02, gt=0.0, le=1.0)
     activity_correlation_enabled: bool = True
     activity_correlation_window_seconds: float = Field(default=120.0, gt=0.0)
+    # Continuous event ingestion (SPEC section 12): periodically snapshots
+    # every online camera and runs it through the configured detector so
+    # events exist without a human manually POSTing /mock/events. Disabled
+    # by default (matches every other opt-in AI knob above) so tests/local
+    # dev never spawn a background polling loop unexpectedly; the deployed
+    # Azure API turns this on explicitly.
+    event_ingestion_enabled: bool = False
+    event_poll_interval_seconds: float = Field(default=20.0, gt=0.0)
+    event_cooldown_seconds: float = Field(default=120.0, gt=0.0)
     mediamtx_url: str = "http://localhost:8889"
     # Own public FQDN (e.g. the Container App's https://... ingress URL). Used
     # to rewrite private-only (Tailscale tailnet / container-localhost) live

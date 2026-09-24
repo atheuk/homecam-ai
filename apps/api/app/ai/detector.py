@@ -1,10 +1,18 @@
 """Local object detection abstraction (SPEC section 13).
 
-Two backends are selectable through ``AI_DETECTOR_BACKEND``:
+Three backends are selectable through ``AI_DETECTOR_BACKEND``:
 
 ``mock`` (default)
     :class:`MockDetector` — fully deterministic, zero extra dependencies, so
     tests and CI never need an ML runtime.
+
+``opencv`` (opt-in, no external model file required)
+    :class:`OpenCvDetector` — genuine pixel-based person detection using the
+    HOG + SVM pedestrian detector bundled inside the ``opencv-python`` /
+    ``opencv-python-headless`` wheel itself. Unlike ``onnx`` below, there is
+    no separate model to source, so this is the easiest way to get real
+    (non-scripted) "who is being detected" results — starting with people,
+    per SPEC 13's ordering.
 
 ``onnx`` (opt-in)
     :class:`OnnxDetector` — runs a small pretrained COCO YOLO model through
@@ -186,6 +194,66 @@ class MockDetector:
         return detections
 
 
+def _sigmoid(value: float) -> float:
+    import math
+
+    return 1.0 / (1.0 + math.exp(-value))
+
+
+class OpenCvDetector:
+    """Real, pixel-based person detector using OpenCV's bundled HOG + SVM
+    pedestrian detector (SPEC section 13, "start with people").
+
+    Deliberately mirrors :class:`OnnxDetector`'s tolerant-construction
+    pattern: any missing dependency raises :class:`DetectorUnavailableError`
+    so the caller degrades to the mock backend instead of failing an ingest
+    request. Only detects ``person`` today; other SPEC 13 classes still
+    require the ``onnx`` backend until a bundled non-person model exists.
+    """
+
+    name = "opencv"
+
+    def __init__(self, confidence_threshold: float = 0.35) -> None:
+        try:
+            import cv2
+        except ImportError as exc:  # pragma: no cover - depends on opt-in extra
+            raise DetectorUnavailableError(f"opencv detector dependencies unavailable: {exc}") from exc
+        self._confidence_threshold = confidence_threshold
+        self._hog = cv2.HOGDescriptor()
+        self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
+    def detect(self, image: bytes, context: DetectionContext) -> list[Detection]:
+        import cv2
+        import numpy as np
+
+        array = np.frombuffer(image, dtype=np.uint8)
+        frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
+        if frame is None:
+            logger.warning("opencv detector could not decode snapshot for %s", context.camera_id)
+            return []
+        height, width = frame.shape[0], frame.shape[1]
+        if not height or not width:
+            return []
+        try:
+            boxes, weights = self._hog.detectMultiScale(frame, winStride=(8, 8), padding=(8, 8), scale=1.05)
+        except Exception as exc:  # noqa: BLE001 - detection must not break ingest
+            logger.warning("opencv detection failed for %s: %s", context.camera_id, exc)
+            return []
+        detections: list[Detection] = []
+        for (x, y, w, h), weight in zip(boxes, weights):
+            confidence = _sigmoid(float(weight))
+            if confidence < self._confidence_threshold:
+                continue
+            x1, y1 = max(0.0, float(x) / width), max(0.0, float(y) / height)
+            x2, y2 = min(0.999, float(x + w) / width), min(0.999, float(y + h) / height)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            detections.append(
+                Detection(label="person", confidence=round(confidence, 4), bbox=BoundingBox(x1, y1, x2, y2))
+            )
+        return detections
+
+
 # Subset of the 80-class COCO label list relevant to HomeCam (SPEC 13).
 COCO_CLASS_NAMES: dict[int, str] = {
     0: "person",
@@ -286,6 +354,12 @@ def build_detector(backend: str, model_path: str = "") -> LocalDetector:
     normalized = (backend or "mock").strip().lower()
     if normalized == "mock":
         return _mock_detector
+    if normalized == "opencv":
+        try:
+            return OpenCvDetector()
+        except DetectorUnavailableError as exc:
+            logger.warning("falling back to mock detector: %s", exc)
+            return _mock_detector
     if normalized == "onnx":
         try:
             return OnnxDetector(model_path)

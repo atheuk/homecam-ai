@@ -11,6 +11,7 @@ from .api.routes import router
 from .config import settings
 from .db import SessionLocal, init_db
 from .services.cameras import sync_cameras
+from .services.ingestion import ingestion_service
 from .services.provider_registry import discover_all_cameras
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -21,7 +22,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     async with SessionLocal() as session:
         await sync_cameras(session, await discover_all_cameras())
-    yield
+    if settings.event_ingestion_enabled:
+        ingestion_service.start()
+    try:
+        yield
+    finally:
+        await ingestion_service.stop()
 
 
 app = FastAPI(title="HomeCam AI API", version="0.1.0", lifespan=lifespan)
