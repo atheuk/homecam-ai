@@ -1,8 +1,9 @@
 # Azure Deployment Plan
 
-> **Status:** Deployment Blocked
+> **Status:** Deployed
 
 Generated: 2026-09-24T09:14:40+02:00
+Last updated: 2026-09-24T15:35:00+02:00 (private tailnet connectivity, admin bootstrap, Dahua edge provider persistence, and public HLS relay all deployed and validated)
 
 ---
 
@@ -140,28 +141,28 @@ No new Azure resource instance is created. The existing API Container App gains 
 - [x] Invoke `azure-deploy`
 - [x] Deploy the API image and Container App revision
 - [x] Validate API health and live Azure RBAC
-- [ ] Validate tagged Tailscale identity and private edge connectivity
-- [ ] Persist Dahua edge runtime configuration only if the local edge token is securely available
-- [ ] Update status to `Deployed`
+- [x] Validate tagged Tailscale identity and private edge connectivity
+- [x] Persist Dahua edge runtime configuration via the admin API
+- [x] Add a public HLS relay so the browser never needs private tailnet/localhost addresses
+- [x] Deploy the frontend hls.js fix and update status to `Deployed`
 
-### Deployment Blocker
+### Resolution Summary (superseding the earlier blocker below)
 
-- The supplied Tailscale auth key was a one-time key and has been consumed.
-- The node initially joined as a user-owned node with no `tag:homecam-azure`; explicitly requesting that tag was rejected by the tailnet as invalid/not permitted.
-- Container Apps replicas use non-persistent local Tailscale state, so a reusable (preferably reusable + ephemeral) key authorized for `tag:homecam-azure` is required.
-- The replacement key staging file requested at `C:\Users\atheukel\tailscale_auth_key.txt` is not available.
-- HomeCam admin credentials were also not available through a secure handoff, so the existing authenticated admin API cannot yet persist the edge runtime config. The edge bearer token itself is securely available at the host path and has not been printed.
+- A user-confirmed reusable + ephemeral Tailscale auth key authorized for `tag:homecam-azure` was supplied via a securely staged, non-committed file, rotated into Key Vault, and confirmed via `tailscale status --json` (`Tags: ["tag:homecam-azure"]`, `BackendState: Running`), surviving container restarts.
+- The first HomeCam admin account was bootstrapped via the existing `/api/v1/auth/register` endpoint using user-supplied credentials (never hardcoded/logged), then used to persist the Dahua edge provider config (`dahua_mode=edge`, edge connector base URL over the tailnet, edge bearer token read only into memory from the staged host file).
+- All 4 Dahua channels report online via the edge connector; channels 1-2 have real physically-connected cameras (channels 3-4 are confirmed physically disconnected NVR ports, not a bug).
+- **Root cause of a later "nothing works in the app" regression**: earlier validation had used `az containerapp exec` into the Tailscale sidecar's own network namespace (which is on the tailnet) to fetch HLS manifests — this is not equivalent to a real browser, which has no tailnet route. The true public `/live` endpoint was returning a private `*.ts.net` URL directly to the browser, and the frontend `<video src=...>` element had no HLS.js (only Safari plays HLS natively that way).
+- Fixed with two changes, now both deployed together: (1) a new public HLS relay route (`GET /api/v1/cameras/{id}/hls/{path}`) that streams the manifest/segments through the API's own tailnet-connected path and rewrites `/live`'s `stream_url`/`hls_url` to this public path whenever the upstream is private-only; (2) hls.js added to the frontend Live tab so non-Safari browsers can actually decode the HLS stream.
+- All staged credential handoff files (`tailscale_auth_key.txt`, `homecam_admin.json`) were securely deleted from the host after successful use; no secret values were ever printed, logged, or committed.
 
 ### Deployed and Verified Portions
 
-- API image `crhomecamaidev82ac.azurecr.io/api:tailnet-ee7eaeb` built successfully.
-- API module deployed as revision `ca-api-homecam-ai-dev-82ac--0000005`.
-- Public API ingress remains HTTPS-only (`allowInsecure: false`); no edge or Dahua public ingress was added.
-- API health returned `{"status":"ok"}`.
+- API images built and deployed successively: `crhomecamaidev82ac.azurecr.io/api:tailnet-ee7eaeb` (initial tailnet sidecar) → `api:tailnet-7f1095f` (HLS proxy route) → `api:tailnet-3bacc3b` (final, includes rebased frontend snapshot media-type fix). Final revision: `ca-api-homecam-ai-dev-82ac--0000007`, Healthy/Running, 100% traffic.
+- Web image `crhomecamaidev82ac.azurecr.io/web:tailnet-3bacc3b` (hls.js-enabled bundle, built with `NEXT_PUBLIC_API_URL` pointed at the public API FQDN). Final revision: `ca-web-homecam-ai-dev-82ac--0000003`, Healthy/Running, 100% traffic.
+- Public API ingress remains HTTPS-only (`allowInsecure: false`); no edge or Dahua public ingress was added at any point — only outbound connectivity from the API's Tailscale sidecar.
 - Live RBAC confirmed `AcrPull` on ACR and `Key Vault Secrets User` on Key Vault for the existing user-assigned identity.
-- Key Vault secret reference `tailscale-auth-key` is present; the original staging file was securely removed after storage.
-- Sidecar image and userspace proxy configuration were deployed and validated, including Container Apps-specific `TS_KUBE_SECRET=""`.
-- Private connectivity cannot be claimed until the correctly tagged reusable key is supplied and the sidecar stays authenticated.
+- Key Vault secret reference `tailscale-auth-key` holds the final rotated key; no staging file remains on the host.
+- Verified purely via true public HTTPS calls (no container-exec/tailnet shortcuts): `GET /api/v1/cameras/dahua-channel-{1,2}/live` return a `stream_url` on the API's own public domain (`https://ca-api-homecam-ai-dev-82ac.../api/v1/cameras/.../hls/index.m3u8`); the proxied master playlist, media sub-playlist, and a live `.mp4` segment (up to ~1.9 MB) for both channels all returned HTTP 200 over plain public internet; CORS on the new route correctly scopes `Access-Control-Allow-Origin` to the web app's own origin; the deployed web JS bundle contains the hls.js code.
 
 ---
 
@@ -177,6 +178,10 @@ No new Azure resource instance is created. The existing API Container App gains 
 | ARM what-if | `az deployment sub what-if` with secure values held only in process memory | Pass: no create/delete; API update included | 2026-09-24T09:37+02:00 |
 | Azure Policy | `az policy assignment list` | Pass: one assignment reviewed, no blocking validation result | 2026-09-24T09:36+02:00 |
 | Static RBAC | Review `infra/modules/role-assignments.bicep` | Pass: user-assigned identity has resource-scoped Key Vault Secrets User and ACR Pull | 2026-09-24T09:37+02:00 |
+| Full API suite (post-rebase) | `python -m pytest apps\api\tests -q` | Pass: 125 passed, 2 skipped | 2026-09-24T15:20+02:00 |
+| Public HLS proxy end-to-end (real public HTTPS, no container-exec) | `Invoke-WebRequest` against `https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io/api/v1/cameras/dahua-channel-{1,2}/live`, `.../hls/index.m3u8`, `.../hls/video1_stream.m3u8`, and a live `.mp4` segment | Pass: 200 on every hop, real video bytes (up to 1.9MB) fetched over public internet only | 2026-09-24T15:30+02:00 |
+| Web bundle contains hls.js | Fetched deployed `/_next/static/chunks/...js` and grepped for `hls`/`Hls` | Pass: found in `app/page-*.js` and a vendor chunk | 2026-09-24T15:32+02:00 |
+| Cross-origin proxy access | `Invoke-WebRequest` with `Origin` header set to the web app's public origin against the new `/hls/index.m3u8` route | Pass: `Access-Control-Allow-Origin` correctly echoes only the web app's own origin | 2026-09-24T15:32+02:00 |
 
 **Validated by:** `azure-validate`
 
