@@ -125,7 +125,7 @@ async def snapshot(camera_id: str):
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
-        return Response(await provider.get_snapshot(camera_id), media_type="text/plain")
+        return Response(await provider.get_snapshot(camera_id), media_type="image/jpeg")
     except CameraNotFoundError as exc:
         raise HTTPException(404, "Camera not found") from exc
     except CameraOfflineError as exc:
