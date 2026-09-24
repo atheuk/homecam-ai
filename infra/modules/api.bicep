@@ -104,6 +104,7 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
               { name: 'TS_OUTBOUND_HTTP_PROXY_LISTEN', value: '127.0.0.1:1055' }
               { name: 'TS_HOSTNAME', value: 'homecam-azure' }
               { name: 'TS_EXTRA_ARGS', value: '--advertise-tags=tag:homecam-azure' }
+              { name: 'TS_KUBE_SECRET', value: '' }
               { name: 'TS_STATE_DIR', value: '/tmp/tailscale' }
               { name: 'TS_ENABLE_HEALTH_CHECK', value: 'true' }
               { name: 'TS_LOCAL_ADDR_PORT', value: '0.0.0.0:9002' }
