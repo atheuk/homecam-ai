@@ -12,16 +12,18 @@ import ipaddress
 import json
 import os
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
-from ..models.db import AIAnalysis, Event
+from ..models.db import AIAnalysis, Event, EventPhoto, Person
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from ..providers.capabilities import AUDIO_DETECTION
 from ..schemas import (
@@ -30,12 +32,17 @@ from ..schemas import (
     CameraStatusIn,
     MockAudioIn,
     MockEventIn,
+    PersonAssignIn,
+    PersonUpdateIn,
+    PhotoRatingIn,
     ProviderOutageIn,
 )
 from ..ai.audio import analyze_pcm
+from ..ai.vision import get_image_embedder
 from ..services import activities as activity_service
 from ..services import cameras as camera_service
 from ..services import events as event_service
+from ..services import persons as person_service
 from ..services.provider_registry import (
     discover_all_cameras,
     find_provider_for_camera,
@@ -271,7 +278,178 @@ async def hls_proxy(camera_id: str, path: str):
 @router.get("/events")
 async def events(limit: int = 50, session: AsyncSession = Depends(get_db)):
     rows = await event_service.list_events(session, limit)
-    return [event_service.to_dict(row) for row in rows]
+    return await _decorate_events(session, rows)
+
+
+async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dict]:
+    """Serialize events with identity names and photo availability resolved.
+
+    Person names are looked up once for the whole page rather than per row:
+    the events list is the main screen, and an N+1 lookup there would be the
+    slowest thing in the app.
+    """
+    payloads = [event_service.to_dict(row) for row in rows]
+    person_ids = {row.person_id for row in rows if row.person_id}
+    names: dict[str, dict] = {}
+    if person_ids:
+        result = await session.execute(select(Person).where(Person.id.in_(person_ids)))
+        for person in result.scalars().all():
+            names[person.id] = {
+                "person_name": person.name,
+                "person_display_name": person_service.display_name(person),
+            }
+    photo_ids = set()
+    event_ids = [row.id for row in rows]
+    if event_ids:
+        result = await session.execute(
+            select(EventPhoto.event_id).where(EventPhoto.event_id.in_(event_ids))
+        )
+        photo_ids = set(result.scalars().all())
+    for payload, row in zip(payloads, rows):
+        payload.update(names.get(row.person_id or "", {"person_name": None, "person_display_name": None}))
+        payload["has_photo"] = row.id in photo_ids
+        payload["photo_url"] = f"/api/v1/events/{row.id}/photo" if row.id in photo_ids else None
+    return payloads
+
+
+@router.get("/events/{event_id}/photo")
+async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
+    """The stored best photo for an event, as real renderable image bytes.
+
+    Served from the database rather than ``media_root`` because the deployed
+    API's filesystem is per-replica and ephemeral; see
+    ``app.models.db.EventPhoto``.
+    """
+    photo = await session.get(EventPhoto, event_id)
+    if photo is None:
+        raise HTTPException(404, "No photo stored for this event")
+    return Response(
+        content=photo.image,
+        media_type=photo.content_type or "image/jpeg",
+        headers={
+            # Photos are immutable once captured, so let the browser keep them.
+            "Cache-Control": "public, max-age=86400",
+            "Content-Disposition": f'inline; filename="{event_id}.jpg"',
+        },
+    )
+
+
+@router.post("/events/{event_id}/rating")
+async def rate_event_photo(
+    event_id: str, payload: PhotoRatingIn, session: AsyncSession = Depends(get_db)
+):
+    """Rate how usable an event's photo is (1-5), or clear it with null."""
+    row = await session.get(Event, event_id)
+    if row is None:
+        raise HTTPException(404, "Event not found")
+    row.photo_rating = payload.rating
+    row.photo_rating_at = datetime.now(timezone.utc) if payload.rating is not None else None
+
+    # A highly-rated photo is the best available portrait of that identity,
+    # so promote it to their cover image.
+    if payload.rating is not None and payload.rating >= 4 and row.person_id:
+        person = await session.get(Person, row.person_id)
+        if person is not None:
+            current_best = None
+            if person.cover_event_id:
+                cover = await session.get(Event, person.cover_event_id)
+                current_best = cover.photo_rating if cover else None
+            if current_best is None or payload.rating >= current_best:
+                person.cover_event_id = row.id
+    await session.commit()
+    await session.refresh(row)
+    return {"id": row.id, "photo_rating": row.photo_rating}
+
+
+@router.post("/events/{event_id}/person")
+async def assign_event_person(
+    event_id: str, payload: PersonAssignIn, session: AsyncSession = Depends(get_db)
+):
+    """Say who is in an event; this is also how the matcher is taught."""
+    row = await session.get(Event, event_id)
+    if row is None:
+        raise HTTPException(404, "Event not found")
+    if not payload.person_id and not (payload.name and payload.name.strip()):
+        raise HTTPException(400, "Provide either person_id or name")
+    person = await person_service.assign_person(
+        session, row, payload.person_id, payload.name
+    )
+    if person is None:
+        raise HTTPException(404, "Person not found")
+    await session.commit()
+    await session.refresh(person)
+    return person_service.to_dict(person)
+
+
+@router.get("/persons")
+async def persons(session: AsyncSession = Depends(get_db)):
+    """Everyone HomeCam has grouped, named or not.
+
+    ``recognition`` reports whether automatic re-identification is actually
+    available: with no Foundry credentials the local fallback embedder cannot
+    generalize across pose/lighting, and the UI must say so rather than imply
+    recognition is working.
+    """
+    embedder = get_image_embedder()
+    rows = await person_service.list_persons(session)
+    counts = await person_service.sighting_counts(session)
+    return {
+        "recognition": {
+            "enabled": settings.person_recognition_enabled,
+            "backend": embedder.name,
+            "semantic": embedder.semantic,
+            "match_threshold": settings.person_match_threshold,
+        },
+        "persons": [person_service.to_dict(row, counts.get(row.id)) for row in rows],
+    }
+
+
+@router.get("/persons/{person_id}")
+async def person_detail(person_id: str, session: AsyncSession = Depends(get_db)):
+    person = await person_service.get_person(session, person_id)
+    if person is None:
+        raise HTTPException(404, "Person not found")
+    events_seen = await person_service.events_for_person(session, person_id)
+    payload = person_service.to_dict(person)
+    payload["events"] = await _decorate_events(session, events_seen)
+    return payload
+
+
+@router.patch("/persons/{person_id}")
+async def update_person(
+    person_id: str, payload: PersonUpdateIn, session: AsyncSession = Depends(get_db)
+):
+    """Name (or rename) an identity. Retroactively labels every past sighting,
+    because they were already clustered together before anyone was named."""
+    person = await person_service.get_person(session, person_id)
+    if person is None:
+        raise HTTPException(404, "Person not found")
+    if payload.name is not None:
+        person.name = payload.name.strip()[:120] or None
+    if payload.notes is not None:
+        person.notes = payload.notes.strip()[:2000] or None
+    person.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(person)
+    return person_service.to_dict(person)
+
+
+@router.get("/persons/{person_id}/photo")
+async def person_photo(person_id: str, session: AsyncSession = Depends(get_db)):
+    """Representative photo for an identity (their best-rated sighting)."""
+    person = await person_service.get_person(session, person_id)
+    if person is None:
+        raise HTTPException(404, "Person not found")
+    if not person.cover_event_id:
+        raise HTTPException(404, "No photo stored for this person")
+    photo = await session.get(EventPhoto, person.cover_event_id)
+    if photo is None:
+        raise HTTPException(404, "No photo stored for this person")
+    return Response(
+        content=photo.image,
+        media_type=photo.content_type or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.get("/events/{event_id}")
@@ -279,7 +457,7 @@ async def event_detail(event_id: str, session: AsyncSession = Depends(get_db)):
     row = await session.get(Event, event_id)
     if row is None:
         raise HTTPException(404, "Event not found")
-    payload = event_service.to_dict(row)
+    payload = (await _decorate_events(session, [row]))[0]
     if row.ai_analysis_id:
         analysis = await session.get(AIAnalysis, row.ai_analysis_id)
         if analysis is not None:

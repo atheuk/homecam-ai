@@ -31,6 +31,30 @@ class ProviderOutageIn(BaseModel):
     unavailable:bool = True
 
 
+class PhotoRatingIn(BaseModel):
+    """Human quality rating of an event's stored photo (1 = useless, 5 = perfect)."""
+
+    rating: int | None = Field(default=None, ge=1, le=5)
+
+
+class PersonAssignIn(BaseModel):
+    """Assign (or correct) who is in an event.
+
+    Exactly one of ``person_id`` (an existing identity) or ``name`` (create a
+    new named identity from this event) is normally supplied. Supplying both
+    assigns to the existing identity and renames it, which is what "this is
+    actually Sarah, not Unknown person 3" means in practice.
+    """
+
+    person_id: str | None = None
+    name: str | None = Field(default=None, max_length=120)
+
+
+class PersonUpdateIn(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
 class MockAudioIn(BaseModel):
     """Raw mono 16-bit little-endian PCM, base64 encoded.
 

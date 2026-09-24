@@ -97,6 +97,7 @@ async def list_events(session: AsyncSession, limit: int = 50) -> list[Event]:
 
 
 def to_dict(row: Event) -> dict:
+    metadata = row.event_metadata or {}
     return {
         "id": row.id,
         "camera_id": row.camera_id,
@@ -111,5 +112,10 @@ def to_dict(row: Event) -> dict:
         "best_photo_path": row.best_photo_path,
         "ai_analysis_id": row.ai_analysis_id,
         "activity_id": row.activity_id,
-        "metadata": row.event_metadata,
+        "person_id": row.person_id,
+        "person_confidence": row.person_confidence,
+        "person_confirmed": bool(row.person_confirmed),
+        "photo_rating": row.photo_rating,
+        "photo_caption": metadata.get("photo_caption"),
+        "metadata": metadata,
     }

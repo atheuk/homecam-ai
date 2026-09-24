@@ -30,9 +30,11 @@ from ..ai.dwell import dwell_tracker
 from ..ai.provider import AnalysisContext, get_ai_provider
 from ..ai.schemas import GroundingError
 from ..ai.semantics import derive_semantics
+from ..ai.vision import get_image_captioner, get_image_embedder
 from ..config import settings
-from ..models.db import AIAnalysis, Event
+from ..models.db import AIAnalysis, Event, EventPhoto
 from ..providers.base import CameraOfflineError, CameraNotFoundError, ProviderUnavailableError
+from . import persons as person_service
 from . import zones as zone_service
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,12 @@ async def _sample_frames(provider, camera_id: str, count: int) -> list[bytes]:
 
 
 def _store_best_photo(event_id: str, image: bytes) -> str | None:
+    """Best-effort mirror of the photo onto ``media_root``.
+
+    The database row written by :func:`_persist_event_photo` is the durable
+    copy; this local file is kept only as a debugging/observability aid on
+    hosts with a real filesystem and is never what serves the API.
+    """
     try:
         root = Path(settings.media_root) / "best-photos"
         root.mkdir(parents=True, exist_ok=True)
@@ -74,6 +82,54 @@ def _store_best_photo(event_id: str, image: bytes) -> str | None:
     except OSError as exc:
         logger.warning("could not persist best photo for %s: %s", event_id, exc)
         return None
+
+
+async def _persist_event_photo(
+    session: AsyncSession, event_id: str, photo, caption: str | None
+) -> None:
+    """Upsert the durable copy of an event's photo."""
+    existing = await session.get(EventPhoto, event_id)
+    if existing is None:
+        session.add(
+            EventPhoto(
+                event_id=event_id,
+                image=photo.image,
+                content_type=photo.content_type,
+                width=photo.width,
+                height=photo.height,
+                caption=caption,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return
+    existing.image = photo.image
+    existing.content_type = photo.content_type
+    existing.width = photo.width
+    existing.height = photo.height
+    if caption:
+        existing.caption = caption
+
+
+async def _caption_photo(photo) -> str | None:
+    captioner = get_image_captioner()
+    if captioner is None:
+        return None
+    try:
+        return await captioner.caption_image(photo.image, photo.content_type)
+    except Exception as exc:  # noqa: BLE001 - a caption is never worth an event
+        logger.warning("photo captioning failed: %s", exc)
+        return None
+
+
+async def _embed_photo(photo) -> list[float]:
+    if not settings.person_recognition_enabled:
+        return []
+    embedder = get_image_embedder()
+    try:
+        return await embedder.embed_image(photo.image)
+    except Exception as exc:  # noqa: BLE001 - recognition degrades, ingest survives
+        logger.warning("person embedding failed: %s", exc)
+        return []
 
 
 async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
@@ -132,6 +188,7 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
         row.description = semantics.description[:500]
     row.source = "local-ai" if detections else row.source
 
+    person_match = None
     if frames and settings.best_photo_enabled and detections:
         try:
             photo = best_photo_module.select_best_photo(
@@ -144,13 +201,40 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
             stored = _store_best_photo(row.id, photo.image)
             row.best_photo_path = stored
             row.thumbnail_path = stored
+
+            # Only bother captioning/embedding when a person is actually the
+            # subject: a caption of a passing car costs a model call and
+            # teaches the identity matcher nothing.
+            is_person_photo = photo.detection is not None and photo.detection.label == "person"
+            caption = await _caption_photo(photo) if is_person_photo else None
+            await _persist_event_photo(session, row.id, photo, caption)
+
             metadata = dict(row.event_metadata or {})
             metadata["best_photo"] = photo.as_dict()
+            if caption:
+                metadata["photo_caption"] = caption
             row.event_metadata = metadata
+
+            if is_person_photo:
+                embedding = await _embed_photo(photo)
+                if embedding:
+                    try:
+                        person_match = await person_service.record_sighting(
+                            session, row, embedding, at=now
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("person matching failed for %s: %s", row.id, exc)
 
     analysis_row = await _persist_ai_analysis(session, row, camera_name, detections, semantics)
     if analysis_row is not None:
         row.ai_analysis_id = analysis_row.id
+
+    # Once we know *who* it is, say so: "Sarah detected on Front Yard" is the
+    # whole point of naming people, and it should be visible without opening
+    # the event. Only applied to already-named identities, because
+    # "Unknown person 4F2A detected" is noise, not information.
+    if person_match is not None and person_match.person.name:
+        row.description = f"{person_match.person.name} seen on {camera_name}"[:500]
 
     enriched = dict(event)
     enriched.update(
@@ -163,6 +247,13 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
             "thumbnail_path": row.thumbnail_path,
             "best_photo_path": row.best_photo_path,
             "ai_analysis_id": row.ai_analysis_id,
+            "person_id": row.person_id,
+            "person_name": person_match.person.name if person_match else None,
+            "person_display_name": (
+                person_service.display_name(person_match.person) if person_match else None
+            ),
+            "person_confidence": row.person_confidence,
+            "person_is_new": person_match.created if person_match else None,
             "detections": [detection.as_dict() for detection in detections],
         }
     )

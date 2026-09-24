@@ -12,10 +12,17 @@ param containerImage string
 param isPlaceholder bool
 param appInsightsConnectionString string
 param tailscaleAuthKeySecretUri string
+
+@description('Azure AI Foundry account resource id providing image embeddings + captions.')
+param foundryAccountId string
+param foundryEndpoint string
+param foundryVisionDeployment string
+var foundryAccountName = last(split(foundryAccountId, '/'))
 var effectiveImage = containerImage
 var effectivePort = isPlaceholder ? 80 : 8000
 var tailscaleImage = 'tailscale/tailscale:v1.102.4'
 resource acr 'Microsoft.ContainerRegistry/registries@2025-11-01' existing = { name: last(split(acrId, '/')) }
+resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = { name: foundryAccountName }
 resource app 'Microsoft.App/containerApps@2026-01-01' = {
   name: name
   location: location
@@ -56,6 +63,12 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
           keyVaultUrl: tailscaleAuthKeySecretUri
           identity: managedIdentityId
         }
+        {
+          // Resolved at deployment time from the Foundry account itself, so
+          // the key is never checked in and rotates with the account.
+          name: 'foundry-api-key'
+          value: foundry.listKeys().key1
+        }
       ]
     }
     template: {
@@ -92,11 +105,19 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
                 // browser (never on the tailnet) can fetch HLS manifests/segments.
                 { name: 'PUBLIC_API_BASE_URL', value: 'https://${name}.${environmentDomain}' }
                 { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsightsConnectionString }
+                // Person recognition (Azure AI Foundry). Without these the API
+                // falls back to a local hash embedder that cannot match the
+                // same person twice, and the UI reports that honestly.
+                { name: 'FOUNDRY_ENDPOINT', value: foundryEndpoint }
+                { name: 'FOUNDRY_VISION_DEPLOYMENT', value: foundryVisionDeployment }
+                { name: 'PERSON_RECOGNITION_ENABLED', value: 'true' }
+                { name: 'PERSON_CAPTION_ENABLED', value: 'true' }
               ],
               isPlaceholder ? [] : [
                 { name: 'DATABASE_URL', secretRef: 'database-url' }
                 { name: 'REDIS_URL', secretRef: 'redis-url' }
                 { name: 'SECRET_KEY', secretRef: 'secret-key' }
+                { name: 'FOUNDRY_API_KEY', secretRef: 'foundry-api-key' }
                 { name: 'TAILSCALE_HTTP_PROXY', value: 'http://127.0.0.1:1055' }
               ]
             )

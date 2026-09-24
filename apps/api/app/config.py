@@ -17,6 +17,37 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=384, ge=8, le=4096)
     best_photo_frames: int = Field(default=3, ge=1, le=10)
     best_photo_enabled: bool = True
+    # Person identity / re-identification (Azure AI Foundry backed).
+    #
+    # ``foundry_endpoint``/``foundry_api_key`` point at an Azure AI Services
+    # ("AI Foundry") account. Two *separate* capabilities of that one account
+    # are used, and each degrades independently:
+    #
+    #  * multimodal image embeddings (``/computervision/retrieval:vectorizeImage``)
+    #    turn a person crop into a vector used to recognize the same person on
+    #    a later visit. Without it, a deterministic local embedding is used so
+    #    the feature still works offline/in tests (it just cannot generalize
+    #    across lighting/pose the way the real model does).
+    #  * a vision chat deployment used to caption the crop in plain language
+    #    ("a person in a dark jacket at the front door"), because a bare
+    #    cropped image with no words is not "understandable" on its own.
+    foundry_endpoint: str | None = None
+    foundry_api_key: str | None = None
+    foundry_vision_deployment: str = "homecam-vision"
+    foundry_vision_api_version: str = "2024-10-21"
+    foundry_embedding_api_version: str = "2024-02-01"
+    foundry_embedding_model_version: str = "2023-04-15"
+    foundry_timeout_seconds: float = Field(default=20.0, gt=0)
+    person_recognition_enabled: bool = True
+    # Cosine similarity above which a new sighting is considered the *same*
+    # person as an existing identity. Azure's multimodal image vectors put
+    # genuinely different people well below this; tuned conservatively so the
+    # system prefers "new unknown person" over confidently mislabeling someone.
+    person_match_threshold: float = Field(default=0.86, gt=0.0, le=1.0)
+    # Never keep more than this many example vectors per person; the centroid
+    # plus a bounded sample list keeps matching cheap and storage predictable.
+    person_max_samples: int = Field(default=25, ge=1, le=500)
+    person_caption_enabled: bool = True
     zone_min_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
     parked_vehicle_seconds: float = Field(default=60.0, gt=0.0)
     audio_detection_enabled: bool = False

@@ -17,4 +17,9 @@ greenlet==3.5.5
 # local dev on that platform stays on the mock backend; CI (ubuntu-latest)
 # and the deployed Linux container images install and use it normally.
 numpy==2.4.4
+# Required (not optional) for person recognition: the readable person crop
+# that gets stored, rated and embedded is produced with Pillow. Without it
+# best photos fall back to uncropped full frames, in which a person can be
+# ~2% of a 4K image and is unusable for identification.
+pillow==11.1.0
 opencv-python-headless==4.11.0.86 ; platform_system != "Windows" or platform_machine != "ARM64"

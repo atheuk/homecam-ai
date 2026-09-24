@@ -1,9 +1,10 @@
 "use client";
-import {useEffect,useRef,useState} from "react";
+import {useCallback,useEffect,useRef,useState} from "react";
 import Hls from "hls.js";
 import AdminPanel from "./AdminPanel";
+import {EventCard,PeoplePanel,type EventItem,type Person} from "./People";
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
-type Camera={id:string;name:string;type:string;online:boolean;battery_level?:number}; type Event={id:string;camera_id:string;type:string;description:string;start_time:string};
+type Camera={id:string;name:string;type:string;online:boolean;battery_level?:number}; type Event=EventItem;
 type LiveStream={kind:string;browser_playable:boolean;stream_url:string}|{error:string};
 
 /** Plays an HLS (.m3u8) stream in the visitor's own browser.
@@ -75,11 +76,19 @@ function LiveView({cams}:{cams:Camera[]}){
   })}</section>;
 }
 
-export default function Home(){const [cams,setCams]=useState<Camera[]>([]);const [events,setEvents]=useState<Event[]>([]);const [tab,setTab]=useState("Overview");
-useEffect(()=>{Promise.all([fetch(`${API}/api/v1/cameras`).then(r=>r.json()),fetch(`${API}/api/v1/events`).then(r=>r.json())]).then(([c,e])=>{setCams(c);setEvents(e)});const es=new EventSource(`${API}/api/v1/ws`);es.addEventListener("event.created",e=>setEvents(x=>[JSON.parse((e as MessageEvent).data),...x]));return()=>es.close()},[]);
+export default function Home(){const [cams,setCams]=useState<Camera[]>([]);const [events,setEvents]=useState<Event[]>([]);const [persons,setPersons]=useState<Person[]>([]);const [tab,setTab]=useState("Overview");
+// Refreshed after any rating/naming action so the event list reflects the
+// newly-assigned identity (and any other events auto-matched to it).
+const refresh=useCallback(()=>{
+  Promise.all([
+    fetch(`${API}/api/v1/events`).then(r=>r.json()),
+    fetch(`${API}/api/v1/persons`).then(r=>r.json()).catch(()=>({persons:[]})),
+  ]).then(([e,p])=>{setEvents(e);setPersons(p.persons||[])}).catch(()=>{});
+},[]);
+useEffect(()=>{Promise.all([fetch(`${API}/api/v1/cameras`).then(r=>r.json()),fetch(`${API}/api/v1/events`).then(r=>r.json()),fetch(`${API}/api/v1/persons`).then(r=>r.json()).catch(()=>({persons:[]}))]).then(([c,e,p])=>{setCams(c);setEvents(e);setPersons(p.persons||[])});const es=new EventSource(`${API}/api/v1/ws`);es.addEventListener("event.created",e=>setEvents(x=>[JSON.parse((e as MessageEvent).data),...x]));return()=>es.close()},[]);
 // Cameras that are offline/disconnected (e.g. a Dahua NVR channel with no
 // physical camera attached) are never shown: there is nothing useful to
 // view or interact with for them, and surfacing them just as dead tiles
 // only confuses "is my system working" at a glance.
 const activeCams=cams.filter(c=>c.online);
-return <main><header><div><span className="eyebrow">LOCAL-FIRST SECURITY</span><h1>HomeCam <em>AI</em></h1></div><span className="status"><i/> System operational</span></header><nav>{["Overview","Live","Events","System","Settings"].map(x=><button className={tab===x?"active":""} onClick={()=>setTab(x)} key={x}>{x}</button>)}</nav><section className="hero"><div><span className="eyebrow">{new Date().toLocaleDateString()}</span><h2>Good evening.</h2><p>Your home is quiet. All cameras are connected.</p></div><div className="metric"><strong>{activeCams.length}</strong><span>CAMERAS ONLINE</span></div><div className="metric"><strong>{events.length}</strong><span>RECENT EVENTS</span></div></section>{tab==="Live"?<LiveView cams={activeCams}/>:tab==="Events"?<section className="panel"><h3>Recent events</h3>{events.length?events.map(e=><article className="event" key={e.id}><b>{e.type.toUpperCase()}</b><span>{e.description}</span><small>{new Date(e.start_time).toLocaleTimeString()}</small></article>):<p className="muted">No events yet. Use POST /api/v1/mock/events to simulate one.</p>}</section>:tab==="Settings"?<AdminPanel/>:<><section className="grid">{activeCams.map(c=><article className="camera" key={c.id}><div className="camera-art"><span>{c.type==="doorbell"?"?":"?"}</span><label>{c.online?"LIVE":"OFFLINE"}</label></div><div className="camera-meta"><div><h3>{c.name}</h3><p>{c.type} ? {c.online?"Connected":"Unavailable"}</p></div>{c.battery_level&&<span className="battery">{c.battery_level}%</span>}</div></article>)}</section><section className="panel"><h3>Activity stream</h3>{events.slice(0,3).map(e=><article className="event" key={e.id}><b>{e.type}</b><span>{e.description}</span><small>{new Date(e.start_time).toLocaleTimeString()}</small></article>)}{!events.length&&<p className="muted">No activity detected.</p>}</section></>}</main>}
+return <main><header><div><span className="eyebrow">LOCAL-FIRST SECURITY</span><h1>HomeCam <em>AI</em></h1></div><span className="status"><i/> System operational</span></header><nav>{["Overview","Live","Events","People","System","Settings"].map(x=><button className={tab===x?"active":""} onClick={()=>setTab(x)} key={x}>{x}</button>)}</nav><section className="hero"><div><span className="eyebrow">{new Date().toLocaleDateString()}</span><h2>Good evening.</h2><p>Your home is quiet. All cameras are connected.</p></div><div className="metric"><strong>{activeCams.length}</strong><span>CAMERAS ONLINE</span></div><div className="metric"><strong>{events.length}</strong><span>RECENT EVENTS</span></div></section>{tab==="Live"?<LiveView cams={activeCams}/>:tab==="Events"?<section className="panel"><h3>Recent events</h3>{events.length?events.map(e=><EventCard key={e.id} event={e} persons={persons} onChanged={refresh}/>):<p className="muted">No events yet. Use POST /api/v1/mock/events to simulate one.</p>}</section>:tab==="People"?<PeoplePanel/>:tab==="Settings"?<AdminPanel/>:<><section className="grid">{activeCams.map(c=><article className="camera" key={c.id}><div className="camera-art"><span>{c.type==="doorbell"?"?":"?"}</span><label>{c.online?"LIVE":"OFFLINE"}</label></div><div className="camera-meta"><div><h3>{c.name}</h3><p>{c.type} ? {c.online?"Connected":"Unavailable"}</p></div>{c.battery_level&&<span className="battery">{c.battery_level}%</span>}</div></article>)}</section><section className="panel"><h3>Activity stream</h3>{events.slice(0,3).map(e=><article className="event" key={e.id}><b>{e.type}</b><span>{e.description}</span><small>{new Date(e.start_time).toLocaleTimeString()}</small></article>)}{!events.length&&<p className="muted">No activity detected.</p>}</section></>}</main>}

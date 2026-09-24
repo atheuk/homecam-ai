@@ -36,6 +36,7 @@ var kvName = 'kv-homecam-ai-dev-82ac'
 var identityName = 'id-homecam-ai-dev-82ac'
 var logName = 'log-homecam-ai-dev-82ac'
 var appInsightsName = 'appi-homecam-ai-dev-82ac'
+var foundryName = 'aif-homecam-ai-dev-82ac'
 var appDbName = 'homecam'
 var postgresAdminLogin = 'homecam'
 
@@ -64,6 +65,11 @@ module acr './modules/acr.bicep' = {
   name: 'acr'
   scope: rg
   params: { name: acrName, location: location, tags: tags }
+}
+module foundry './modules/foundry.bicep' = {
+  name: 'foundry'
+  scope: rg
+  params: { name: foundryName, location: location, tags: tags }
 }
 module postgres './modules/postgres.bicep' = {
   name: 'postgres'
@@ -128,6 +134,9 @@ module api './modules/api.bicep' = {
     appInsightsConnectionString: appInsights.outputs.connectionString
     #disable-next-line no-hardcoded-env-urls
     tailscaleAuthKeySecretUri: 'https://${kvName}.vault.azure.net/secrets/tailscale-auth-key'
+    foundryAccountId: foundry.outputs.id
+    foundryEndpoint: foundry.outputs.endpoint
+    foundryVisionDeployment: foundry.outputs.visionDeploymentName
   }
 }
 module worker './modules/worker.bicep' = {

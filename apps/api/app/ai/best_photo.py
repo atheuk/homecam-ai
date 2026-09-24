@@ -26,6 +26,23 @@ logger = logging.getLogger(__name__)
 CONFIDENCE_WEIGHT = 0.6
 SHARPNESS_WEIGHT = 0.4
 CROP_PADDING = 0.08
+# A detection box can legitimately be a tiny fraction of a 4K frame (a person
+# at the far end of a driveway occupies ~2% of the width). Cropping tightly to
+# that box yields a handful of unreadable pixels, which fails the actual
+# requirement that the saved photo be understandable to a human. These floors
+# expand the crop outward around the detection's centre until it covers at
+# least this much of the frame, so the person is shown *in context* and at a
+# usable size. Upscaling instead would only magnify blur; including
+# surroundings is what makes the shot readable.
+MIN_CROP_WIDTH_FRACTION = 0.22
+MIN_CROP_HEIGHT_FRACTION = 0.30
+# Never emit a crop smaller than this on the long edge; below it, browsers
+# render a thumbnail no one can interpret.
+MIN_CROP_PIXELS = 224
+# Keep a person-shaped (portrait) aspect so heads aren't cut off by a box that
+# was wider than it was tall.
+TARGET_ASPECT_RATIO = 3 / 4  # width / height
+JPEG_QUALITY = 88
 
 
 @dataclass(frozen=True)
@@ -36,6 +53,9 @@ class BestPhoto:
     detection: Detection | None
     image: bytes
     cropped: bool
+    content_type: str = "image/jpeg"
+    width: int | None = None
+    height: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -43,6 +63,8 @@ class BestPhoto:
             "score": round(self.score, 4),
             "sharpness": round(self.sharpness, 4),
             "cropped": self.cropped,
+            "width": self.width,
+            "height": self.height,
             "detection": self.detection.as_dict() if self.detection else None,
         }
 
@@ -92,28 +114,65 @@ def sharpness_score(image: bytes) -> float:
     return value if value is not None else _fallback_sharpness(image)
 
 
-def crop_to_detection(image: bytes, detection: Detection, padding: float = CROP_PADDING) -> tuple[bytes, bool]:
-    """Crop to the detection box with padding; no-op without Pillow."""
+def _readable_crop_box(
+    box, width: int, height: int, padding: float
+) -> tuple[int, int, int, int]:
+    """Expand a detection box into a human-readable crop window.
+
+    Grows the box around its own centre until it meets the minimum frame
+    fraction / pixel floors and a portrait-ish aspect, then slides it back
+    inside the frame rather than clipping it (clipping would re-shrink the
+    very crop we just widened, putting a far-away person back off-centre).
+    """
+    centre_x = (box.x1 + box.x2) / 2 * width
+    centre_y = (box.y1 + box.y2) / 2 * height
+
+    crop_width = (box.x2 - box.x1 + 2 * padding) * width
+    crop_height = (box.y2 - box.y1 + 2 * padding) * height
+
+    crop_width = max(crop_width, MIN_CROP_WIDTH_FRACTION * width, MIN_CROP_PIXELS)
+    crop_height = max(crop_height, MIN_CROP_HEIGHT_FRACTION * height, MIN_CROP_PIXELS)
+
+    # Enforce the portrait target without ever shrinking a dimension.
+    if crop_width / crop_height > TARGET_ASPECT_RATIO:
+        crop_height = crop_width / TARGET_ASPECT_RATIO
+    else:
+        crop_width = crop_height * TARGET_ASPECT_RATIO
+
+    crop_width = min(crop_width, float(width))
+    crop_height = min(crop_height, float(height))
+
+    left = centre_x - crop_width / 2
+    top = centre_y - crop_height / 2
+    left = max(0.0, min(left, width - crop_width))
+    top = max(0.0, min(top, height - crop_height))
+    return int(left), int(top), int(left + crop_width), int(top + crop_height)
+
+
+def crop_to_detection(
+    image: bytes, detection: Detection, padding: float = CROP_PADDING
+) -> tuple[bytes, bool, int | None, int | None]:
+    """Crop around the detection so a human can actually tell who it is.
+
+    Returns ``(bytes, cropped, width, height)``; a no-op without Pillow.
+    """
     try:
         from PIL import Image
     except ImportError:  # pragma: no cover - depends on optional extras
-        return image, False
+        return image, False, None, None
     try:
         frame = Image.open(io.BytesIO(image))
         width, height = frame.size
-        box = detection.bbox
-        left = int(max(box.x1 - padding, 0.0) * width)
-        top = int(max(box.y1 - padding, 0.0) * height)
-        right = int(min(box.x2 + padding, 1.0) * width)
-        bottom = int(min(box.y2 + padding, 1.0) * height)
+        left, top, right, bottom = _readable_crop_box(detection.bbox, width, height, padding)
         if right - left < 2 or bottom - top < 2:
-            return image, False
+            return image, False, width, height
+        cropped = frame.crop((left, top, right, bottom)).convert("RGB")
         buffer = io.BytesIO()
-        frame.crop((left, top, right, bottom)).save(buffer, format=frame.format or "PNG")
-        return buffer.getvalue(), True
+        cropped.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+        return buffer.getvalue(), True, cropped.width, cropped.height
     except Exception as exc:  # noqa: BLE001 - never fail an event over a crop
         logger.debug("best-photo crop skipped: %s", exc)
-        return image, False
+        return image, False, None, None
 
 
 def score_frame(
@@ -148,7 +207,10 @@ def select_best_photo(
         score, sharpness, detection = score_frame(frame, detections, target_labels)
         if best is not None and score <= best.score:
             continue
-        image, cropped = (crop_to_detection(frame, detection) if crop and detection else (frame, False))
+        if crop and detection:
+            image, cropped, width, height = crop_to_detection(frame, detection)
+        else:
+            image, cropped, width, height = frame, False, None, None
         best = BestPhoto(
             frame_index=index,
             score=score,
@@ -156,5 +218,26 @@ def select_best_photo(
             detection=detection,
             image=image,
             cropped=cropped,
+            content_type="image/jpeg" if cropped else _sniff_content_type(image),
+            width=width,
+            height=height,
         )
     return best
+
+
+def _sniff_content_type(image: bytes) -> str:
+    """Media type of an uncropped frame, from its magic bytes.
+
+    Needed because the stored photo is served straight back to a browser:
+    labelling a PNG as JPEG (or as ``application/octet-stream``) makes it
+    render as a broken image or download instead of displaying.
+    """
+    if image.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image.startswith(b"GIF8"):
+        return "image/gif"
+    if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
