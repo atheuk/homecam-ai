@@ -125,8 +125,11 @@ async def _embed_photo(photo) -> list[float]:
     if not settings.person_recognition_enabled:
         return []
     embedder = get_image_embedder()
+    # Match on the tight subject crop, never the readable one: the wide crop
+    # is mostly background, and background dominates the vector.
+    subject = getattr(photo, "subject_image", None) or photo.image
     try:
-        return await embedder.embed_image(photo.image)
+        return await embedder.embed_image(subject)
     except Exception as exc:  # noqa: BLE001 - recognition degrades, ingest survives
         logger.warning("person embedding failed: %s", exc)
         return []

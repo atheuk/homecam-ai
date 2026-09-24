@@ -410,3 +410,44 @@ async def test_reassignment_does_not_leave_an_empty_ghost_identity(client) -> No
     ids = {person["id"] for person in listing.json()["persons"]}
     assert auto_id not in ids, "emptied auto-created identity should be removed"
     assert new_id in ids
+
+
+async def test_matching_uses_a_tight_crop_not_the_readable_one() -> None:
+    """The matcher must see the subject, not the scene.
+
+    Measured on the deployed Azure embedder, wide readable crops of two
+    different moments of the same empty garden scored 0.969 cosine
+    similarity - high enough that every visitor to a driveway would collapse
+    into one identity. Tight crops pulled genuinely different subjects down
+    to 0.857-0.934. If this ever silently reverts to embedding `image`,
+    automatic recognition quietly becomes wrong rather than broken.
+    """
+    from PIL import Image as PILImage
+
+    from app.ai.best_photo import crop_to_detection, crop_to_subject
+    from app.ai.detector import BoundingBox, Detection
+
+    frame_w, frame_h = 1280, 720
+    frame = _jpeg(colour=(30, 120, 200), size=(frame_w, frame_h))
+    # A far-away person: ~3% of frame width, the case that motivated the
+    # readable-crop expansion in the first place.
+    detection = Detection(
+        label="person",
+        confidence=0.8,
+        bbox=BoundingBox(x1=0.40, y1=0.30, x2=0.43, y2=0.40),
+    )
+
+    subject = crop_to_subject(frame, detection)
+    readable, cropped, readable_w, readable_h = crop_to_detection(frame, detection)
+    assert cropped
+
+    subject_size = PILImage.open(io.BytesIO(subject)).size
+    # The readable crop is expanded to minimum frame fractions; the subject
+    # crop must stay near the detection box instead.
+    assert subject_size[0] < readable_w
+    assert subject_size[1] < readable_h
+    assert subject != readable
+
+    detection_px_w = (detection.bbox.x2 - detection.bbox.x1) * frame_w
+    # Only the upscale-to-minimum should inflate it, nothing else.
+    assert subject_size[0] <= max(detection_px_w * 2, 64) + 8

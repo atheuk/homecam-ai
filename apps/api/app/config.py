@@ -40,10 +40,22 @@ class Settings(BaseSettings):
     foundry_timeout_seconds: float = Field(default=20.0, gt=0)
     person_recognition_enabled: bool = True
     # Cosine similarity above which a new sighting is considered the *same*
-    # person as an existing identity. Azure's multimodal image vectors put
-    # genuinely different people well below this; tuned conservatively so the
-    # system prefers "new unknown person" over confidently mislabeling someone.
-    person_match_threshold: float = Field(default=0.86, gt=0.0, le=1.0)
+    # person as an existing identity.
+    #
+    # Measured against the deployed Azure multimodal embedder using tight
+    # subject crops: the same subject under a lighting change or a small
+    # position shift scored 0.984-0.989, while visibly different subjects in
+    # the same scene scored 0.857-0.934. 0.96 sits in that gap.
+    #
+    # Note how high the floor is: nothing measured scored below 0.85, so the
+    # intuitive-looking 0.86 would have merged every visitor into a single
+    # identity. These vectors describe whole images, not faces, so absolute
+    # similarity runs high and only the margin is meaningful.
+    #
+    # Erring high is deliberate: an unrecognised returning visitor is a minor
+    # annoyance the user can fix by naming them, whereas two people merged
+    # into one identity is a wrong answer they may never notice.
+    person_match_threshold: float = Field(default=0.96, gt=0.0, le=1.0)
     # Never keep more than this many example vectors per person; the centroid
     # plus a bounded sample list keeps matching cheap and storage predictable.
     person_max_samples: int = Field(default=25, ge=1, le=500)

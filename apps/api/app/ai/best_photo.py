@@ -44,6 +44,13 @@ MIN_CROP_PIXELS = 224
 TARGET_ASPECT_RATIO = 3 / 4  # width / height
 JPEG_QUALITY = 88
 
+# Matching crop: subject pixels only. The margin is a fraction of the
+# detection box, not of the frame - a fixed frame fraction would swamp a
+# far-away subject with exactly the background we are trying to exclude.
+SUBJECT_CROP_PADDING = 0.06
+# Azure's image vectoriser rejects very small inputs; upscale to clear it.
+SUBJECT_MIN_PIXELS = 64
+
 
 @dataclass(frozen=True)
 class BestPhoto:
@@ -56,6 +63,9 @@ class BestPhoto:
     content_type: str = "image/jpeg"
     width: int | None = None
     height: int | None = None
+    # Tight crop of the subject, used for identity matching only. Never
+    # shown to the user — `image` is the readable version.
+    subject_image: bytes | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -149,6 +159,52 @@ def _readable_crop_box(
     return int(left), int(top), int(left + crop_width), int(top + crop_height)
 
 
+def crop_to_subject(image: bytes, detection: Detection) -> bytes:
+    """Crop tightly to the detection, for embedding rather than display.
+
+    The readable crop deliberately includes a lot of surroundings so a human
+    can see who it is. That is actively harmful for re-identification:
+    measured against the deployed Azure multimodal embedder, two *different*
+    frames of the same empty garden scored 0.969 cosine similarity, because
+    the vector mostly describes the scene. Feeding those wide crops to the
+    matcher would merge everyone who stands in the same driveway into a
+    single identity.
+
+    So the matcher gets the subject pixels only, with a small margin. Crops
+    below the embedder's usable size are upscaled rather than widened —
+    widening would put the background straight back in.
+    """
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - depends on optional extras
+        return image
+    try:
+        frame = Image.open(io.BytesIO(image))
+        width, height = frame.size
+        box = detection.bbox
+        pad_x = SUBJECT_CROP_PADDING * (box.x2 - box.x1) * width
+        pad_y = SUBJECT_CROP_PADDING * (box.y2 - box.y1) * height
+        left = max(0.0, box.x1 * width - pad_x)
+        top = max(0.0, box.y1 * height - pad_y)
+        right = min(float(width), box.x2 * width + pad_x)
+        bottom = min(float(height), box.y2 * height + pad_y)
+        if right - left < 2 or bottom - top < 2:
+            return image
+        subject = frame.crop((int(left), int(top), int(right), int(bottom))).convert("RGB")
+        if subject.width < SUBJECT_MIN_PIXELS or subject.height < SUBJECT_MIN_PIXELS:
+            scale = SUBJECT_MIN_PIXELS / min(subject.width, subject.height)
+            subject = subject.resize(
+                (max(1, round(subject.width * scale)), max(1, round(subject.height * scale))),
+                Image.LANCZOS,
+            )
+        buffer = io.BytesIO()
+        subject.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+        return buffer.getvalue()
+    except Exception as exc:  # noqa: BLE001 - never fail an event over a crop
+        logger.debug("subject crop skipped: %s", exc)
+        return image
+
+
 def crop_to_detection(
     image: bytes, detection: Detection, padding: float = CROP_PADDING
 ) -> tuple[bytes, bool, int | None, int | None]:
@@ -221,6 +277,7 @@ def select_best_photo(
             content_type="image/jpeg" if cropped else _sniff_content_type(image),
             width=width,
             height=height,
+            subject_image=crop_to_subject(frame, detection) if detection else None,
         )
     return best
 
