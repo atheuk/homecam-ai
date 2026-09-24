@@ -86,16 +86,25 @@ def settings_from_env() -> EdgeSettings:
 class DahuaClient:
     settings: EdgeSettings
     transport: httpx.AsyncBaseTransport | None = field(default=None)
+    # This NVR's embedded HTTP server only sustains ~1-2 concurrent CGI
+    # sessions. Continuous AI-ingestion polling (Azure side) and per-channel
+    # liveness probing both now add extra callers on top of real viewer
+    # snapshot/stream requests, so every outbound call is serialized here
+    # rather than relying on each caller to coordinate; overlapping requests
+    # otherwise make the NVR reject *all* of them, including ones for
+    # channels that are genuinely online.
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def _auth(self) -> httpx.DigestAuth:
         assert self.settings.dahua_username and self.settings.dahua_password
         return httpx.DigestAuth(self.settings.dahua_username, self.settings.dahua_password)
 
     async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
-        async with httpx.AsyncClient(
-            timeout=self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
-        ) as client:
-            return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
+        async with self._lock:
+            async with httpx.AsyncClient(
+                timeout=self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
+            ) as client:
+                return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
 
     async def probe(self) -> tuple[bool, str]:
         if not self.settings.dahua_configured:
