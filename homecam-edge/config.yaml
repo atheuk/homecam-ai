@@ -1,5 +1,5 @@
 name: HomeCam Dahua edge connector
-version: "1.1.0"
+version: "1.2.0"
 slug: homecam_dahua_edge
 description: Token-authenticated Dahua LAN bridge with browser-safe HLS relay
 url: https://github.com/atheuk/homecam-ai/tree/atheuk-ha-pi-edge-connector/homecam-edge

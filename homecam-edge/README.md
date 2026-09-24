@@ -22,3 +22,18 @@ router-port-forward 8443, 8554, 8888, or 8189. Configure HomeCam's Dahua
 The Dahua NVR credentials stay only in the add-on's Supervisor-managed
 configuration. Neither the connector API nor the live endpoint returns raw
 RTSP URLs or Dahua credentials.
+
+## Camera online/offline reporting
+
+`/channels` reports each channel individually: a channel with no camera
+physically attached is `online: false` even though the NVR answers fine.
+
+This NVR's embedded HTTP server only sustains ~1-2 concurrent CGI sessions
+and refuses a session whenever it is busy, so a failed whole-NVR
+reachability probe is *not* treated as proof that the cameras went away. A
+channel that produced a real snapshot within `CHANNEL_LIVENESS_TTL_SECONDS`
+(default 60) keeps its online status through such a blip; once that
+evidence expires without a successful probe it does drop to offline.
+Failed reachability probes are re-checked after
+`DAHUA_PROBE_FAILURE_TTL_SECONDS` (default 5) rather than being cached for
+the full `DAHUA_PROBE_TTL_SECONDS` (default 30).
