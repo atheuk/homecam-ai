@@ -67,6 +67,19 @@ class Settings(BaseSettings):
     # plus a bounded sample list keeps matching cheap and storage predictable.
     person_max_samples: int = Field(default=25, ge=1, le=500)
     person_caption_enabled: bool = True
+    # Structured appearance analysis (apparent age band, clothing, carried
+    # items, face visibility) plus a "is a person really there" second
+    # opinion used to verify detection borders. Uses the same Foundry vision
+    # deployment as captioning. Deliberately does not infer ethnicity or
+    # gender; see :mod:`app.ai.appearance` for why.
+    appearance_analysis_enabled: bool = True
+    # Cosine similarity at or above which two *identities* (not two
+    # sightings) are considered the same person and merged when the user
+    # names one of them. Kept at the same floor as ``person_match_threshold``
+    # rather than loosened: merging is harder to notice and harder to undo
+    # than a missed match, so extra evidence comes from comparing whole
+    # clusters, not from lowering the bar.
+    person_merge_threshold: float = Field(default=0.96, gt=0.0, le=1.0)
     # Animal species + breed identification (SPEC 13 animal category). Uses
     # the same Foundry vision deployment as captioning; without Foundry the
     # event still reports the detected species class, just no breed.

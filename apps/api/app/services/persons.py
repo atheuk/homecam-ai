@@ -36,6 +36,21 @@ from ..models.db import Event, Person, PersonSighting
 
 logger = logging.getLogger(__name__)
 
+# Trust is declared by the household, never inferred from appearance.
+# "unknown" is the honest default for someone nobody has vouched for.
+TRUST_LEVELS: tuple[str, ...] = ("unknown", "trusted", "watch")
+DEFAULT_TRUST = "unknown"
+
+
+def normalize_trust(value: str | None) -> str:
+    """Coerce arbitrary input to a known trust level."""
+    candidate = (value or "").strip().casefold()
+    return candidate if candidate in TRUST_LEVELS else DEFAULT_TRUST
+
+
+def trust_of(person: Person | None) -> str:
+    return normalize_trust(getattr(person, "trust", None)) if person else DEFAULT_TRUST
+
 
 @dataclass(frozen=True)
 class MatchResult:
@@ -253,6 +268,10 @@ async def assign_person(
     event.person_id = person.id
     event.person_confidence = None
     event.person_confirmed = True
+    # Naming is ground truth, so this is the moment to gather any other
+    # identities that turn out to be the same person.
+    if name is not None and person.name:
+        await consolidate_identity(session, person)
     return person
 
 
@@ -263,6 +282,135 @@ async def rename_person(session: AsyncSession, person_id: str, name: str | None)
     person.name = (name or "").strip()[:120] or None
     person.updated_at = datetime.now(timezone.utc)
     return person
+
+
+# --- Duplicate identity consolidation -------------------------------------
+#
+# Clustering runs before anyone is named, and it is deliberately cautious:
+# ``person_match_threshold`` is set high so that two people are never merged
+# into one identity. The cost of that caution is the opposite error - one
+# person accumulating several identities, because an early sighting in poor
+# light missed the centroid.
+#
+# Naming is the moment to repair this. The user has just supplied ground
+# truth ("this is Sarah"), and by then each cluster has a centroid averaged
+# over several vectors, which is far less noisy than the single sighting
+# vector that failed to match originally. So the same evidence bar can now
+# clear a comparison that it could not clear before, without lowering it.
+
+
+def _max_pairwise_similarity(left: Person, right: Person) -> float:
+    """Best similarity between any reference vector of two identities.
+
+    Centroids drift apart when one identity holds several poses of the same
+    person; comparing the individual samples catches the overlap that the
+    averaged vectors hide.
+    """
+    best = 0.0
+    for sample in left.samples or []:
+        for other in right.samples or []:
+            best = max(best, cosine_similarity(list(sample), list(other)))
+    return best
+
+
+def identity_similarity(left: Person, right: Person) -> float:
+    """How strongly two identities look like the same person."""
+    centroid = (
+        cosine_similarity(list(left.centroid or []), list(right.centroid or []))
+        if left.centroid and right.centroid
+        else 0.0
+    )
+    return max(centroid, _max_pairwise_similarity(left, right))
+
+
+async def find_duplicates(
+    session: AsyncSession, person: Person, threshold: float | None = None
+) -> list[tuple[Person, float]]:
+    """Identities that appear to be the same person as ``person``.
+
+    Only *unnamed* identities are returned. An identity a human has already
+    named carries their explicit intent: silently folding "Dad" into "Sarah"
+    because two vectors were close would destroy information the user gave
+    us on purpose. Merging two named identities stays a manual action.
+    """
+    bar = threshold if threshold is not None else settings.person_merge_threshold
+    duplicates: list[tuple[Person, float]] = []
+    for candidate in await list_persons(session):
+        if candidate.id == person.id or candidate.name:
+            continue
+        similarity = identity_similarity(person, candidate)
+        if similarity >= bar:
+            duplicates.append((candidate, similarity))
+    duplicates.sort(key=lambda pair: pair[1], reverse=True)
+    return duplicates
+
+
+async def merge_person(session: AsyncSession, target: Person, source: Person) -> Person:
+    """Fold ``source`` into ``target``, then delete ``source``.
+
+    Everything the absorbed identity knew is kept: its sightings are
+    re-pointed, its events re-labelled, and its reference vectors join the
+    target's sample list so the merged identity matches at least as well as
+    either half did. Timestamps widen to cover both histories.
+    """
+    if target.id == source.id:
+        return target
+    now = datetime.now(timezone.utc)
+
+    result = await session.execute(
+        select(PersonSighting).where(PersonSighting.person_id == source.id)
+    )
+    for sighting in result.scalars().all():
+        sighting.person_id = target.id
+
+    events = await session.execute(select(Event).where(Event.person_id == source.id))
+    for event in events.scalars().all():
+        event.person_id = target.id
+
+    samples = [list(sample) for sample in (target.samples or [])]
+    for sample in source.samples or []:
+        vector = list(sample)
+        if vector and vector not in samples:
+            samples.append(vector)
+    if len(samples) > settings.person_max_samples:
+        samples = samples[-settings.person_max_samples :]
+    target.samples = samples
+    target.centroid = _recompute_centroid(samples)
+    target.embedding_dimensions = len(target.centroid)
+
+    target.sighting_count = (target.sighting_count or 0) + (source.sighting_count or 0)
+    target.first_seen_at = min(_aware(target.first_seen_at, now), _aware(source.first_seen_at, now))
+    target.last_seen_at = max(_aware(target.last_seen_at, now), _aware(source.last_seen_at, now))
+    if target.cover_event_id is None:
+        target.cover_event_id = source.cover_event_id
+    if not target.notes and source.notes:
+        target.notes = source.notes
+    target.updated_at = now
+
+    await session.delete(source)
+    return target
+
+
+async def consolidate_identity(
+    session: AsyncSession, person: Person, threshold: float | None = None
+) -> list[str]:
+    """Absorb every unnamed duplicate of ``person``; returns merged ids.
+
+    Called when an identity is named, which is exactly when the user has
+    told us who this cluster is and would expect their past visits to be
+    gathered under that name rather than scattered across "Unknown person"
+    entries.
+    """
+    if not person.name:
+        return []
+    merged: list[str] = []
+    for duplicate, similarity in await find_duplicates(session, person, threshold):
+        logger.info(
+            "merging identity %s into %s (similarity %.4f)", duplicate.id, person.id, similarity
+        )
+        await merge_person(session, person, duplicate)
+        merged.append(duplicate.id)
+    return merged
 
 
 async def _detach_from_person(session: AsyncSession, event: Event, person_id: str) -> None:
@@ -361,6 +509,7 @@ def to_dict(person: Person, sighting_count: int | None = None) -> dict:
         "display_name": display_name(person),
         "named": bool(person.name),
         "notes": person.notes,
+        "trust": trust_of(person),
         "sighting_count": sighting_count
         if sighting_count is not None
         else (person.sighting_count or 0),

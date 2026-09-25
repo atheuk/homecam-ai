@@ -105,6 +105,82 @@ class Detection:
         return {"label": self.label, "confidence": round(self.confidence, 4), "bbox": self.bbox.as_dict()}
 
 
+# --- Detection quality controls -------------------------------------------
+#
+# A raw detector backend does not emit one box per object. HOG's sliding
+# window fires repeatedly around the same pedestrian at neighbouring scales,
+# and a YOLO head emits thousands of candidate rows per frame. Without the
+# filters below, one person standing in a driveway produces a dozen nested
+# borders, which reads to the user as "the AI is seeing a crowd".
+
+# Boxes overlapping more than this share of their union are treated as the
+# same object; the lower-confidence one is discarded.
+NMS_IOU_THRESHOLD = 0.45
+# An object occupying less than this fraction of the frame is a handful of
+# pixels: too small to identify, and overwhelmingly foliage or sensor noise.
+MIN_DETECTION_AREA = 0.0008
+# People are taller than they are wide. A "person" box wider than this ratio
+# is a fence panel, a shadow across a path or a car bumper - HOG's most
+# common false positives. Real standing/walking people sit near 0.4-0.6.
+MAX_PERSON_ASPECT_RATIO = 1.15
+# Upper bound on boxes kept per frame. Beyond this the detector is not
+# seeing a scene, it is malfunctioning, and drawing 50 borders helps nobody.
+MAX_DETECTIONS_PER_FRAME = 12
+
+
+def iou(left: BoundingBox, right: BoundingBox) -> float:
+    """Intersection-over-union of two normalized boxes (0.0 when disjoint)."""
+    ix1, iy1 = max(left.x1, right.x1), max(left.y1, right.y1)
+    ix2, iy2 = min(left.x2, right.x2), min(left.y2, right.y2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    intersection = (ix2 - ix1) * (iy2 - iy1)
+    union = left.area + right.area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def suppress_overlaps(
+    detections: list[Detection], iou_threshold: float = NMS_IOU_THRESHOLD
+) -> list[Detection]:
+    """Classic greedy non-maximum suppression, per class.
+
+    Keeps the most confident box and drops anything that overlaps it beyond
+    ``iou_threshold``. Suppression is per-label on purpose: a person walking
+    a dog produces two genuinely overlapping boxes that must both survive.
+    """
+    kept: list[Detection] = []
+    for detection in sorted(detections, key=lambda d: d.confidence, reverse=True):
+        if any(
+            other.label == detection.label and iou(other.bbox, detection.bbox) > iou_threshold
+            for other in kept
+        ):
+            continue
+        kept.append(detection)
+    return kept
+
+
+def plausible(detection: Detection) -> bool:
+    """Whether a box is geometrically credible for what it claims to be."""
+    bbox = detection.bbox
+    if bbox.area < MIN_DETECTION_AREA:
+        return False
+    height = bbox.y2 - bbox.y1
+    if height <= 0:
+        return False
+    if detection.label == "person" and (bbox.x2 - bbox.x1) / height > MAX_PERSON_ASPECT_RATIO:
+        return False
+    return True
+
+
+def refine_detections(
+    detections: list[Detection], iou_threshold: float = NMS_IOU_THRESHOLD
+) -> list[Detection]:
+    """Turn raw backend output into one credible box per real object."""
+    survivors = suppress_overlaps([d for d in detections if plausible(d)], iou_threshold)
+    survivors.sort(key=lambda d: d.confidence, reverse=True)
+    return survivors[:MAX_DETECTIONS_PER_FRAME]
+
+
 @dataclass(frozen=True)
 class DetectionContext:
     """Normalized, provider-agnostic context handed to a detector."""
@@ -257,7 +333,10 @@ class OpenCvDetector:
             detections.append(
                 Detection(label="person", confidence=round(confidence, 4), bbox=BoundingBox(x1, y1, x2, y2))
             )
-        return detections
+        # HOG fires repeatedly around the same pedestrian at neighbouring
+        # scales, so raw output routinely contains several nested boxes per
+        # person. Without suppression each becomes its own drawn border.
+        return refine_detections(detections)
 
 
 # Subset of the 80-class COCO label list relevant to HomeCam (SPEC 13).
@@ -355,7 +434,9 @@ class OnnxDetector:
             detections.append(
                 Detection(label=label, confidence=confidence, bbox=BoundingBox(x1, y1, x2, y2))
             )
-        return detections
+        # A YOLO head emits one row per anchor - thousands per frame, most of
+        # them near-duplicates of the same object. NMS is not optional here.
+        return refine_detections(detections)
 
 
 _mock_detector = MockDetector()

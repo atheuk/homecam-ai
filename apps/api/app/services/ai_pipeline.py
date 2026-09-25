@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import best_photo as best_photo_module
 from ..ai.animals import describe_animal, get_animal_identifier
+from ..ai.appearance import get_appearance_analyzer
 from ..ai.detector import ANIMAL_CLASSES, VEHICLE_CLASSES, Detection, DetectionContext, get_detector
 from ..ai.dwell import dwell_tracker
 from ..ai.provider import AnalysisContext, get_ai_provider
@@ -136,6 +137,40 @@ async def _embed_photo(photo) -> list[float]:
         return []
 
 
+async def _describe_appearance(photo):
+    """Structured, non-protected description of the person in ``photo``.
+
+    Run on the readable crop rather than the tight subject crop: clothing
+    and carried items are often only visible with a little context around
+    the figure, and this output is for a human reader, not the matcher.
+    """
+    analyzer = get_appearance_analyzer()
+    if analyzer is None:
+        return None
+    try:
+        return await analyzer.describe_person(photo.image, photo.content_type)
+    except Exception as exc:  # noqa: BLE001 - a description is never worth an event
+        logger.warning("appearance analysis failed: %s", exc)
+        return None
+
+
+def _mark_verification(boxes: list[dict], confirmed: bool | None) -> list[dict]:
+    """Record whether a vision model agreed something is really there.
+
+    The local detector works on pixel gradients and fires on fence posts,
+    bin bags and shadows. When a vision model looking at the same crop says
+    there is no subject, drawing a confident border around it asserts
+    something we have reason to believe is false. The box is kept as
+    evidence but flagged, so the UI can show it as unconfirmed instead of
+    silently presenting a false positive as a sighting.
+    """
+    if confirmed is None:
+        return boxes
+    for box in boxes:
+        box["verified"] = bool(confirmed)
+    return boxes
+
+
 async def _identify_animal(photo):
     """Name the species/breed of an animal photo, or ``None``.
 
@@ -212,7 +247,9 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
 
     person_match = None
     animal = None
+    appearance = None
     photo_boxes: list[dict] = []
+    photo_verified: bool | None = None
     if frames and settings.best_photo_enabled and detections:
         try:
             photo = best_photo_module.select_best_photo(
@@ -231,16 +268,41 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
             # teaches the identity matcher nothing.
             is_person_photo = photo.detection is not None and photo.detection.label == "person"
             is_animal_photo = photo.detection is not None and photo.detection.label in ANIMAL_CLASSES
-            caption = await _caption_photo(photo) if is_person_photo else None
+
+            # One structured vision call replaces the plain caption when it
+            # is available: it yields the same sentence plus the fields the
+            # event list shows, and a much better "is anyone actually
+            # there?" answer than a pixel detector can give.
+            appearance = await _describe_appearance(photo) if is_person_photo else None
+            if appearance is not None:
+                caption = appearance.description
+                photo_verified = appearance.person_present
+            elif is_person_photo:
+                caption = await _caption_photo(photo)
+                photo_verified = caption_confirms_person(caption) if caption else None
+            else:
+                caption = None
             await _persist_event_photo(session, row.id, photo, caption)
 
             animal = await _identify_animal(photo) if is_animal_photo else None
+            if animal is not None:
+                # The identifier returns species "none" when it looks at the
+                # crop and sees no animal - the same false-positive check the
+                # appearance analyzer performs for people.
+                photo_verified = animal.species != "none"
 
             metadata = dict(row.event_metadata or {})
             metadata["best_photo"] = photo.as_dict()
-            photo_boxes = list(metadata["best_photo"].get("boxes") or [])
+            photo_boxes = _mark_verification(
+                list(metadata["best_photo"].get("boxes") or []), photo_verified
+            )
+            metadata["best_photo"]["boxes"] = photo_boxes
+            if photo_verified is not None:
+                metadata["photo_verified"] = photo_verified
             if caption:
                 metadata["photo_caption"] = caption
+            if appearance is not None:
+                metadata["appearance"] = appearance.as_dict()
             if animal is not None:
                 metadata["animal"] = animal.as_dict()
             row.event_metadata = metadata
@@ -255,7 +317,10 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
                         tags.append(tag)
                 row.tags = tags
 
-            if is_person_photo and caption_confirms_person(caption):
+            # Don't teach the matcher from a frame the vision model says has
+            # nobody in it: a fence post absorbed as a reference vector
+            # corrupts an identity permanently.
+            if is_person_photo and photo_verified is not False:
                 embedding = await _embed_photo(photo)
                 if embedding:
                     try:
@@ -293,9 +358,14 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
                 person_service.display_name(person_match.person) if person_match else None
             ),
             "person_confidence": row.person_confidence,
+            "person_trust": (
+                person_service.trust_of(person_match.person) if person_match else None
+            ),
             "person_is_new": person_match.created if person_match else None,
             "detections": [detection.as_dict() for detection in detections],
             "photo_boxes": photo_boxes,
+            "photo_verified": photo_verified,
+            "appearance": appearance.as_dict() if appearance else None,
             "animal": animal.as_dict() if animal else None,
         }
     )

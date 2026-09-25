@@ -121,6 +121,13 @@ def to_dict(row: Event) -> dict:
         # coordinates by the AI pipeline, so the UI can draw them directly
         # without knowing anything about how the photo was cropped.
         "photo_boxes": list((metadata.get("best_photo") or {}).get("boxes") or []),
+        # Whether a vision model agreed with the local detector. ``None``
+        # means nobody checked (no Foundry configured, or a non-person
+        # subject), which the UI must show as neither confirmation nor doubt.
+        "photo_verified": metadata.get("photo_verified"),
+        # Observable, non-protected description: apparent age band, build,
+        # clothing, carried items, whether the face is visible.
+        "appearance": metadata.get("appearance"),
         "animal": metadata.get("animal"),
         "metadata": metadata,
     }

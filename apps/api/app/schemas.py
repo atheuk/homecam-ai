@@ -1,4 +1,6 @@
 from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -53,6 +55,16 @@ class PersonAssignIn(BaseModel):
 class PersonUpdateIn(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     notes: str | None = Field(default=None, max_length=2000)
+    # A household decision, set by a person who knows them. HomeCam never
+    # derives trust from appearance - doing so would be profiling, and it
+    # cannot possibly be accurate about someone it has never met.
+    trust: Literal["unknown", "trusted", "watch"] | None = None
+
+
+class PersonMergeIn(BaseModel):
+    """Fold one identity into another after a human confirms they match."""
+
+    source_id: str
 
 
 class MockAudioIn(BaseModel):

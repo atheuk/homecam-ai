@@ -71,9 +71,24 @@
    border that stops mid-person reads as "continues outside the photo"
    rather than as a bad detection. */
 .detection-box.clipped{border-style:dashed}
+/* An unconfirmed border must not look like a confident identification:
+   muted, dashed and off the accent colour, so it reads as "maybe". */
+.detection-box.unconfirmed{border-style:dashed;border-color:#8a94a6;opacity:.75}
+.detection-box.unconfirmed .detection-tag{background:#8a94a6;color:#0c1110}
 .detection-tag{position:absolute;left:-2px;bottom:100%;margin-bottom:2px;background:var(--accent);color:#0c1110;font:10px/1.6 'DM Mono';padding:0 5px;border-radius:3px;white-space:nowrap}
 /* Keep the label legible instead of letting it grow with the photo. */
 .lightbox-figure .detection-tag{font-size:12px;transform:scale(calc(1 / var(--zoom,1)));transform-origin:left bottom}
 .lightbox-figure .detection-box{border-width:calc(2px / var(--zoom,1))}
 .animal{margin:0;display:flex;align-items:center;gap:8px;font-size:14px;flex-wrap:wrap}
 .animal .badge{text-transform:none}
+/* Observable details of a person: age band, build, clothing, carried items. */
+.appearance{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.appearance .chip{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:2px 9px;font-size:12px;color:var(--text)}
+.appearance .chip-carrying{border-color:var(--accent)}
+.appearance .chip-face{opacity:.7}
+.unconfirmed{margin:0;font-size:13px;color:#8a94a6}
+.badge.trust{text-transform:none}
+.badge.trust-trusted{background:#1f7a4d;color:#eaf7f0}
+.badge.trust-watch{background:#8a4b1f;color:#fbeee2}
+.merged-note{margin:2px 0 0;font-size:12px;color:var(--accent)}
+.person-rename select{background:transparent;color:var(--text);border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:4px 6px;font-size:12px}

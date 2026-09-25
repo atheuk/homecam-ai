@@ -28,15 +28,41 @@ export type AnimalIdentity={
   description?:string|null;
 };
 
+/** Observable description of a person: what a witness could describe.
+ *
+ * Deliberately carries no ethnicity or gender. Those are protected
+ * attributes the model would be guessing at, and pairing a guess about
+ * someone's race with a trust flag is profiling, not home security.
+ * Age band is coarse and approximate, and included only because "a child
+ * is at the door" is genuinely different from "an adult is at the door". */
+export type Appearance={
+  person_present:boolean;
+  age_band?:"child"|"teenager"|"adult"|"older adult"|null;
+  age_confidence?:number|null;
+  build?:string|null;
+  clothing?:string|null;
+  carrying?:string|null;
+  face_visible?:boolean;
+  description?:string|null;
+};
+
+/** Whether the household expects this person. Always set by a human. */
+export type Trust="unknown"|"trusted"|"watch";
+
 export type EventItem={
   id:string;camera_id:string;type:string;description:string;start_time:string;
   has_photo?:boolean;photo_url?:string|null;photo_caption?:string|null;photo_rating?:number|null;
   photo_boxes?:DetectionBox[]|null;animal?:AnimalIdentity|null;
+  appearance?:Appearance|null;
+  // ``null`` means nobody checked, which is neither confirmation nor doubt.
+  photo_verified?:boolean|null;
   person_id?:string|null;person_name?:string|null;person_display_name?:string|null;
+  person_trust?:Trust|null;
   person_confidence?:number|null;person_confirmed?:boolean;
 };
 export type Person={
   id:string;name:string|null;display_name:string;named:boolean;notes:string|null;
+  trust?:Trust;
   sighting_count:number;reference_samples:number;cover_event_id:string|null;
   photo_url:string|null;first_seen_at:string|null;last_seen_at:string|null;
 };
@@ -106,6 +132,34 @@ export function describeAnimal(animal:AnimalIdentity){
   return animal.species==="other"?"Unrecognized animal":animal.species.charAt(0).toUpperCase()+animal.species.slice(1);
 }
 
+/** Human-readable chips for what was actually observable about a person.
+ *
+ * Only facts a witness could state: roughly how old someone looked, their
+ * build, what they wore and what they carried. No ethnicity or gender - see
+ * the ``Appearance`` type for why. */
+export function appearanceChips(appearance:Appearance){
+  const chips:{key:string;label:string}[]=[];
+  if(appearance.age_band){
+    const band=appearance.age_band.charAt(0).toUpperCase()+appearance.age_band.slice(1);
+    // Age from a photo is a guess, and the label has to say so.
+    const hedge=appearance.age_confidence!=null&&appearance.age_confidence<0.6?" (unsure)":"";
+    chips.push({key:"age",label:`Looks ${band.toLowerCase()}${hedge}`});
+  }
+  if(appearance.build) chips.push({key:"build",label:appearance.build});
+  if(appearance.clothing) chips.push({key:"clothing",label:appearance.clothing});
+  if(appearance.carrying) chips.push({key:"carrying",label:`Carrying ${appearance.carrying}`});
+  if(appearance.face_visible===false) chips.push({key:"face",label:"Face not visible"});
+  return chips;
+}
+
+const TRUST_LABELS:Record<Trust,string>={unknown:"Not yet known",trusted:"Trusted",watch:"Watch"};
+
+/** Trust badge. Absent for "unknown" so the common case stays quiet. */
+export function TrustBadge({trust}:{trust?:Trust|null}){
+  if(!trust||trust==="unknown") return null;
+  return <span className={`badge trust trust-${trust}`}>{TRUST_LABELS[trust]}</span>;
+}
+
 /** One event, with its person photo, caption, rating and identity controls. */
 export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Person[];onChanged:()=>void}){
   const [rating,setRating]=useState<number|null|undefined>(event.photo_rating);
@@ -126,6 +180,7 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
   // Whatever the subject is called, so its border can be labelled with a
   // name instead of a bare class ("Sarah 93%" / "Border Collie 88%").
   const subject=identified||(animal?describeAnimal(animal):null);
+  const chips=event.appearance?appearanceChips(event.appearance):[];
   return <article className="event-card">
     <div className="event-photo">
       {event.has_photo&&event.photo_url
@@ -145,6 +200,14 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
       <p className="event-desc">{event.description}</p>
       {/* The caption is what makes a small crop understandable at a glance. */}
       {event.photo_caption&&<p className="caption">“{event.photo_caption}”</p>}
+      {/* Saying so is the honest alternative to silently showing a border
+          around a fence post as though it were a person. */}
+      {event.photo_verified===false&&<p className="unconfirmed">
+        Motion detected, but no person or animal confirmed in the photo.
+      </p>}
+      {chips.length>0&&<ul className="appearance" aria-label="What was observed">
+        {chips.map(chip=><li key={chip.key} className={`chip chip-${chip.key}`}>{chip.label}</li>)}
+      </ul>}
       {animal&&<p className="animal">
         <strong>{describeAnimal(animal)}</strong>
         {animal.breed
@@ -153,6 +216,7 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
       </p>}
       {identified&&<p className="identity">
         <strong>{identified}</strong>
+        <TrustBadge trust={event.person_trust}/>
         {event.person_confirmed
           ? <span className="badge confirmed">Confirmed</span>
           : event.person_confidence!=null
@@ -170,17 +234,23 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
 function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
   const [name,setName]=useState(person.name||"");
   const [busy,setBusy]=useState(false);
+  const [merged,setMerged]=useState<number>(0);
   useEffect(()=>{setName(person.name||"")},[person.name]);
 
-  const save=async()=>{
+  const patch=async(body:Record<string,unknown>)=>{
     setBusy(true);
     try{
-      await fetch(`${API}/api/v1/persons/${person.id}`,{
-        method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name}),
+      const response=await fetch(`${API}/api/v1/persons/${person.id}`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),
       });
+      // Naming is the moment duplicate clusters of the same person get
+      // folded together, so tell the user it happened.
+      const result=await response.json().catch(()=>null);
+      setMerged(result?.merged_person_ids?.length||0);
       onRenamed();
     }finally{setBusy(false);}
   };
+  const save=()=>patch({name});
 
   return <li className="person-row">
     <div className="person-avatar">
@@ -189,11 +259,14 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
         : <span className="muted">?</span>}
     </div>
     <div className="person-info">
-      <h4>{person.display_name}</h4>
+      <h4>{person.display_name}<TrustBadge trust={person.trust}/></h4>
       <p className="muted">
         Seen {person.sighting_count} {person.sighting_count===1?"time":"times"}
         {person.last_seen_at?` · last ${new Date(person.last_seen_at).toLocaleDateString()}`:""}
       </p>
+      {merged>0&&<p className="merged-note">
+        Merged {merged} other {merged===1?"sighting group":"sighting groups"} of the same person.
+      </p>}
     </div>
     <div className="person-rename">
       <input value={name} disabled={busy} placeholder="Add a name"
@@ -201,6 +274,14 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
         onChange={e=>setName(e.target.value)}
         onKeyDown={e=>{if(e.key==="Enter") save();}}/>
       <button type="button" disabled={busy} onClick={save}>Save</button>
+      {/* A household decision, never something the app infers from a face. */}
+      <select value={person.trust||"unknown"} disabled={busy}
+        aria-label={`Trust for ${person.display_name}`}
+        onChange={e=>patch({trust:e.target.value})}>
+        <option value="unknown">Not yet known</option>
+        <option value="trusted">Trusted</option>
+        <option value="watch">Watch</option>
+      </select>
     </div>
   </li>;
 }

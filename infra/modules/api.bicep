@@ -112,6 +112,12 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
                 { name: 'FOUNDRY_VISION_DEPLOYMENT', value: foundryVisionDeployment }
                 { name: 'PERSON_RECOGNITION_ENABLED', value: 'true' }
                 { name: 'PERSON_CAPTION_ENABLED', value: 'true' }
+                // Breed/species identification for animal sightings, and the
+                // structured appearance description shown on person events.
+                // The latter deliberately records only observable, non-
+                // protected details - never ethnicity or gender.
+                { name: 'ANIMAL_IDENTIFICATION_ENABLED', value: 'true' }
+                { name: 'APPEARANCE_ANALYSIS_ENABLED', value: 'true' }
               ],
               isPlaceholder ? [] : [
                 { name: 'DATABASE_URL', secretRef: 'database-url' }

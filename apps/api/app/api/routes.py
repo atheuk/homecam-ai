@@ -33,6 +33,7 @@ from ..schemas import (
     MockAudioIn,
     MockEventIn,
     PersonAssignIn,
+    PersonMergeIn,
     PersonUpdateIn,
     PhotoRatingIn,
     ProviderOutageIn,
@@ -297,6 +298,7 @@ async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dic
             names[person.id] = {
                 "person_name": person.name,
                 "person_display_name": person_service.display_name(person),
+                "person_trust": person_service.trust_of(person),
             }
     photo_ids = set()
     event_ids = [row.id for row in rows]
@@ -306,7 +308,12 @@ async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dic
         )
         photo_ids = set(result.scalars().all())
     for payload, row in zip(payloads, rows):
-        payload.update(names.get(row.person_id or "", {"person_name": None, "person_display_name": None}))
+        payload.update(
+            names.get(
+                row.person_id or "",
+                {"person_name": None, "person_display_name": None, "person_trust": None},
+            )
+        )
         payload["has_photo"] = row.id in photo_ids
         payload["photo_url"] = f"/api/v1/events/{row.id}/photo" if row.id in photo_ids else None
     return payloads
@@ -428,10 +435,55 @@ async def update_person(
         person.name = payload.name.strip()[:120] or None
     if payload.notes is not None:
         person.notes = payload.notes.strip()[:2000] or None
+    if payload.trust is not None:
+        # Human-declared only. Never inferred from what someone looks like.
+        person.trust = person_service.normalize_trust(payload.trust)
     person.updated_at = datetime.now(timezone.utc)
+    merged: list[str] = []
+    if payload.name is not None and person.name:
+        merged = await person_service.consolidate_identity(session, person)
     await session.commit()
     await session.refresh(person)
-    return person_service.to_dict(person)
+    result = person_service.to_dict(person)
+    result["merged_person_ids"] = merged
+    return result
+
+
+@router.get("/persons/{person_id}/duplicates")
+async def person_duplicates(person_id: str, session: AsyncSession = Depends(get_db)):
+    """Other identities that look like the same person.
+
+    Offered as a suggestion rather than applied automatically: the app can be
+    confident enough to ask, without being confident enough to decide.
+    """
+    person = await person_service.get_person(session, person_id)
+    if person is None:
+        raise HTTPException(404, "Person not found")
+    matches = await person_service.find_duplicates(session, person)
+    return {
+        "person_id": person.id,
+        "candidates": [
+            {**person_service.to_dict(candidate), "similarity": round(score, 4)}
+            for candidate, score in matches
+        ],
+    }
+
+
+@router.post("/persons/{person_id}/merge")
+async def merge_persons(
+    person_id: str, payload: PersonMergeIn, session: AsyncSession = Depends(get_db)
+):
+    """Fold ``source_id`` into this identity, keeping every sighting."""
+    target = await person_service.get_person(session, person_id)
+    source = await person_service.get_person(session, payload.source_id)
+    if target is None or source is None:
+        raise HTTPException(404, "Person not found")
+    if target.id == source.id:
+        raise HTTPException(400, "Cannot merge an identity into itself")
+    await person_service.merge_person(session, target, source)
+    await session.commit()
+    await session.refresh(target)
+    return {**person_service.to_dict(target), "merged_person_ids": [source.id]}
 
 
 @router.get("/persons/{person_id}/photo")

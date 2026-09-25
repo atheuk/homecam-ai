@@ -88,6 +88,10 @@ class Person(Base):
     # NULL until a human names them; the API renders a stable placeholder.
     name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Whether the household considers this person expected. Set by a human,
+    # never inferred from how they look: the system has no business deciding
+    # who looks trustworthy. "unknown" until someone says otherwise.
+    trust: Mapped[str] = mapped_column(String(16), default="unknown")
     centroid: Mapped[list] = mapped_column(JSON, default=list)
     embedding_dimensions: Mapped[int] = mapped_column(Integer, default=0)
     # Bounded list of reference vectors (most recent wins) used to recompute

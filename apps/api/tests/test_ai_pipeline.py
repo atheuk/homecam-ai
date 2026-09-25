@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.ai.animals import AnimalIdentity
+from app.ai.appearance import Appearance
 from app.ai.detector import BoundingBox, Detection, mock_detector
 from app.db import SessionLocal
 from app.models.db import Activity, AIAnalysis, CameraZone, Event
@@ -242,6 +243,125 @@ async def test_event_exposes_drawable_detection_borders(client):
     # Normalized against the stored photo, so it is directly drawable.
     assert 0.0 <= box["x1"] < box["x2"] <= 1.0
     assert 0.0 <= box["y1"] < box["y2"] <= 1.0
+
+
+class _StubAnalyzer:
+    """Stands in for the Foundry appearance call."""
+
+    def __init__(self, appearance=None, error=None):
+        self._appearance = appearance
+        self._error = error
+
+    async def describe_person(self, image, content_type):
+        if self._error:
+            raise self._error
+        return self._appearance
+
+
+async def test_person_event_reports_observable_appearance(client, monkeypatch):
+    monkeypatch.setattr(
+        ai_pipeline,
+        "get_appearance_analyzer",
+        lambda: _StubAnalyzer(
+            Appearance(
+                person_present=True,
+                age_band="adult",
+                age_confidence=0.7,
+                build="tall",
+                clothing="dark jacket",
+                carrying="a parcel",
+                face_visible=True,
+                description="An adult in a dark jacket carrying a parcel.",
+            )
+        ),
+    )
+    mock_detector().set_script(
+        "mock-garden", [Detection("person", 0.93, BoundingBox(0.35, 0.3, 0.55, 0.85))]
+    )
+    created = await client.post(
+        "/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"}
+    )
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+
+    appearance = body["appearance"]
+    assert appearance["age_band"] == "adult"
+    assert appearance["clothing"] == "dark jacket"
+    assert appearance["carrying"] == "a parcel"
+    # Protected attributes must never reach the event payload.
+    assert "ethnicity" not in appearance
+    assert "gender" not in appearance
+    assert body["photo_verified"] is True
+    assert all(box["verified"] is True for box in body["photo_boxes"])
+
+
+async def test_border_is_flagged_when_the_vision_model_sees_nobody(client, monkeypatch):
+    """The detector fires on fence posts and shadows. Drawing a confident
+    border around one asserts something we have reason to believe is false."""
+    monkeypatch.setattr(
+        ai_pipeline,
+        "get_appearance_analyzer",
+        lambda: _StubAnalyzer(Appearance(person_present=False)),
+    )
+    mock_detector().set_script(
+        "mock-garden", [Detection("person", 0.93, BoundingBox(0.35, 0.3, 0.55, 0.85))]
+    )
+    created = await client.post(
+        "/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"}
+    )
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+
+    assert body["photo_verified"] is False
+    assert body["photo_boxes"], "the evidence is kept, just marked unconfirmed"
+    assert all(box["verified"] is False for box in body["photo_boxes"])
+
+
+async def test_appearance_failure_never_breaks_the_event(client, monkeypatch):
+    monkeypatch.setattr(
+        ai_pipeline,
+        "get_appearance_analyzer",
+        lambda: _StubAnalyzer(error=RuntimeError("foundry is down")),
+    )
+    mock_detector().set_script(
+        "mock-garden", [Detection("person", 0.93, BoundingBox(0.35, 0.3, 0.55, 0.85))]
+    )
+    created = await client.post(
+        "/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"}
+    )
+    assert created.status_code == 200
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+    assert body["type"] == "person"
+    assert body["appearance"] is None
+
+
+async def test_unverified_detections_do_not_teach_the_matcher(client, monkeypatch):
+    """A fence post absorbed as a reference vector corrupts an identity."""
+    monkeypatch.setattr(
+        ai_pipeline,
+        "get_appearance_analyzer",
+        lambda: _StubAnalyzer(Appearance(person_present=False)),
+    )
+    mock_detector().set_script(
+        "mock-garden", [Detection("person", 0.93, BoundingBox(0.35, 0.3, 0.55, 0.85))]
+    )
+    created = await client.post(
+        "/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"}
+    )
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+    assert body["person_id"] is None
+
+
+async def test_boxes_are_unmarked_when_nobody_checked(client, monkeypatch):
+    """No analyzer configured means no opinion - not a negative one."""
+    monkeypatch.setattr(ai_pipeline, "get_appearance_analyzer", lambda: None)
+    mock_detector().set_script(
+        "mock-garden", [Detection("person", 0.93, BoundingBox(0.35, 0.3, 0.55, 0.85))]
+    )
+    created = await client.post(
+        "/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"}
+    )
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+    assert body["photo_boxes"]
+    assert body["appearance"] is None
 
 
 async def test_motion_without_detections_stays_motion(client):

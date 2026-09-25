@@ -105,3 +105,32 @@ describe("borders on a zoomable photo",()=>{
     expect(screen.getByAltText("A person at the door")).toBeInTheDocument();
   });
 });
+
+describe("unconfirmed detections",()=>{
+  const DOUBTED:DetectionBox={...PERSON,verified:false};
+
+  it("does not label a doubted box with a confident percentage",()=>{
+    // The detector fires on fence posts and shadows. If a vision model
+    // looking at the same crop says nobody is there, presenting "Sarah 93%"
+    // would assert something we have reason to believe is false.
+    expect(boxLabel(DOUBTED,"Sarah")).toBe("Possible motion");
+  });
+
+  it("still labels a confirmed box normally",()=>{
+    expect(boxLabel({...PERSON,verified:true},"Sarah")).toBe("Sarah 93%");
+  });
+
+  it("labels normally when nobody checked",()=>{
+    expect(boxLabel(PERSON,"Sarah")).toBe("Sarah 93%");
+  });
+
+  it("styles a doubted border differently from a confirmed one",()=>{
+    render(<DetectionBoxes boxes={[DOUBTED]}/>);
+    expect(boxes()[0].className).toContain("unconfirmed");
+  });
+
+  it("leaves pre-existing borders untouched",()=>{
+    render(<DetectionBoxes boxes={[PERSON]}/>);
+    expect(boxes()[0].className).not.toContain("unconfirmed");
+  });
+});

@@ -17,6 +17,9 @@ export type DetectionBox = {
   label: string;
   confidence: number;
   clipped?: boolean;
+  /** Whether a vision model agreed something is really there. ``undefined``
+   * means nobody checked, which must look the same as it always did. */
+  verified?: boolean;
   box: {x1: number; y1: number; x2: number; y2: number};
 };
 
@@ -26,9 +29,20 @@ function titleCase(label: string) {
 
 /** Text shown on a border, e.g. "Sarah 93%" or "Dog 88%". */
 export function boxLabel(box: DetectionBox, name?: string | null) {
+  // An unconfirmed box must not wear a confident percentage, and must
+  // never borrow a person's name: the whole point is that we doubt it.
+  if (box.verified === false) return "Possible motion";
   const who = name?.trim() || titleCase(box.label);
   const confidence = Math.round((box.confidence ?? 0) * 100);
   return confidence > 0 ? `${who} ${confidence}%` : who;
+}
+
+/** CSS classes for one border, reflecting how much we believe it. */
+export function boxClassName(box: DetectionBox) {
+  const classes = ["detection-box"];
+  if (box.clipped) classes.push("clipped");
+  if (box.verified === false) classes.push("unconfirmed");
+  return classes.join(" ");
 }
 
 /** Absolutely-positioned borders over a photo.
@@ -55,7 +69,7 @@ export function DetectionBoxes({
         return (
           <span
             key={`${box.label}-${index}`}
-            className={box.clipped ? "detection-box clipped" : "detection-box"}
+            className={boxClassName(box)}
             style={{
               left: `${x1 * 100}%`,
               top: `${y1 * 100}%`,
