@@ -1,43 +1,11 @@
 "use client";
-import {useCallback,useEffect,useRef,useState} from "react";
-import Hls from "hls.js";
+import {useCallback,useEffect,useState} from "react";
 import AdminPanel from "./AdminPanel";
+import {HlsVideo} from "./Player";
 import {EventCard,PeoplePanel,type EventItem,type Person} from "./People";
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
 type Camera={id:string;name:string;type:string;online:boolean;battery_level?:number}; type Event=EventItem;
 type LiveStream={kind:string;browser_playable:boolean;stream_url:string}|{error:string};
-
-/** Plays an HLS (.m3u8) stream in the visitor's own browser.
- *
- * Only Safari supports HLS natively via a plain <video src>; every other
- * browser (Chrome, Firefox, Edge) needs MediaSource-based demuxing, which
- * is what hls.js provides. Without this, `<video src={m3u8Url}>` silently
- * shows nothing outside Safari — this was the actual cause of "no camera
- * or doorbell live view works" even when the manifest itself was healthy.
- */
-function HlsVideo({src}:{src:string}){
-  const videoRef=useRef<HTMLVideoElement|null>(null);
-  useEffect(()=>{
-    const video=videoRef.current;
-    if(!video) return;
-    if(video.canPlayType("application/vnd.apple.mpegurl")){
-      // Safari (and some WebKit-based browsers): native HLS support.
-      video.src=src;
-      return;
-    }
-    if(Hls.isSupported()){
-      const hls=new Hls();
-      hls.loadSource(src);
-      hls.attachMedia(video);
-      return ()=>hls.destroy();
-    }
-    // No MediaSource/hls.js support available (e.g. jsdom in tests, or an
-    // unsupported browser): fall back to a plain src assignment so the
-    // element still reflects the stream URL rather than staying empty.
-    video.src=src;
-  },[src]);
-  return <video ref={videoRef} controls muted playsInline style={{width:"100%"}}/>;
-}
 
 /** Live tab: fetches a browser-safe stream descriptor per camera from
  * GET /cameras/{id}/live and renders it. Never renders raw RTSP URLs or
