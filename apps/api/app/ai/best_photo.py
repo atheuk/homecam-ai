@@ -44,6 +44,11 @@ MIN_CROP_PIXELS = 224
 TARGET_ASPECT_RATIO = 3 / 4  # width / height
 JPEG_QUALITY = 88
 
+# A detection that survives the crop as a barely-visible sliver along one
+# edge draws a border that points at nothing. Below this fraction of the
+# original box remaining visible, the box is dropped instead of drawn.
+MIN_VISIBLE_FRACTION = 0.15
+
 # Matching crop: subject pixels only. The margin is a fraction of the
 # detection box, not of the frame - a fixed frame fraction would swamp a
 # far-away subject with exactly the background we are trying to exclude.
@@ -66,6 +71,10 @@ class BestPhoto:
     # Tight crop of the subject, used for identity matching only. Never
     # shown to the user — `image` is the readable version.
     subject_image: bytes | None = None
+    # Detection borders expressed in *this photo's* own normalized
+    # coordinates, ready to be drawn over it. See :func:`overlay_boxes` for
+    # why the detector's own bbox cannot be used directly.
+    boxes: tuple[dict, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -76,6 +85,7 @@ class BestPhoto:
             "width": self.width,
             "height": self.height,
             "detection": self.detection.as_dict() if self.detection else None,
+            "boxes": [dict(box) for box in self.boxes],
         }
 
 
@@ -231,6 +241,92 @@ def crop_to_detection(
         return image, False, None, None
 
 
+def _image_size(image: bytes) -> tuple[int, int] | None:
+    """Pixel size of a frame, or ``None`` when it cannot be decoded."""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - depends on optional extras
+        return None
+    try:
+        with Image.open(io.BytesIO(image)) as frame:
+            return frame.size
+    except Exception:  # noqa: BLE001 - non-image bytes (e.g. mock snapshots)
+        return None
+
+
+def _describe(detection: Detection, box: tuple[float, float, float, float], clipped: bool) -> dict:
+    x1, y1, x2, y2 = box
+    return {
+        "label": detection.label,
+        "confidence": round(detection.confidence, 4),
+        "clipped": clipped,
+        "box": {
+            "x1": round(x1, 5),
+            "y1": round(y1, 5),
+            "x2": round(x2, 5),
+            "y2": round(y2, 5),
+        },
+    }
+
+
+def overlay_boxes(
+    detections: list[Detection],
+    crop: tuple[int, int, int, int] | None,
+    frame_size: tuple[int, int] | None,
+) -> list[dict]:
+    """Re-express detections in the *stored photo's* coordinate space.
+
+    A detector reports boxes normalized to the full source frame, but the
+    photo we actually store and serve is a readable crop of that frame
+    (:func:`crop_to_detection`). Drawing the raw bbox over the crop would
+    therefore put the border somewhere else entirely — usually off the
+    photo, because the crop is centred on the subject.
+
+    Passing ``crop=None`` means the stored photo *is* the whole frame, in
+    which case the detector's coordinates already apply unchanged.
+
+    Every detection in the frame is mapped, not just the chosen subject, so
+    a photo containing two people gets two borders.
+    """
+    if crop is None or frame_size is None:
+        return [_describe(d, (d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2), False) for d in detections]
+
+    left, top, right, bottom = crop
+    frame_width, frame_height = frame_size
+    crop_width, crop_height = right - left, bottom - top
+    if crop_width <= 0 or crop_height <= 0:
+        return []
+
+    boxes: list[dict] = []
+    for detection in detections:
+        bbox = detection.bbox
+        px1, px2 = bbox.x1 * frame_width, bbox.x2 * frame_width
+        py1, py2 = bbox.y1 * frame_height, bbox.y2 * frame_height
+        original = (px2 - px1) * (py2 - py1)
+        if original <= 0:
+            continue
+        ix1, iy1 = max(px1, left), max(py1, top)
+        ix2, iy2 = min(px2, right), min(py2, bottom)
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        if ((ix2 - ix1) * (iy2 - iy1)) / original < MIN_VISIBLE_FRACTION:
+            continue
+        clipped = ix1 > px1 or iy1 > py1 or ix2 < px2 or iy2 < py2
+        boxes.append(
+            _describe(
+                detection,
+                (
+                    (ix1 - left) / crop_width,
+                    (iy1 - top) / crop_height,
+                    (ix2 - left) / crop_width,
+                    (iy2 - top) / crop_height,
+                ),
+                clipped,
+            )
+        )
+    return boxes
+
+
 def score_frame(
     frame: bytes, detections: list[Detection], target_labels: frozenset[str] | set[str]
 ) -> tuple[float, float, Detection | None]:
@@ -241,6 +337,29 @@ def score_frame(
     confidence = best.confidence if best else 0.0
     score = CONFIDENCE_WEIGHT * confidence + SHARPNESS_WEIGHT * sharpness
     return score, sharpness, best
+
+
+def _boxes_for_photo(
+    frame: bytes, detection: Detection | None, detections: list[Detection], cropped: bool
+) -> tuple[dict, ...]:
+    """Detection borders for the photo that will actually be stored.
+
+    Defensive per SPEC 43: an overlay is a nicety, so any failure here
+    yields no borders rather than losing the photo or the event.
+    """
+    if not detections:
+        return ()
+    try:
+        if not cropped or detection is None:
+            return tuple(overlay_boxes(detections, None, None))
+        size = _image_size(frame)
+        if size is None:
+            return ()
+        window = _readable_crop_box(detection.bbox, size[0], size[1], CROP_PADDING)
+        return tuple(overlay_boxes(detections, window, size))
+    except Exception as exc:  # noqa: BLE001 - never fail an event over an overlay
+        logger.debug("detection overlay skipped: %s", exc)
+        return ()
 
 
 def select_best_photo(
@@ -267,8 +386,7 @@ def select_best_photo(
             image, cropped, width, height = crop_to_detection(frame, detection)
         else:
             image, cropped, width, height = frame, False, None, None
-        best = BestPhoto(
-            frame_index=index,
+        best = BestPhoto(            frame_index=index,
             score=score,
             sharpness=sharpness,
             detection=detection,
@@ -278,6 +396,7 @@ def select_best_photo(
             width=width,
             height=height,
             subject_image=crop_to_subject(frame, detection) if detection else None,
+            boxes=_boxes_for_photo(frame, detection, detections, cropped),
         )
     return best
 

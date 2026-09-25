@@ -49,7 +49,8 @@ def test_mock_detector_supports_scripted_detections():
 
 def test_all_spec_categories_are_supported():
     assert set(DETECTION_CLASSES) == {
-        "person", "car", "truck", "bicycle", "motorcycle", "dog", "cat", "package",
+        "person", "car", "truck", "bicycle", "motorcycle",
+        "dog", "cat", "bird", "animal", "package",
     }
 
 

@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # plus a bounded sample list keeps matching cheap and storage predictable.
     person_max_samples: int = Field(default=25, ge=1, le=500)
     person_caption_enabled: bool = True
+    # Animal species + breed identification (SPEC 13 animal category). Uses
+    # the same Foundry vision deployment as captioning; without Foundry the
+    # event still reports the detected species class, just no breed.
+    animal_identification_enabled: bool = True
     zone_min_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
     parked_vehicle_seconds: float = Field(default=60.0, gt=0.0)
     audio_detection_enabled: bool = False

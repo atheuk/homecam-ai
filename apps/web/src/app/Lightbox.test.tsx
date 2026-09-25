@@ -15,6 +15,14 @@ function viewerImage():HTMLImageElement{
   return image as HTMLImageElement;
 }
 
+/** The transformed wrapper: zoom/pan is applied here so the photo and its
+ * detection borders move together. */
+function viewerFigure():HTMLElement{
+  const figure=document.querySelector(".lightbox-figure");
+  if(!figure) throw new Error("the full-screen viewer is not showing a photo");
+  return figure as HTMLElement;
+}
+
 function viewport():Element{
   const element=document.querySelector(".lightbox-viewport");
   if(!element) throw new Error("the full-screen viewer is not open");
@@ -99,8 +107,7 @@ describe("zooming a photo",()=>{
   it("applies the zoom to the image itself",()=>{
     openViewer();
     fireEvent.click(screen.getByRole("button",{name:"Zoom in"}));
-    const image=viewerImage();
-    expect(image.style.transform).toContain("scale(1.4)");
+    expect(viewerFigure().style.transform).toContain("scale(1.4)");
   });
 
   it("resets back to the whole photo",()=>{
@@ -111,8 +118,7 @@ describe("zooming a photo",()=>{
 
     fireEvent.click(screen.getByRole("button",{name:"Reset zoom"}));
     expect(screen.getByText("100%")).toBeInTheDocument();
-    const image=viewerImage();
-    expect(image.style.transform).toContain("scale(1)");
+    expect(viewerFigure().style.transform).toContain("scale(1)");
   });
 
   it("zooms with the scroll wheel",()=>{
@@ -169,13 +175,13 @@ describe("zooming a photo",()=>{
     pointer("pointerdown",view,{pointerId:1,clientX:200,clientY:200});
     pointer("pointermove",view,{pointerId:1,clientX:260,clientY:240});
     pointer("pointerup",view,{pointerId:1});
-    expect(image.style.transform).toContain("translate(0px, 0px)");
+    expect(viewerFigure().style.transform).toContain("translate(0px, 0px)");
 
     fireEvent.click(screen.getByRole("button",{name:"Zoom in"}));
     pointer("pointerdown",view,{pointerId:2,clientX:200,clientY:200});
     pointer("pointermove",view,{pointerId:2,clientX:260,clientY:240});
     pointer("pointerup",view,{pointerId:2});
-    expect(image.style.transform).toContain("translate(60px, 40px)");
+    expect(viewerFigure().style.transform).toContain("translate(60px, 40px)");
   });
 
   it("does not close when a drag happens to finish on the backdrop",()=>{

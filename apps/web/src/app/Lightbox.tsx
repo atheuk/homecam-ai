@@ -15,6 +15,8 @@
 import {useCallback,useEffect,useRef,useState} from "react";
 import {createPortal} from "react-dom";
 
+import {DetectionBox,DetectionBoxes} from "./DetectionBoxes";
+
 const MIN_SCALE = 1;
 const MAX_SCALE = 8;
 const ZOOM_STEP = 1.4;
@@ -26,7 +28,15 @@ type View = Point & {scale: number};
 
 const RESET: View = {scale: 1, x: 0, y: 0};
 
-export type LightboxPhoto = {src: string; alt: string; caption?: string | null; title?: string};
+export type LightboxPhoto = {
+  src: string;
+  alt: string;
+  caption?: string | null;
+  title?: string;
+  boxes?: DetectionBox[] | null;
+  /** Name for the subject, shown on its border when only one is in shot. */
+  subject?: string | null;
+};
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -236,16 +246,26 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
         onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
       >
-        {/* eslint-disable-next-line @next/next/no-img-element -- next/image
-            cannot be used here: the API origin is injected at deploy time,
-            not build time, so it cannot be a configured remote pattern. */}
-        <img
-          ref={imageRef}
-          src={photo.src}
-          alt={photo.alt}
-          draggable={false}
-          style={{transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`}}
-        />
+        {/* The border overlay shares the zoom/pan transform with the photo
+            so it stays locked to the subject at every scale. */}
+        <span
+          className="lightbox-figure"
+          style={
+            {
+              transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+              // Lets the borders cancel out the zoom, so a 2px outline and
+              // its label stay 2px and legible instead of growing 8x and
+              // covering the face the user zoomed in to see.
+              "--zoom": view.scale,
+            } as React.CSSProperties
+          }
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element -- next/image
+              cannot be used here: the API origin is injected at deploy time,
+              not build time, so it cannot be a configured remote pattern. */}
+          <img ref={imageRef} src={photo.src} alt={photo.alt} draggable={false} />
+          <DetectionBoxes boxes={photo.boxes} name={photo.subject} />
+        </span>
       </div>
 
       {photo.caption && <p className="lightbox-caption">{photo.caption}</p>}
@@ -265,20 +285,27 @@ export function ZoomablePhoto({
   alt,
   caption,
   title,
+  boxes,
+  subject,
 }: {
   src: string;
   alt: string;
   caption?: string | null;
   title?: string;
+  boxes?: DetectionBox[] | null;
+  subject?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <button type="button" className="photo-trigger" aria-label={`Open ${title || alt} full screen`} onClick={() => setOpen(true)}>
-        {/* eslint-disable-next-line @next/next/no-img-element -- see Lightbox */}
-        <img src={src} alt={alt} />
+        <span className="photo-frame">
+          {/* eslint-disable-next-line @next/next/no-img-element -- see Lightbox */}
+          <img src={src} alt={alt} />
+          <DetectionBoxes boxes={boxes} name={subject} />
+        </span>
       </button>
-      {open && <Lightbox photo={{src, alt, caption, title}} onClose={() => setOpen(false)} />}
+      {open && <Lightbox photo={{src, alt, caption, title, boxes, subject}} onClose={() => setOpen(false)} />}
     </>
   );
 }

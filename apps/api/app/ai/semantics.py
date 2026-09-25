@@ -124,7 +124,10 @@ def derive_semantics(
             )
     elif primary.label in ANIMAL_CLASSES:
         where = f" in the {zone_name}" if zone_name else ""
-        description = f"A {primary.label} passed{where} at {camera_name}."
+        # ``animal`` is the generic "some other creature" class, so it needs
+        # its own article rather than the detector's literal label.
+        subject = "An animal" if primary.label == "animal" else f"A {primary.label}"
+        description = f"{subject} passed{where} at {camera_name}."
     elif primary.label == "person":
         where = f" in the {zone_name}" if zone_name else ""
         description = f"A person was detected{where} at {camera_name}."

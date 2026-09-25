@@ -3,9 +3,11 @@ AI analysis persistence, activity correlation and audio capability."""
 import pytest
 from sqlalchemy import delete, select
 
+from app.ai.animals import AnimalIdentity
 from app.ai.detector import BoundingBox, Detection, mock_detector
 from app.db import SessionLocal
 from app.models.db import Activity, AIAnalysis, CameraZone, Event
+from app.services import ai_pipeline
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +152,96 @@ async def test_animal_detection_produces_an_animal_event(client):
     body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
     assert body["type"] == "animal"
     assert "cat" in body["tags"]
+
+
+class _StubIdentifier:
+    """Stands in for the Foundry vision deployment."""
+
+    name = "stub"
+
+    def __init__(self, identity=None, error: Exception | None = None) -> None:
+        self.identity = identity
+        self.error = error
+
+    async def identify_animal(self, image: bytes, content_type: str):
+        if self.error is not None:
+            raise self.error
+        return self.identity
+
+
+async def test_animal_event_reports_species_and_breed(client, monkeypatch):
+    monkeypatch.setattr(
+        ai_pipeline,
+        "get_animal_identifier",
+        lambda: _StubIdentifier(
+            AnimalIdentity(species="dog", breed="Border Collie", confidence=0.83)
+        ),
+    )
+    mock_detector().set_script("mock-garden", [Detection("dog", 0.9, BoundingBox(0.4, 0.5, 0.6, 0.9))])
+
+    created = await client.post("/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"})
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+
+    assert body["type"] == "animal"
+    assert body["animal"] == {
+        "species": "dog",
+        "breed": "Border Collie",
+        "confidence": 0.83,
+        "description": None,
+    }
+    assert "Border Collie" in body["tags"]
+    assert "Border Collie" in body["description"]
+
+
+async def test_unnamed_species_still_produces_an_animal_event(client, monkeypatch):
+    """"Something else" is a real answer, not a failure."""
+    monkeypatch.setattr(
+        ai_pipeline, "get_animal_identifier", lambda: _StubIdentifier(AnimalIdentity(species="other"))
+    )
+    mock_detector().set_script("mock-garden", [Detection("animal", 0.7, BoundingBox(0.3, 0.4, 0.5, 0.8))])
+
+    created = await client.post("/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"})
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+
+    assert body["type"] == "animal"
+    assert body["animal"]["species"] == "other"
+    assert body["animal"]["breed"] is None
+    assert "An animal was seen" in body["description"]
+
+
+async def test_identification_failure_never_breaks_the_event(client, monkeypatch):
+    """SPEC 43: a breed lookup is not worth losing a sighting over."""
+    monkeypatch.setattr(
+        ai_pipeline,
+        "get_animal_identifier",
+        lambda: _StubIdentifier(error=RuntimeError("foundry is down")),
+    )
+    mock_detector().set_script("mock-garden", [Detection("dog", 0.9, BoundingBox(0.4, 0.5, 0.6, 0.9))])
+
+    created = await client.post("/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"})
+    assert created.status_code == 200
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+
+    assert body["type"] == "animal"
+    assert body["animal"] is None
+    assert "dog" in body["tags"]
+
+
+async def test_event_exposes_drawable_detection_borders(client):
+    """The UI must be able to outline the subject without re-deriving the crop."""
+    mock_detector().set_script(
+        "mock-garden", [Detection("person", 0.93, BoundingBox(0.35, 0.3, 0.55, 0.85))]
+    )
+    created = await client.post("/api/v1/mock/events", json={"camera_id": "mock-garden", "type": "motion"})
+    body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
+
+    boxes = body["photo_boxes"]
+    assert boxes, "a detected person must publish a border for the preview image"
+    box = boxes[0]["box"]
+    assert boxes[0]["label"] == "person"
+    # Normalized against the stored photo, so it is directly drawable.
+    assert 0.0 <= box["x1"] < box["x2"] <= 1.0
+    assert 0.0 <= box["y1"] < box["y2"] <= 1.0
 
 
 async def test_motion_without_detections_stays_motion(client):

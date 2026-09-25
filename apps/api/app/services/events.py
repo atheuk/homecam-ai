@@ -117,5 +117,10 @@ def to_dict(row: Event) -> dict:
         "person_confirmed": bool(row.person_confirmed),
         "photo_rating": row.photo_rating,
         "photo_caption": metadata.get("photo_caption"),
+        # Detection borders, already expressed in the stored photo's own
+        # coordinates by the AI pipeline, so the UI can draw them directly
+        # without knowing anything about how the photo was cropped.
+        "photo_boxes": list((metadata.get("best_photo") or {}).get("boxes") or []),
+        "animal": metadata.get("animal"),
         "metadata": metadata,
     }

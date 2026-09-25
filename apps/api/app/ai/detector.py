@@ -45,11 +45,17 @@ DETECTION_CLASSES: tuple[str, ...] = (
     "motorcycle",
     "dog",
     "cat",
+    "bird",
+    "animal",
     "package",
 )
 
 VEHICLE_CLASSES: frozenset[str] = frozenset({"car", "truck", "bicycle", "motorcycle"})
-ANIMAL_CLASSES: frozenset[str] = frozenset({"dog", "cat"})
+# ``animal`` is the deliberate catch-all for a creature that is clearly an
+# animal but none of the named species — "or something else" in the product
+# requirement. Naming the species (and its breed) for these is the vision
+# model's job, not the box detector's; see :mod:`app.ai.animals`.
+ANIMAL_CLASSES: frozenset[str] = frozenset({"dog", "cat", "bird", "animal"})
 
 
 class DetectorUnavailableError(RuntimeError):
@@ -255,6 +261,10 @@ class OpenCvDetector:
 
 
 # Subset of the 80-class COCO label list relevant to HomeCam (SPEC 13).
+# COCO names several species individually; the ones a home camera is
+# plausibly going to see are mapped by name, and the remainder collapse to
+# the generic ``animal`` class rather than being dropped, so "something
+# else" still produces an animal event that the vision model can then name.
 COCO_CLASS_NAMES: dict[int, str] = {
     0: "person",
     1: "bicycle",
@@ -262,8 +272,16 @@ COCO_CLASS_NAMES: dict[int, str] = {
     3: "motorcycle",
     5: "car",  # bus -> treated as a vehicle
     7: "truck",
+    14: "bird",
     15: "cat",
     16: "dog",
+    17: "animal",  # horse
+    18: "animal",  # sheep
+    19: "animal",  # cow
+    20: "animal",  # elephant
+    21: "animal",  # bear
+    22: "animal",  # zebra
+    23: "animal",  # giraffe
 }
 
 

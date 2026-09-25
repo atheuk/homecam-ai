@@ -25,6 +25,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import best_photo as best_photo_module
+from ..ai.animals import describe_animal, get_animal_identifier
 from ..ai.detector import ANIMAL_CLASSES, VEHICLE_CLASSES, Detection, DetectionContext, get_detector
 from ..ai.dwell import dwell_tracker
 from ..ai.provider import AnalysisContext, get_ai_provider
@@ -135,6 +136,24 @@ async def _embed_photo(photo) -> list[float]:
         return []
 
 
+async def _identify_animal(photo):
+    """Name the species/breed of an animal photo, or ``None``.
+
+    Uses the tight subject crop when available: the readable crop is mostly
+    garden, and a breed question answered from mostly-garden pixels is a
+    guess dressed up as a classification.
+    """
+    identifier = get_animal_identifier()
+    if identifier is None:
+        return None
+    subject = getattr(photo, "subject_image", None) or photo.image
+    try:
+        return await identifier.identify_animal(subject, photo.content_type)
+    except Exception as exc:  # noqa: BLE001 - a breed is never worth an event
+        logger.warning("animal identification failed: %s", exc)
+        return None
+
+
 async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
     """Run detection/zone/AI stages for a persisted event row.
 
@@ -192,6 +211,8 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
     row.source = "local-ai" if detections else row.source
 
     person_match = None
+    animal = None
+    photo_boxes: list[dict] = []
     if frames and settings.best_photo_enabled and detections:
         try:
             photo = best_photo_module.select_best_photo(
@@ -209,14 +230,30 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
             # subject: a caption of a passing car costs a model call and
             # teaches the identity matcher nothing.
             is_person_photo = photo.detection is not None and photo.detection.label == "person"
+            is_animal_photo = photo.detection is not None and photo.detection.label in ANIMAL_CLASSES
             caption = await _caption_photo(photo) if is_person_photo else None
             await _persist_event_photo(session, row.id, photo, caption)
 
+            animal = await _identify_animal(photo) if is_animal_photo else None
+
             metadata = dict(row.event_metadata or {})
             metadata["best_photo"] = photo.as_dict()
+            photo_boxes = list(metadata["best_photo"].get("boxes") or [])
             if caption:
                 metadata["photo_caption"] = caption
+            if animal is not None:
+                metadata["animal"] = animal.as_dict()
             row.event_metadata = metadata
+
+            if animal is not None:
+                # Say what it actually was: "A Border Collie (dog) was seen
+                # in the driveway" beats the detector's bare "A dog passed".
+                row.description = describe_animal(animal, camera_name, row.zone)[:500]
+                tags = list(row.tags or [])
+                for tag in (animal.species, animal.breed):
+                    if tag and tag not in tags:
+                        tags.append(tag)
+                row.tags = tags
 
             if is_person_photo and caption_confirms_person(caption):
                 embedding = await _embed_photo(photo)
@@ -258,6 +295,8 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
             "person_confidence": row.person_confidence,
             "person_is_new": person_match.created if person_match else None,
             "detections": [detection.as_dict() for detection in detections],
+            "photo_boxes": photo_boxes,
+            "animal": animal.as_dict() if animal else None,
         }
     )
     return enriched

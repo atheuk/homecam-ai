@@ -13,13 +13,25 @@
  * the normal event view rather than hidden in a settings screen.
  */
 import {useCallback,useEffect,useState} from "react";
+import {DetectionBox} from "./DetectionBoxes";
 import {ZoomablePhoto} from "./Lightbox";
 
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
 
+/** What the AI decided an animal was. ``breed`` is deliberately nullable:
+ * the model is instructed to return nothing rather than guess a breed it
+ * cannot see, and a missing breed must never be filled in by the UI. */
+export type AnimalIdentity={
+  species:"dog"|"cat"|"bird"|"other";
+  breed?:string|null;
+  confidence?:number|null;
+  description?:string|null;
+};
+
 export type EventItem={
   id:string;camera_id:string;type:string;description:string;start_time:string;
   has_photo?:boolean;photo_url?:string|null;photo_caption?:string|null;photo_rating?:number|null;
+  photo_boxes?:DetectionBox[]|null;animal?:AnimalIdentity|null;
   person_id?:string|null;person_name?:string|null;person_display_name?:string|null;
   person_confidence?:number|null;person_confirmed?:boolean;
 };
@@ -88,6 +100,12 @@ function PersonAssign({event,persons,onAssigned}:{event:EventItem;persons:Person
   </div>;
 }
 
+/** Plain-language summary of an animal sighting, breed first when known. */
+export function describeAnimal(animal:AnimalIdentity){
+  if(animal.breed) return animal.breed;
+  return animal.species==="other"?"Unrecognized animal":animal.species.charAt(0).toUpperCase()+animal.species.slice(1);
+}
+
 /** One event, with its person photo, caption, rating and identity controls. */
 export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Person[];onChanged:()=>void}){
   const [rating,setRating]=useState<number|null|undefined>(event.photo_rating);
@@ -104,12 +122,18 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
   };
 
   const identified=event.person_display_name;
+  const animal=event.animal;
+  // Whatever the subject is called, so its border can be labelled with a
+  // name instead of a bare class ("Sarah 93%" / "Border Collie 88%").
+  const subject=identified||(animal?describeAnimal(animal):null);
   return <article className="event-card">
     <div className="event-photo">
       {event.has_photo&&event.photo_url
         ? <ZoomablePhoto src={mediaUrl(event.photo_url)!}
             alt={event.photo_caption||`${event.type} detected`}
             caption={event.photo_caption}
+            boxes={event.photo_boxes}
+            subject={subject}
             title={event.person_display_name||event.description}/>
         : <span className="muted">No photo captured</span>}
     </div>
@@ -121,6 +145,12 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
       <p className="event-desc">{event.description}</p>
       {/* The caption is what makes a small crop understandable at a glance. */}
       {event.photo_caption&&<p className="caption">“{event.photo_caption}”</p>}
+      {animal&&<p className="animal">
+        <strong>{describeAnimal(animal)}</strong>
+        {animal.breed
+          ? <span className="badge">{animal.species}{animal.confidence?` · ${Math.round(animal.confidence*100)}% sure`:""}</span>
+          : <span className="badge">Breed not identifiable</span>}
+      </p>}
       {identified&&<p className="identity">
         <strong>{identified}</strong>
         {event.person_confirmed
