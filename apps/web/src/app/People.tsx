@@ -13,6 +13,7 @@
  * the normal event view rather than hidden in a settings screen.
  */
 import {useCallback,useEffect,useState} from "react";
+import {ZoomablePhoto} from "./Lightbox";
 
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
 
@@ -106,11 +107,10 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
   return <article className="event-card">
     <div className="event-photo">
       {event.has_photo&&event.photo_url
-        /* eslint-disable-next-line @next/next/no-img-element -- next/image
-           would need the API origin registered as a remote pattern at build
-           time, but the API FQDN is injected at deploy time; these are also
-           already-small server-side crops, so there is nothing to optimize. */
-        ? <img src={mediaUrl(event.photo_url)} alt={event.photo_caption||`${event.type} detected`}/>
+        ? <ZoomablePhoto src={mediaUrl(event.photo_url)!}
+            alt={event.photo_caption||`${event.type} detected`}
+            caption={event.photo_caption}
+            title={event.person_display_name||event.description}/>
         : <span className="muted">No photo captured</span>}
     </div>
     <div className="event-body">
@@ -155,8 +155,7 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
   return <li className="person-row">
     <div className="person-avatar">
       {person.photo_url
-        /* eslint-disable-next-line @next/next/no-img-element -- see EventCard */
-        ? <img src={mediaUrl(person.photo_url)} alt={person.display_name}/>
+        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!} alt={person.display_name} title={person.display_name}/>
         : <span className="muted">?</span>}
     </div>
     <div className="person-info">
