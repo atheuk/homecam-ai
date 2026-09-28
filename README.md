@@ -34,7 +34,7 @@ To run what Azure runs — real RT-DETR detection against your Dahua NVR — lay
 Things that surprise people:
 
 - **No Tailscale, edge connector or HLS proxy needed on the LAN.** That chain (`DAHUA_MODE=edge`, `docs/edge-connector.md`, `PUBLIC_API_BASE_URL`) exists only because Azure sits outside the home network. On the same LAN as the NVR, `DAHUA_MODE=direct` just works.
-- **Person identity needs Azure Foundry; detection does not.** Object detection is fully local and offline. Appearance captions, apparent age/gender/trusted attributes and automatic re-identification of returning visitors call Azure AI Foundry and need `FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY` in `.env`. Without them these features switch off cleanly (every sighting is a new unknown person; nothing crashes).
+- **Person identity needs Azure Foundry; detection does not.** Object detection is fully local and offline. Appearance captions, a coarse apparent age band, clothing/carried items, face-visible and automatic re-identification of returning visitors call Azure AI Foundry and need `FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY` in `.env`. Without them these features switch off cleanly (every sighting is a new unknown person; nothing crashes). Gender and ethnicity are deliberately never inferred (see `apps/api/app/ai/appearance.py`), and a person's trust status is only ever set by a human via the API — never inferred, and no Foundry needed.
 - **Don't run local and Azure against the NVR at the same time.** The NVR sustains only ~1–2 concurrent CGI sessions; two HomeCam instances polling it cause snapshot `503`s on both. Pause one (e.g. scale the Azure API to zero) while testing locally.
 
 ## Local development
