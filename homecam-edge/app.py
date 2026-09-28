@@ -7,6 +7,7 @@ the standalone Compose application's source during the image build.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -15,6 +16,22 @@ from dataclasses import dataclass, field
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
+
+logger = logging.getLogger(__name__)
+
+# A complete JPEG starts FFD8 and ends FFD9. This NVR silently clips frames
+# that overflow its snapshot buffer, and the missing trailing marker is the
+# only signal: the response is an ordinary HTTP 200. Mirrors
+# ``apps/edge/app.py``.
+JPEG_START_OF_IMAGE = b"\xff\xd8"
+JPEG_END_OF_IMAGE = b"\xff\xd9"
+
+
+def _is_truncated_jpeg(content: bytes) -> bool:
+    """True only for data that is recognisably a JPEG *and* lacks its end."""
+    if not content.startswith(JPEG_START_OF_IMAGE):
+        return False
+    return not content.endswith(JPEG_END_OF_IMAGE)
 
 
 @dataclass(frozen=True)
@@ -105,6 +122,9 @@ class DahuaClient:
     # channels that are genuinely online.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _probe_cache: tuple[bool, str, float] | None = field(default=None, init=False, repr=False)
+    # Channels proven to overflow the NVR's snapshot buffer on the main
+    # stream, and therefore pinned to the sub stream. See `snapshot`.
+    _substream_channels: set[int] = field(default_factory=set, init=False, repr=False)
 
     def _auth(self) -> httpx.DigestAuth:
         assert self.settings.dahua_username and self.settings.dahua_password
@@ -148,17 +168,40 @@ class DahuaClient:
         # (even a concurrent /health or /channels probe) is already in
         # flight. A short bounded retry absorbs that instead of surfacing
         # it to Azure as "camera unavailable".
+        #
+        # This NVR also encodes snapshots into a ~2 MiB buffer and silently
+        # returns whatever fit when the frame is larger, so a 4K main
+        # stream comes back clipped with no JPEG end-of-image marker and a
+        # dead grey band over the near field. Fall back to the complete
+        # sub stream for channels proven to overflow. See
+        # ``apps/edge/app.py`` for the full rationale.
         last_exc: Exception | None = None
         for attempt in range(3):
             if attempt:
                 await asyncio.sleep(0.15 * attempt)
             try:
-                response = await self._get("/cgi-bin/snapshot.cgi", {"channel": channel})
+                subtype = 1 if channel in self._substream_channels else 0
+                response = await self._get(
+                    "/cgi-bin/snapshot.cgi", {"channel": channel, "subtype": subtype}
+                )
                 response.raise_for_status()
-                return response.content
+                content = response.content
+                if subtype == 0 and _is_truncated_jpeg(content):
+                    self._substream_channels.add(channel)
+                    logger.warning(
+                        "channel %s main-stream snapshot was truncated (%d bytes, no EOI); "
+                        "pinning this channel to the sub stream",
+                        channel,
+                        len(content),
+                    )
+                    continue
+                return content
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-        assert last_exc is not None
+        if last_exc is None:
+            # Every attempt was a truncated main-stream frame. A partial
+            # frame still beats no photo, and the channel is now pinned.
+            return content
         raise last_exc
 
 
