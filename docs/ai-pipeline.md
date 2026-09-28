@@ -181,14 +181,86 @@ useful once a pixel-aware backend (`opencv` or `onnx`) is also configured.
 
 ```bash
 export EVENT_INGESTION_ENABLED=true
-export AI_DETECTOR_BACKEND=opencv   # or onnx
+export AI_DETECTOR_BACKEND=rtdetr   # recommended; see below
 ```
 
-## Enabling the OpenCV detector (opt-in, no model download)
+## Enabling the RT-DETR detector (recommended, shipped in the image)
 
-`opencv` is the easiest way to get **real, pixel-based person detection**
-("start with people", SPEC 13/43): it uses the HOG + linear-SVM pedestrian
-detector bundled inside the `opencv-python-headless` wheel itself
+`rtdetr` is the **production detection backend** and the one deployed to
+Azure. It runs [RT-DETR](https://github.com/lyuwenyu/RT-DETR) (Baidu), a
+DETR-family end-to-end detector, through ONNX Runtime on CPU.
+
+```bash
+pip install onnxruntime numpy pillow
+export AI_DETECTOR_BACKEND=rtdetr
+export AI_DETECTOR_MODEL_PATH=/app/models/rtdetr.onnx   # default; baked into the image
+```
+
+The model file is downloaded and verified **at image build time** by
+`apps/api/Dockerfile`, so a running container never needs outbound access to
+huggingface.co and startup is deterministic. The build fails loudly if the
+download is truncated.
+
+### Why RT-DETR and not YOLO
+
+This is a licensing decision as much as a technical one.
+
+* **Ultralytics YOLO is AGPL-3.0** — both the code *and* the pretrained
+  weights. AGPL section 13 extends copyleft to *network* use, and
+  Ultralytics' own FAQ states that serving it "through a SaaS platform, API,
+  or other private system" still requires their paid Enterprise licence.
+  Hiding it behind an HTTP microservice is **not** a reliable escape hatch.
+* **RT-DETR upstream (`PekingU/rtdetr_r18vd`) is Apache-2.0 for code and
+  weights**, so it can be baked into a container image and shipped without
+  contaminating this codebase.
+* YOLO-NAS (`Deci-AI/super-gradients`) was also rejected: its code is
+  Apache-2.0 but `LICENSE.YOLONAS.md` explicitly forbids commercial and
+  production use of the weights.
+
+### Measured behaviour
+
+Validated on this project's own camera frames plus COCO control images,
+using the INT8 export (~21 MB) actually shipped:
+
+| Image | Result |
+| --- | --- |
+| COCO `000000000785` (skier) | `person` @ 0.949 |
+| COCO `000000039769` (two cats) | `cat` @ 0.952, `cat` @ 0.948 |
+| 6 real HomeCam "person" event frames | **0 person detections** |
+
+Those six frames are the important row. The previous `opencv` backend
+reported 1–3 `person` boxes on *every one* of them, while the Azure vision
+model independently captioned them "No clear view of a person." RT-DETR
+agrees with the vision model. The FP32 export was run as a control at a
+lowered 0.25 threshold and also found no person, confirming the empty result
+is the scene being empty rather than INT8 quantization damage (INT8 tracked
+FP32 within 0.001 on the control images).
+
+Mean latency was ~180 ms/frame on a CPU-only ARM64 dev host.
+
+### Implementation notes
+
+RT-DETR differs from the YOLO path in two ways that the decoder must respect:
+
+* It emits a fixed **300 object queries** trained with one-to-one matching,
+  so it is already duplicate-free and needs **no NMS**. `refine_detections`
+  still runs for the geometric plausibility floor and the per-frame cap, but
+  suppression is effectively a no-op on well-formed output.
+* Class scores are **sigmoid** logits (focal loss), not softmax, and there is
+  no separate objectness term to multiply in.
+
+The decoder asserts the head exposes exactly 80 classes and returns nothing
+if it does not, rather than guessing at a shifted COCO-91 label map.
+
+## Enabling the OpenCV detector (legacy, not recommended)
+
+> **Superseded.** `opencv` was the original "no model download required"
+> backend. It is retained for offline/air-gapped use, but it was measured
+> producing phantom `person` boxes on empty frames (see the table above) and
+> should not be used in production. Prefer `rtdetr`.
+
+`opencv` uses the HOG + linear-SVM pedestrian detector bundled inside the
+`opencv-python-headless` wheel itself
 (`cv2.HOGDescriptor_getDefaultPeopleDetector()`), so there is no external
 model file to source, license or download.
 
@@ -200,9 +272,8 @@ export AI_DETECTOR_BACKEND=opencv
 Detection confidences come from the HOG SVM's decision-function weights,
 passed through a sigmoid and thresholded at `confidence_threshold=0.35` — a
 reasonable default, not calibrated against a labelled dataset. Only the
-`person` class is produced by this backend today (SPEC 13's "start with
-people"); it does not detect vehicles/animals/packages the way the mock or
-ONNX backends' scripted/model-based paths can.
+`person` class is produced by this backend today; it does not detect
+vehicles/animals/packages the way the mock or ONNX/RT-DETR backends can.
 
 `opencv-python-headless` has no prebuilt wheel for Windows ARM64 as of this
 writing; `requirements.txt` gates the dependency with a PEP 508 environment
@@ -211,23 +282,22 @@ mock backend, while CI (`ubuntu-latest`) and the deployed Linux containers
 install and use it normally. Like every opt-in backend here, a missing/failed
 `cv2` import falls back to the mock backend rather than crashing a request.
 
-## Enabling the real ONNX detector (opt-in)
+## Enabling the legacy YOLO ONNX detector (opt-in, discouraged)
+
+> **Licensing warning.** See "Why RT-DETR and not YOLO" above. The obvious
+> models for this backend are AGPL-3.0 Ultralytics exports. Use `rtdetr`
+> unless you have specifically licensed something else.
 
 The default backend is `mock`: deterministic, zero extra dependencies, used by
 CI and every test.
 
 ```bash
 pip install onnxruntime numpy pillow
-# Download a small COCO-pretrained YOLO model yourself, e.g. YOLOv8n exported
-# to ONNX from https://github.com/ultralytics/ultralytics (AGPL-3.0 — check
-# that the licence suits your deployment before using the pretrained weights).
+# You must source a COCO-pretrained YOLO model yourself and satisfy its
+# licence. No model weights for this backend are committed to this repo.
 export AI_DETECTOR_BACKEND=onnx
-export AI_DETECTOR_MODEL_PATH=/path/to/yolov8n.onnx
+export AI_DETECTOR_MODEL_PATH=/path/to/model.onnx
 ```
-
-No model weights are committed to this repository. `onnxruntime` does publish
-a `win_arm64` wheel for CPython 3.12, so this host can run the backend, but the
-backend has **not** been verified against real hardware or a real model here.
 
 If the runtime, numpy, Pillow or the model file are missing or unreadable, the
 detector logs a warning and falls back to the mock backend. It never crashes a

@@ -88,7 +88,13 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
                 { name: 'AI_PROVIDER', value: 'mock' }
                 // Real (non-scripted) person detection, SPEC 13/43: HOG+SVM
                 // bundled in opencv-python-headless, no external model needed.
-                { name: 'AI_DETECTOR_BACKEND', value: 'opencv' }
+                // RT-DETR (Apache-2.0 weights, baked into the API image at
+                // /app/models/rtdetr.onnx). Replaces the OpenCV HOG+SVM
+                // backend, which was measured producing 1-3 phantom "person"
+                // boxes on empty frames that RT-DETR and the vision model
+                // both independently score as containing no person.
+                { name: 'AI_DETECTOR_BACKEND', value: 'rtdetr' }
+                { name: 'AI_DETECTOR_MODEL_PATH', value: '/app/models/rtdetr.onnx' }
                 // Periodically snapshots every online camera and creates a real
                 // event when the detector actually sees something (SPEC 12).
                 { name: 'EVENT_INGESTION_ENABLED', value: 'true' }

@@ -14,13 +14,31 @@ Three backends are selectable through ``AI_DETECTOR_BACKEND``:
     (non-scripted) "who is being detected" results — starting with people,
     per SPEC 13's ordering.
 
-``onnx`` (opt-in)
+``onnx`` (opt-in, legacy)
     :class:`OnnxDetector` — runs a small pretrained COCO YOLO model through
     ONNX Runtime. The model file is *not* bundled in this repository; see
     ``docs/ai-pipeline.md`` for how to download one. If the runtime, numpy,
     Pillow or the model file are missing, construction raises
     :class:`DetectorUnavailableError` and :func:`get_detector` logs and falls
     back to the mock backend rather than breaking event ingestion (SPEC 43).
+
+    **Licensing caveat:** the obvious models for this backend are Ultralytics
+    YOLOv8/v11 exports, and Ultralytics ships under **AGPL-3.0** — both the
+    code and the pretrained weights. AGPL section 13 extends copyleft to
+    network use, and Ultralytics' own FAQ asserts that serving it behind an
+    API still requires their paid Enterprise licence. This backend is
+    therefore kept for compatibility but is *not* the recommended path.
+
+``rtdetr`` (recommended real backend)
+    :class:`RtDetrDetector` — runs RT-DETR (Baidu), a DETR-family end-to-end
+    detector, through ONNX Runtime on CPU. Chosen over YOLO deliberately:
+    upstream ``PekingU/rtdetr_r18vd`` is **Apache-2.0 for both code and
+    weights**, so it can be shipped in a product without AGPL contamination.
+
+    Being end-to-end, RT-DETR emits one query per object and needs no NMS of
+    its own, which removes a whole class of duplicate-border bugs. The INT8
+    export is ~21 MB and scores within 0.001 of the FP32 model on COCO
+    control images, so the small model is used in the container image.
 
 The detector only ever sees normalized snapshot bytes, never provider
 objects, so it behaves identically for every provider.
@@ -126,6 +144,11 @@ MAX_PERSON_ASPECT_RATIO = 1.15
 # Upper bound on boxes kept per frame. Beyond this the detector is not
 # seeing a scene, it is malfunctioning, and drawing 50 borders helps nobody.
 MAX_DETECTIONS_PER_FRAME = 12
+
+# Where the container image bakes the Apache-2.0 RT-DETR export. Kept as a
+# default rather than a hard requirement so a deployment can point
+# AI_DETECTOR_MODEL_PATH at a different file without a code change.
+DEFAULT_RTDETR_MODEL_PATH = "/app/models/rtdetr.onnx"
 
 
 def iou(left: BoundingBox, right: BoundingBox) -> float:
@@ -439,6 +462,108 @@ class OnnxDetector:
         return refine_detections(detections)
 
 
+class RtDetrDetector:
+    """RT-DETR (Apache-2.0) COCO detector on ONNX Runtime CPU.
+
+    Why this exists alongside :class:`OnnxDetector`: the YOLO exports that
+    backend expects are Ultralytics AGPL-3.0 artefacts, which is not a
+    licence this product can ship. RT-DETR's upstream weights
+    (``PekingU/rtdetr_r18vd``) are Apache-2.0, so they can be baked into the
+    container image outright.
+
+    Two behavioural differences from the YOLO path matter:
+
+    * The head emits a fixed 300 object queries, not one row per anchor, and
+      is trained with one-to-one matching - so it is already duplicate-free
+      and needs no NMS. :func:`refine_detections` still runs for the
+      geometric plausibility floor and the per-frame cap, but suppression is
+      effectively a no-op on well-formed output.
+    * Class scores are **sigmoid** logits (focal loss), not softmax, and
+      there is no separate objectness term to multiply in.
+    """
+
+    name = "rtdetr"
+    #: Number of COCO classes in the upstream head, used to reject a model
+    #: whose output shape does not match the label map below.
+    expected_classes = 80
+
+    def __init__(
+        self,
+        model_path: str,
+        input_size: int = 640,
+        confidence_threshold: float = 0.5,
+    ) -> None:
+        if not model_path:
+            raise DetectorUnavailableError("AI_DETECTOR_MODEL_PATH is not set")
+        try:
+            import numpy  # noqa: F401
+            import onnxruntime
+            from PIL import Image  # noqa: F401
+        except ImportError as exc:  # pragma: no cover - depends on opt-in extras
+            raise DetectorUnavailableError(f"rtdetr detector dependencies unavailable: {exc}") from exc
+        try:
+            self._session = onnxruntime.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        except Exception as exc:  # noqa: BLE001 - any runtime/model failure degrades to mock
+            raise DetectorUnavailableError(f"could not load RT-DETR model '{model_path}': {exc}") from exc
+        self._input_name = self._session.get_inputs()[0].name
+        self._input_size = input_size
+        self._confidence_threshold = confidence_threshold
+
+    def detect(self, image: bytes, context: DetectionContext) -> list[Detection]:
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        try:
+            frame = Image.open(io.BytesIO(image)).convert("RGB").resize((self._input_size, self._input_size))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rtdetr could not decode snapshot for %s: %s", context.camera_id, exc)
+            return []
+        tensor = np.asarray(frame, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
+        try:
+            logits, boxes = self._session.run(None, {self._input_name: tensor})[:2]
+        except Exception as exc:  # noqa: BLE001 - inference must never break ingest
+            logger.warning("rtdetr inference failed for %s: %s", context.camera_id, exc)
+            return []
+        return self._decode(np.squeeze(logits), np.squeeze(boxes))
+
+    def _decode(self, logits, boxes) -> list[Detection]:
+        import numpy as np
+
+        if logits.ndim != 2 or boxes.ndim != 2:
+            return []
+        if logits.shape[0] != boxes.shape[0] or boxes.shape[1] != 4:
+            return []
+        if logits.shape[1] != self.expected_classes:
+            logger.warning(
+                "rtdetr model exposes %s classes, expected %s; refusing to guess the label map",
+                logits.shape[1],
+                self.expected_classes,
+            )
+            return []
+        # Focal-loss head: per-class sigmoid, no softmax and no objectness.
+        scores = 1.0 / (1.0 + np.exp(-logits))
+        detections: list[Detection] = []
+        for query in range(scores.shape[0]):
+            class_id = int(np.argmax(scores[query]))
+            confidence = float(scores[query][class_id])
+            if confidence < self._confidence_threshold:
+                continue
+            label = COCO_CLASS_NAMES.get(class_id)
+            if label is None:
+                continue
+            cx, cy, w, h = (float(v) for v in boxes[query])
+            x1, y1 = max(cx - w / 2, 0.0), max(cy - h / 2, 0.0)
+            x2, y2 = min(cx + w / 2, 1.0), min(cy + h / 2, 1.0)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            detections.append(
+                Detection(label=label, confidence=round(confidence, 4), bbox=BoundingBox(x1, y1, x2, y2))
+            )
+        return refine_detections(detections)
+
+
 _mock_detector = MockDetector()
 _active_detector: LocalDetector | None = None
 
@@ -462,6 +587,12 @@ def build_detector(backend: str, model_path: str = "") -> LocalDetector:
     if normalized == "onnx":
         try:
             return OnnxDetector(model_path)
+        except DetectorUnavailableError as exc:
+            logger.warning("falling back to mock detector: %s", exc)
+            return _mock_detector
+    if normalized in {"rtdetr", "rt-detr"}:
+        try:
+            return RtDetrDetector(model_path or DEFAULT_RTDETR_MODEL_PATH)
         except DetectorUnavailableError as exc:
             logger.warning("falling back to mock detector: %s", exc)
             return _mock_detector

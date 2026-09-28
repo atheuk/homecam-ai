@@ -23,3 +23,10 @@ numpy==2.4.4
 # ~2% of a 4K image and is unusable for identification.
 pillow==11.1.0
 opencv-python-headless==4.11.0.86 ; platform_system != "Windows" or platform_machine != "ARM64"
+# RT-DETR detection backend (AI_DETECTOR_BACKEND=rtdetr). Deliberately chosen
+# over an Ultralytics YOLO export: Ultralytics ships AGPL-3.0 code *and*
+# weights, and its own FAQ asserts that serving it behind an API still needs
+# their paid Enterprise licence. RT-DETR's upstream weights
+# (PekingU/rtdetr_r18vd) are Apache-2.0, so they can ship in this image.
+# CPU-only; the model file itself is baked in by the Dockerfile.
+onnxruntime==1.26.0
