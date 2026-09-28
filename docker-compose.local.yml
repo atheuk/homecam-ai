@@ -1,0 +1,19 @@
+# Local "real stack" overlay: real RT-DETR detection + background event
+# ingestion instead of the zero-dependency mock pipeline. Layer it on top of
+# the base file (see README.md, "Run the real stack locally"):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# Values under `environment:` take precedence over the same keys in `.env`
+# (env_file), so this works with an unmodified copy of .env.example. Camera
+# credentials (DAHUA_*) and optional FOUNDRY_* keys still belong in your
+# private `.env`, never in this file.
+services:
+  api:
+    environment:
+      AI_DETECTOR_BACKEND: rtdetr
+      # Written by apps/api/Dockerfile at image build time.
+      AI_DETECTOR_MODEL_PATH: /app/models/rtdetr.onnx
+      # The ingestion loop runs inside the API process (app/main.py); without
+      # this no real events are ever created from camera snapshots.
+      EVENT_INGESTION_ENABLED: "true"

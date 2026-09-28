@@ -177,7 +177,7 @@ recomputed from a fresh snapshot rather than trusted verbatim.
 Because `MockDetector` cannot see pixels and intentionally returns no
 detections for a bare/unlabeled poll, this loop is a safe no-op under the
 default `mock` backend. Enabling `EVENT_INGESTION_ENABLED` only becomes
-useful once a pixel-aware backend (`opencv` or `onnx`) is also configured.
+useful once a pixel-aware backend (`rtdetr`, or the legacy `opencv`/`onnx`) is also configured.
 
 ```bash
 export EVENT_INGESTION_ENABLED=true
@@ -307,8 +307,8 @@ request.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AI_DETECTOR_BACKEND` | `mock` | `mock`, `opencv`, or `onnx`. |
-| `AI_DETECTOR_MODEL_PATH` | *(empty)* | ONNX model path (opt-in backend only). |
+| `AI_DETECTOR_BACKEND` | `mock` | `mock`, `rtdetr`, `opencv`, or `onnx`. `rtdetr` is the production backend (deployed to Azure); `mock` is the zero-dependency default used by CI and tests. |
+| `AI_DETECTOR_MODEL_PATH` | *(empty)* | ONNX model path for `rtdetr` or `onnx`. For `rtdetr`, empty means `/app/models/rtdetr.onnx`, which `apps/api/Dockerfile` bakes into the image. |
 | `AI_ANALYSIS_ENABLED` | `true` | Master switch for the enrichment stages. |
 | `EMBEDDING_DIMENSIONS` | `384` | Width of stored embeddings. |
 | `BEST_PHOTO_ENABLED` | `true` | Persist a best photo per detected event. |

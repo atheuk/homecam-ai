@@ -11,6 +11,32 @@ docker compose up -d --build
 
 Open http://localhost:3000. API docs: http://localhost:8000/docs. API health: http://localhost:8000/health.
 
+This default stack is the **mock** demo: mock cameras, `AI_DETECTOR_BACKEND=mock` (cannot see pixels) and no background ingestion. It needs nothing but Docker, but it will never detect anything on a real camera.
+
+## Run the real stack locally
+
+To run what Azure runs — real RT-DETR detection against your Dahua NVR — layer the committed `docker-compose.local.yml` on top. It sets `AI_DETECTOR_BACKEND=rtdetr`, `AI_DETECTOR_MODEL_PATH=/app/models/rtdetr.onnx` (baked into the image by `apps/api/Dockerfile`; no huggingface.co access at runtime) and `EVENT_INGESTION_ENABLED=true` for the `api` service, overriding whatever `.env` says.
+
+1. In your private `.env` (never commit it), point at the NVR directly:
+   ```bash
+   DAHUA_ENABLED=true
+   DAHUA_MODE=direct
+   DAHUA_HOST=192.168.1.x        # your NVR's LAN IP
+   DAHUA_USERNAME=...
+   DAHUA_PASSWORD=...
+   ```
+   (Or leave these unset and configure Dahua at runtime in Settings → Admin panel; see `docs/dahua.md`.)
+2. Start it:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+   ```
+
+Things that surprise people:
+
+- **No Tailscale, edge connector or HLS proxy needed on the LAN.** That chain (`DAHUA_MODE=edge`, `docs/edge-connector.md`, `PUBLIC_API_BASE_URL`) exists only because Azure sits outside the home network. On the same LAN as the NVR, `DAHUA_MODE=direct` just works.
+- **Person identity needs Azure Foundry; detection does not.** Object detection is fully local and offline. Appearance captions, apparent age/gender/trusted attributes and automatic re-identification of returning visitors call Azure AI Foundry and need `FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY` in `.env`. Without them these features switch off cleanly (every sighting is a new unknown person; nothing crashes).
+- **Don't run local and Azure against the NVR at the same time.** The NVR sustains only ~1–2 concurrent CGI sessions; two HomeCam instances polling it cause snapshot `503`s on both. Pause one (e.g. scale the Azure API to zero) while testing locally.
+
 ## Local development
 
 Backend (Python 3.12):
