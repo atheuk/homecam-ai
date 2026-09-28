@@ -169,4 +169,12 @@ describe("people panel",()=>{
 
     expect(await screen.findByText(/Nobody recognized yet/i)).toBeInTheDocument();
   });
+
+  it("shows a retryable error when people cannot be loaded",async()=>{
+    global.fetch=vi.fn(async()=>{throw new Error("offline");}) as typeof fetch;
+    render(<PeoplePanel/>);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("People could not be loaded");
+    expect(screen.getByRole("button",{name:"Retry"})).toBeInTheDocument();
+  });
 });

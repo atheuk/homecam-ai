@@ -291,14 +291,22 @@ export function PeoplePanel(){
   const [persons,setPersons]=useState<Person[]>([]);
   const [recognition,setRecognition]=useState<Recognition|null>(null);
   const [loading,setLoading]=useState(true);
+  const [error,setError]=useState("");
 
   const load=useCallback(async()=>{
+    setLoading(true);
+    setError("");
     try{
       const response=await fetch(`${API}/api/v1/persons`);
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
       const body=await response.json();
       setPersons(body.persons||[]);
       setRecognition(body.recognition||null);
-    }catch{setPersons([]);}
+    }catch{
+      setPersons([]);
+      setRecognition(null);
+      setError("People could not be loaded from the local API.");
+    }
     finally{setLoading(false);}
   },[]);
   useEffect(()=>{load()},[load]);
@@ -312,6 +320,7 @@ export function PeoplePanel(){
       People can still be named manually, but returning visitors will not be matched automatically.
     </p>}
     {loading?<p className="muted">Loading people…</p>
+      :error?<div className="inline-error" role="alert"><span>{error}</span><button type="button" onClick={load}>Retry</button></div>
       :persons.length?<ul className="person-list">
         {persons.map(person=><PersonRow key={person.id} person={person} onRenamed={load}/>)}
       </ul>
