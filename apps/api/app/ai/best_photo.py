@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 
 from .detector import Detection, DetectionContext, LocalDetector
+from .imaging import configure_pillow
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +96,11 @@ def _pillow_sharpness(image: bytes) -> float | None:
         from PIL import Image
     except ImportError:  # pragma: no cover - depends on optional extras
         return None
+    configure_pillow()
     try:
         frame = Image.open(io.BytesIO(image)).convert("L")
     except Exception:  # noqa: BLE001 - non-image bytes (e.g. mock snapshots)
-        return None
-    array = np.asarray(frame, dtype="float32")
+        return None    array = np.asarray(frame, dtype="float32")
     if array.size < 9:
         return None
     # 4-neighbour Laplacian; its variance is the classic blur metric.
@@ -188,6 +189,7 @@ def crop_to_subject(image: bytes, detection: Detection) -> bytes:
         from PIL import Image
     except ImportError:  # pragma: no cover - depends on optional extras
         return image
+    configure_pillow()
     try:
         frame = Image.open(io.BytesIO(image))
         width, height = frame.size
@@ -226,6 +228,7 @@ def crop_to_detection(
         from PIL import Image
     except ImportError:  # pragma: no cover - depends on optional extras
         return image, False, None, None
+    configure_pillow()
     try:
         frame = Image.open(io.BytesIO(image))
         width, height = frame.size
@@ -247,6 +250,7 @@ def _image_size(image: bytes) -> tuple[int, int] | None:
         from PIL import Image
     except ImportError:  # pragma: no cover - depends on optional extras
         return None
+    configure_pillow()
     try:
         with Image.open(io.BytesIO(image)) as frame:
             return frame.size

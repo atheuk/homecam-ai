@@ -195,6 +195,19 @@ def plausible(detection: Detection) -> bool:
     return True
 
 
+def _log_undecodable(backend: str, camera_id: str) -> None:
+    """Report an undecodable snapshot at a level matching how alarming it is.
+
+    Mock providers deliberately emit non-image placeholder bytes on every
+    poll, so warning about those is pure noise. Now that truncated JPEGs are
+    tolerated, a real camera failing to decode is genuinely worth surfacing.
+    """
+    if camera_id.startswith("mock-"):
+        logger.debug("%s detector skipped placeholder snapshot for %s", backend, camera_id)
+    else:
+        logger.warning("%s detector could not decode snapshot for %s", backend, camera_id)
+
+
 def refine_detections(
     detections: list[Detection], iou_threshold: float = NMS_IOU_THRESHOLD
 ) -> list[Detection]:
@@ -414,15 +427,18 @@ class OnnxDetector:
         self._confidence_threshold = confidence_threshold
 
     def detect(self, image: bytes, context: DetectionContext) -> list[Detection]:  # pragma: no cover - opt-in path
-        import io
-
         import numpy as np
-        from PIL import Image
 
+        from app.ai.imaging import open_frame
+
+        frame = open_frame(image)
+        if frame is None:
+            _log_undecodable("onnx", context.camera_id)
+            return []
         try:
-            frame = Image.open(io.BytesIO(image)).convert("RGB").resize((self._input_size, self._input_size))
+            frame = frame.convert("RGB").resize((self._input_size, self._input_size))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("onnx detector could not decode snapshot for %s: %s", context.camera_id, exc)
+            logger.warning("onnx detector could not read snapshot for %s: %s", context.camera_id, exc)
             return []
         tensor = np.asarray(frame, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
         input_name = self._session.get_inputs()[0].name
@@ -510,15 +526,18 @@ class RtDetrDetector:
         self._confidence_threshold = confidence_threshold
 
     def detect(self, image: bytes, context: DetectionContext) -> list[Detection]:
-        import io
-
         import numpy as np
-        from PIL import Image
 
+        from app.ai.imaging import open_frame
+
+        frame = open_frame(image)
+        if frame is None:
+            _log_undecodable("rtdetr", context.camera_id)
+            return []
         try:
-            frame = Image.open(io.BytesIO(image)).convert("RGB").resize((self._input_size, self._input_size))
+            frame = frame.convert("RGB").resize((self._input_size, self._input_size))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("rtdetr could not decode snapshot for %s: %s", context.camera_id, exc)
+            logger.warning("rtdetr could not read snapshot for %s: %s", context.camera_id, exc)
             return []
         tensor = np.asarray(frame, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
         try:
