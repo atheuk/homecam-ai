@@ -249,10 +249,17 @@ class DahuaEdgeProvider:
         camera attached simply keep failing this cheaply and stay offline.
         """
         now = time.monotonic()
+        # `None` (not 0.0) is the "never probed" sentinel: monotonic() counts
+        # from boot, so a 0.0 default would suppress the first probe entirely
+        # until the host had been up for VERIFY_INTERVAL_SECONDS.
         candidates = [
             camera_id
             for camera_id, info in self._channels.items()
-            if not info["online"] and now - _VERIFY_ATTEMPTS.get(camera_id, 0.0) >= VERIFY_INTERVAL_SECONDS
+            if not info["online"]
+            and (
+                (last_attempt := _VERIFY_ATTEMPTS.get(camera_id)) is None
+                or now - last_attempt >= VERIFY_INTERVAL_SECONDS
+            )
         ]
         if not candidates:
             return
