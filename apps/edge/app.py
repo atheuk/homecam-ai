@@ -26,6 +26,7 @@ ships and runs independently on the Pi/HA host.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -34,6 +35,30 @@ from dataclasses import dataclass, field
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
+
+logger = logging.getLogger(__name__)
+
+# A complete JPEG starts with the start-of-image marker FFD8 and ends with
+# the end-of-image marker FFD9. This NVR emits a silently clipped image
+# when the encoded frame exceeds its internal snapshot buffer, so the
+# trailing marker is the only reliable completeness signal: the HTTP
+# response itself is a normal 200 with no error of any kind.
+JPEG_START_OF_IMAGE = b"\xff\xd8"
+JPEG_END_OF_IMAGE = b"\xff\xd9"
+
+
+def _is_truncated_jpeg(content: bytes) -> bool:
+    """True only for data that is recognisably a JPEG *and* lacks its end.
+
+    Payloads that are not JPEGs at all are deliberately not judged here:
+    the marker check would be meaningless for them, and treating an
+    unrecognised format as damaged would pin a working channel to the sub
+    stream for no reason.
+    """
+    if not content.startswith(JPEG_START_OF_IMAGE):
+        return False
+    return not content.endswith(JPEG_END_OF_IMAGE)
+
 
 
 @dataclass(frozen=True)
@@ -149,6 +174,9 @@ class DahuaClient:
     # channels that are genuinely online.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _probe_cache: tuple[bool, str, float] | None = field(default=None, init=False, repr=False)
+    # Channels proven to overflow the NVR's snapshot buffer on the main
+    # stream, and therefore pinned to the sub stream. See `snapshot`.
+    _substream_channels: set[int] = field(default_factory=set, init=False, repr=False)
 
     def _auth(self) -> httpx.DigestAuth:
         assert self.settings.dahua_username and self.settings.dahua_password
@@ -192,17 +220,51 @@ class DahuaClient:
         # (even a concurrent /health or /channels probe) is already in
         # flight. A short bounded retry absorbs that instead of surfacing
         # it to Azure as "camera unavailable".
+        #
+        # Separately, this NVR encodes snapshots into a ~2 MiB buffer and
+        # silently emits whatever fit when the image is larger. A 4K main
+        # stream overruns it every time: channel 1 returned 2,097,132 bytes
+        # ending in 0x45A9 instead of the JPEG end-of-image marker 0xFFD9,
+        # and the missing tail decoded as a dead grey band across the
+        # bottom quarter of the frame - the near field, where someone at
+        # the door appears. That area was invisible to detection.
+        #
+        # The sub stream is well under the buffer and therefore complete.
+        # It is lower resolution, but the detector letterboxes every frame
+        # to 640x640 anyway, so a whole sub-stream frame carries strictly
+        # more usable signal than a truncated main-stream one. Fall back
+        # only for channels actually proven to overflow, and remember them,
+        # so well-behaved channels keep full resolution and no channel
+        # costs two requests on a session-limited NVR more than once.
         last_exc: Exception | None = None
         for attempt in range(3):
             if attempt:
                 await asyncio.sleep(0.15 * attempt)
             try:
-                response = await self._get("/cgi-bin/snapshot.cgi", {"channel": channel})
+                subtype = 1 if channel in self._substream_channels else 0
+                response = await self._get(
+                    "/cgi-bin/snapshot.cgi", {"channel": channel, "subtype": subtype}
+                )
                 response.raise_for_status()
-                return response.content
+                content = response.content
+                if subtype == 0 and _is_truncated_jpeg(content):
+                    self._substream_channels.add(channel)
+                    logger.warning(
+                        "channel %s main-stream snapshot was truncated (%d bytes, no EOI); "
+                        "pinning this channel to the sub stream",
+                        channel,
+                        len(content),
+                    )
+                    continue
+                return content
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-        assert last_exc is not None
+        if last_exc is None:
+            # Every attempt produced a truncated main-stream frame. Return
+            # it rather than nothing: a partial frame still beats no photo,
+            # and the channel is now pinned so the next call uses the sub
+            # stream.
+            return content
         raise last_exc
 
 
