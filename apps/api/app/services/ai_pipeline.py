@@ -50,13 +50,23 @@ BEST_PHOTO_TARGETS = frozenset({"person", "package"}) | VEHICLE_CLASSES | ANIMAL
 NON_VISUAL_EVENT_TYPES = frozenset({"battery_low"})
 
 
-async def _sample_frames(provider, camera_id: str, count: int) -> list[bytes]:
+async def _sample_frames(
+    provider, camera_id: str, count: int, seed: bytes | None = None
+) -> list[bytes]:
     """Sample a few snapshots around the trigger via the generic contract.
 
     Uses only ``get_snapshot`` so no provider needs new streaming infra.
+
+    ``seed`` is a frame the caller already fetched (the one that triggered
+    the event). It is used as-is and counts toward ``count``. This matters
+    on a session-limited NVR: it refuses most concurrent CGI requests, so
+    re-fetching from scratch here frequently returned *nothing* and the
+    event lost its photo even though a perfectly good frame was already in
+    hand. A failure to top the sample up is therefore no longer fatal - we
+    keep whatever frames we have rather than discarding the seed.
     """
-    frames: list[bytes] = []
-    for _ in range(max(1, count)):
+    frames: list[bytes] = [seed] if seed else []
+    for _ in range(max(1, count) - len(frames)):
         try:
             frames.append(await provider.get_snapshot(camera_id))
         except (CameraOfflineError, CameraNotFoundError, ProviderUnavailableError) as exc:
@@ -189,7 +199,9 @@ async def _identify_animal(photo):
         return None
 
 
-async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
+async def enrich_event(
+    session: AsyncSession, row: Event, event: dict, trigger_frame: bytes | None = None
+) -> dict:
     """Run detection/zone/AI stages for a persisted event row.
 
     Returns the normalized event dict augmented with everything that was
@@ -213,7 +225,13 @@ async def enrich_event(session: AsyncSession, row: Event, event: dict) -> dict:
 
     frames: list[bytes] = []
     if provider is not None:
-        frames = await _sample_frames(provider, row.camera_id, settings.best_photo_frames)
+        frames = await _sample_frames(
+            provider, row.camera_id, settings.best_photo_frames, seed=trigger_frame
+        )
+    elif trigger_frame:
+        # No provider to top up from, but the trigger frame is still the
+        # frame this event is about and is enough to produce a photo.
+        frames = [trigger_frame]
 
     detector = get_detector()
     context = DetectionContext(

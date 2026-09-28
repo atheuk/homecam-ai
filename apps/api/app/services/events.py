@@ -66,18 +66,24 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
     return row
 
 
-async def create_and_broadcast_event(session: AsyncSession, event: dict) -> Event:
+async def create_and_broadcast_event(
+    session: AsyncSession, event: dict, trigger_frame: bytes | None = None
+) -> Event:
     """Run the SPEC section 12 ingestion pipeline for one normalized event.
 
     ``normalize -> persist -> snapshot -> detector -> AI -> embedding ->
     correlation -> realtime``. Every analysis stage is optional and defensive:
     if analysis or correlation fails the event is still persisted and still
     broadcast, just without enrichment.
+
+    ``trigger_frame`` is the snapshot that caused this event, when the caller
+    already has one. Passing it through means analysis does not have to win a
+    second race for a scarce NVR session just to look at the same moment.
     """
     row = await persist_event(session, event)
     enriched = event
     try:
-        enriched = await ai_pipeline.enrich_event(session, row, event)
+        enriched = await ai_pipeline.enrich_event(session, row, event, trigger_frame)
         await activity_service.correlate_event(session, row)
         await session.commit()
         await session.refresh(row)

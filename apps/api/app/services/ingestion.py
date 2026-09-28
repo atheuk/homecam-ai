@@ -99,7 +99,10 @@ async def poll_once(session_factory=SessionLocal) -> int:
             "description": f"{event_type.replace('_', ' ').title()} detected on {camera_name}",
         }
         async with session_factory() as session:
-            await event_service.create_and_broadcast_event(session, event)
+            # Hand the analysis stage the frame we just detected on: it is
+            # the correct moment to photograph, and re-fetching it competes
+            # with this NVR's tiny concurrent-session budget.
+            await event_service.create_and_broadcast_event(session, event, trigger_frame=image)
         _mark_created(camera_id)
         created += 1
     return created
