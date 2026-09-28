@@ -1,0 +1,9 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+httpx>=0.27,<1.0
+# Pinned to the 13.x line: 14 reworked the client connection API
+# (``.open``/``.closed``/``.state``), and this adapter is deployed on a
+# Home Assistant host where an unattended minor bump should not break the
+# doorbell. eufy_ws.py avoids those attributes, but the pin keeps the
+# async iteration/handshake behaviour predictable too.
+websockets>=13.0,<14.0

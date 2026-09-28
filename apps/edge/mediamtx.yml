@@ -8,6 +8,12 @@
 # Add one `paths` entry per DAHUA_CHANNELS entry you configured for the
 # edge connector; the path name must be `dahua-<channel>` to match what
 # app.py's /channels/{n}/live returns.
+#
+# DAHUA_STREAM_SUBTYPE selects which stream to pull -- keep it at 1 (the
+# substream). MediaMTX repackages without transcoding, so a subtype=0
+# mainstream pull hands 4K H.265/HEVC straight to the browser, which
+# hls.js cannot decode via Media Source Extensions on Chrome/Edge/Firefox.
+# The substream is H.264 and plays everywhere. See .env.example.
 
 hls: yes
 hlsAddress: :8888
@@ -16,11 +22,11 @@ webrtcAddress: :8189
 
 paths:
   dahua-1:
-    source: rtsp://${DAHUA_USERNAME}:${DAHUA_PASSWORD}@${DAHUA_HOST}:554/cam/realmonitor?channel=1&subtype=0
+    source: rtsp://${DAHUA_USERNAME}:${DAHUA_PASSWORD}@${DAHUA_HOST}:554/cam/realmonitor?channel=1&subtype=${DAHUA_STREAM_SUBTYPE}
     sourceOnDemand: yes
 
   dahua-2:
-    source: rtsp://${DAHUA_USERNAME}:${DAHUA_PASSWORD}@${DAHUA_HOST}:554/cam/realmonitor?channel=2&subtype=0
+    source: rtsp://${DAHUA_USERNAME}:${DAHUA_PASSWORD}@${DAHUA_HOST}:554/cam/realmonitor?channel=2&subtype=${DAHUA_STREAM_SUBTYPE}
     sourceOnDemand: yes
 
   # Add more `dahua-<channel>` entries here to match additional

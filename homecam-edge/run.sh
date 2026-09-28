@@ -39,18 +39,24 @@ if [ -z "$stream_base_url" ]; then
 fi
 export STREAM_BASE_URL="${stream_base_url%/}"
 
-# Some Dahua NVRs only support a small number of concurrent mainstream
-# (subtype=0, full resolution) RTSP sessions; requesting more channels
-# at once than the NVR allows causes the extra ones to time out. This is
-# configurable so a substream (subtype=1, lower resolution/bitrate) can
-# be selected for a multi-camera live grid on NVRs that have an "extra
-# stream"/substream enabled per-channel in their own encode settings.
-# NOTE: on this hardware the substream is not enabled in the NVR's
-# encode configuration, so requesting subtype=1 causes every channel's
-# RTSP session to time out (verified live). Default remains mainstream
-# (subtype=0) until the NVR's substream is enabled via its own admin UI.
+# Which Dahua stream MediaMTX pulls and re-serves as HLS.
+#
+# subtype=1 (substream) is the default and is what browsers need. The
+# mainstream on this hardware is 4K H.265/HEVC, which MediaMTX passes
+# through untranscoded; hls.js cannot decode HEVC via Media Source
+# Extensions in Chrome/Edge/Firefox, so a subtype=0 live view fails or
+# stutters in the browser even when the network is perfectly healthy.
+# The substream (H.264, ~704x576) plays everywhere and is far cheaper
+# over the overlay network. Mainstream RTSP sessions are also limited
+# in number by the NVR, so the substream scales better to a multi-camera
+# grid.
+#
+# PREREQUISITE: the substream must be enabled per-channel in the NVR's
+# own encode settings (Setup -> Camera -> Encode -> Sub Stream) and set
+# to H.264. If it is disabled there, subtype=1 RTSP sessions time out;
+# set this back to 0 until it is enabled.
 dahua_stream_subtype="$(read_option dahua_stream_subtype)"
-export DAHUA_STREAM_SUBTYPE="${dahua_stream_subtype:-0}"
+export DAHUA_STREAM_SUBTYPE="${dahua_stream_subtype:-1}"
 
 python3 - <<'PY'
 import json
