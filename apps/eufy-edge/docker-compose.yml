@@ -1,0 +1,24 @@
+version: "3.8"
+
+# HomeCam Eufy edge adapter for the Home Assistant host.
+#
+# This stack assumes two things already run on this host:
+#   - eufy-security-ws (the Eufy bridge that owns the account session);
+#   - go2rtc (standalone add-on, or the copy bundled inside Frigate).
+#
+# Only this host's private overlay network address (Tailscale) should ever
+# be given to Azure -- do not port-forward these ports on your router.
+#
+# Eufy account credentials live in the bridge only. Neither this adapter
+# nor HomeCam in Azure ever receives them.
+
+services:
+  eufy-edge:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    # host networking keeps ws://127.0.0.1:3000 (bridge) and
+    # http://127.0.0.1:1984 (go2rtc) reachable without extra plumbing, and
+    # lets go2rtc's ffmpeg reach SELF_URL on the same loopback.
+    network_mode: host

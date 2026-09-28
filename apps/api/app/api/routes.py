@@ -13,7 +13,7 @@ import json
 import os
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -112,6 +112,29 @@ async def _cached_live_stream(provider, camera_id: str) -> str:
     url = await provider.get_live_stream(camera_id)
     _live_stream_cache[camera_id] = (now, url)
     return url
+
+
+def _resolve_hls_target(upstream_manifest_url: str, path: str, query: str) -> str:
+    """Map an incoming proxy path onto the upstream HLS URL.
+
+    Two upstream shapes have to work:
+
+    * directory-style (MediaMTX): ``http://host:8888/dahua-1/index.m3u8``,
+      where sub-playlists and segments are siblings of the manifest;
+    * query-style (go2rtc): ``http://host:1984/api/stream.m3u8?src=eufy-X``,
+      where the manifest name and its query string both matter.
+
+    ``/live`` always advertises ``index.m3u8`` as the entry point, so that
+    name is resolved back to the real upstream manifest URL verbatim
+    instead of being appended to a directory. Any query string on a child
+    request is forwarded, because go2rtc identifies sub-playlists and
+    segments with opaque query parameters rather than path segments.
+    """
+    if not path or path == "index.m3u8":
+        return upstream_manifest_url
+    parts = urlsplit(upstream_manifest_url)
+    base_dir = parts.path.rsplit("/", 1)[0]
+    return urlunsplit((parts.scheme, parts.netloc, f"{base_dir}/{path}", query, ""))
 
 
 def _rewrite_hls_manifest(text: str) -> str:
@@ -231,7 +254,7 @@ async def live(camera_id: str, request: Request):
 
 
 @router.get("/cameras/{camera_id}/hls/{path:path}")
-async def hls_proxy(camera_id: str, path: str):
+async def hls_proxy(camera_id: str, path: str, request: Request):
     """Public HLS relay for cameras whose real stream lives on the private
     overlay network. Streams the manifest/segments through the API's own
     (already tailnet-connected) network path so the browser only ever talks
@@ -251,8 +274,7 @@ async def hls_proxy(camera_id: str, path: str):
     kind, _ = _classify_stream_url(upstream_manifest_url)
     if kind != "hls":
         raise HTTPException(409, f"Camera '{camera_id}' does not expose an HLS stream to proxy")
-    upstream_base = upstream_manifest_url.rsplit("/", 1)[0]
-    target_url = f"{upstream_base}/{path}" if path else upstream_manifest_url
+    target_url = _resolve_hls_target(upstream_manifest_url, path, request.url.query)
 
     client_options: dict = {"timeout": 10.0, "follow_redirects": True}
     proxy_url = os.environ.get("TAILSCALE_HTTP_PROXY")

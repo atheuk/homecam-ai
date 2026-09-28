@@ -5,6 +5,15 @@ from app.providers.dahua import DahuaEdgeProvider, DahuaEdgeSettings
 from app.providers.dahua import edge_provider
 
 
+@pytest.fixture(autouse=True)
+def _reset_liveness_evidence():
+    """`_ONLINE_EVIDENCE` and `_VERIFY_ATTEMPTS` are module-level, so without
+    this they leak between tests and let ordering mask real failures."""
+    edge_provider.reset_liveness_evidence()
+    yield
+    edge_provider.reset_liveness_evidence()
+
+
 def dahua_edge_transport(dahua_reachable: bool = True, online: bool = True) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.headers.get("Authorization") != "Bearer test-token":
@@ -275,3 +284,23 @@ async def test_liveness_evidence_survives_the_provider_being_rebuilt():
 
     assert cameras["dahua-channel-1"] is True, "a different instance must still know channel 1 is live"
     assert calls.count("/channels/1/snapshot") == 1, "and must not re-probe it"
+
+
+@pytest.mark.asyncio
+async def test_a_wrongly_flagged_camera_is_verified_on_a_freshly_booted_host(monkeypatch):
+    """`time.monotonic()` counts from boot, so on a host that has just started
+    it returns a value below VERIFY_INTERVAL_SECONDS. A `0.0` "never probed"
+    sentinel made `now - 0.0 >= interval` false, silently suppressing the very
+    first verification -- leaving a working camera hidden from the dashboard
+    until the host had been up for two minutes."""
+    monkeypatch.setattr(edge_provider.time, "monotonic", lambda: 5.0)
+    calls: list = []
+    provider = DahuaEdgeProvider(
+        DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),
+        transport=_verify_transport(calls),
+    )
+
+    cameras = {c["id"]: c["online"] for c in await provider.discover_devices()}
+
+    assert calls.count("/channels/1/snapshot") == 1, "the first probe must not wait for host uptime"
+    assert cameras["dahua-channel-1"] is True, "a channel that delivers a real JPEG must come back"

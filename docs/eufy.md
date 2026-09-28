@@ -20,6 +20,25 @@ Recommended current adapter ecosystem: `@mega-yfue/eufy-sdk` in a separate local
 
 The archived/deprecated `bropat/eufy-security-client` project should be treated as historical reference/fallback only, not as the preferred embedded dependency.
 
+## Reference adapter
+
+`apps/eufy-edge/` is a working implementation of the contract below,
+bridging `eufy-security-ws` to HomeCam and handing live video to go2rtc.
+See `apps/eufy-edge/README.md` for setup. It runs on the owner's Home
+Assistant host, not in Azure.
+
+Upstream status (verified September 2026): `bropat/eufy-security-ws` and
+`bropat/eufy-security-client` were **archived by their author in September
+2026**, and `fuatakgun/eufy_security` is no longer updated. They still
+work, but are frozen. The maintained successor is `mega-yfue/eufy-sdk`
+(Apache-2.0). All protocol knowledge lives in `apps/eufy-edge/eufy_ws.py`
+so that migration stays contained.
+
+Hardware reality check: **no Eufy doorbell exposes local RTSP or ONVIF** —
+Eufy's own documentation lists Home Assistant, HomeKit, ONVIF and Blue Iris
+as "Not Supported" for these devices. A P2P bridge is the only route, live
+view takes a few seconds to start, and it can fail transiently.
+
 ## HomeCam adapter contract
 
 All Eufy-specific HomeCam code is isolated under `apps/api/app/providers/eufy`.
@@ -81,5 +100,10 @@ CI uses mocked adapter responses only and never requires a Eufy account or HomeB
 
 - No direct Eufy cloud endpoints are implemented in HomeCam core.
 - No Eufy credential, session token, or adapter bearer token is exposed to the frontend.
-- A real adapter service/container is intentionally not added in this branch because adding an unofficial dependency without live-account validation would risk unsupported behavior. The integration seam is ready for a separate bridge service once the owner can configure and validate it locally.
-- Live video, recording retrieval, talkback, and guard-mode controls remain optional and disabled unless a local adapter exposes verified support.
+- Recording retrieval, talkback, and guard-mode controls remain optional and disabled unless a local adapter exposes verified support.
+- Snapshots are the bridge's most recent *event image*, not a fresh
+  capture: the T8210 is battery powered, so waking it over P2P for every
+  snapshot poll would flatten it. Before the doorbell has produced any
+  event, `/snapshot` returns 404 rather than a fabricated image.
+- Live view depends on go2rtc being available on the adapter host to remux
+  the raw P2P H.264 into browser-playable HLS.
