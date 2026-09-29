@@ -229,7 +229,12 @@ it, of at least `STATIONARY_IOU_THRESHOLD`) is treated as the same objects,
 not moved, and is suppressed. The set is cumulative on purpose. A
 half-out-of-frame car that the detector only sometimes finds is learned
 once. It does not re-emit the parked car beside it each time it
-reappears. A new or moved object still emits. The subjects this applies to
+reappears. While at least one known object is still in view, an unmatched
+box also needs `STATIONARY_NEW_OBJECT_MIN_CONFIDENCE` (0.7) to count as a new
+object. Live, the unmatched boxes beside the parked car were distant street
+traffic and edge flicker at 0.51-0.65. Each one re-emitted an event whose
+best photo was the parked car. A new or moved object that is detected
+confidently still emits. The subjects this applies to
 are set by `STATIONARY_SUBJECTS`; people are never suppressed.
 
 Every ingested event still flows through the same
@@ -393,6 +398,7 @@ request.
 | `STATIONARY_SUPPRESS_SECONDS` | `1800` | How long an unmoved object (same camera+subject, matching box) is not re-reported. |
 | `STATIONARY_IOU_THRESHOLD` | `0.8` | IoU/containment at which a box counts as the same, unmoved object. |
 | `STATIONARY_SUBJECTS` | `vehicle,animal,package` | Subjects subject to stationary suppression (never `person`). |
+| `STATIONARY_NEW_OBJECT_MIN_CONFIDENCE` | `0.7` | While a known object is still in view, the confidence an unmatched box needs to count as a new object. |
 | `INGESTION_STATS_LOG_SECONDS` | `300` | Interval of the per-camera frame acquisition log lines. |
 | `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera *and subject* (person/animal/vehicle/package). |
 | `MOCK_CAMERAS_ENABLED` | auto | Scripted `mock-*` demo cameras. Auto: shown unless `APP_ENV=production` and a real provider is configured. |

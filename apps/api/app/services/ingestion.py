@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from ..ai.detector import (
     SUBJECT_LABELS,
     BoundingBox,
+    Detection,
     DetectionContext,
     get_detector,
     subject_for_label,
@@ -158,12 +159,12 @@ async def poll_once(session_factory=SessionLocal) -> int:
         for subject in _subjects_in({detection.label for detection in detections}):
             if not _cooldown_elapsed(camera_id, subject):
                 continue
-            boxes = [d.bbox for d in detections if subject_for_label(d.label) == subject]
-            if _is_stationary_repeat(camera_id, subject, boxes):
+            subject_detections = [d for d in detections if subject_for_label(d.label) == subject]
+            if _is_stationary_repeat(camera_id, subject, subject_detections):
                 _stats_for(camera_id)["stationary_suppressed"] += 1
                 continue
             due.append(subject)
-            boxes_by_subject[subject] = boxes
+            boxes_by_subject[subject] = [d.bbox for d in subject_detections]
         if not due:
             continue
 
@@ -283,20 +284,27 @@ def _same_object(box: BoundingBox, previous: BoundingBox, threshold: float) -> b
     return (union > 0 and inter / union >= threshold) or (box.area > 0 and inter / box.area >= threshold)
 
 
-def _is_stationary_repeat(camera_id: str, subject: str, boxes: list[BoundingBox]) -> bool:
-    """Whether every ``boxes`` is an object already reported and not moved.
+def _is_stationary_repeat(camera_id: str, subject: str, detections: list[Detection]) -> bool:
+    """Whether this frame shows only objects already reported, not moved.
 
     A parked car otherwise re-emits a vehicle event every cooldown, all day.
-    Any new or moved object of the subject still emits; people are never
-    suppressed this way.
+    At least one known object must still be in view. Any other box must
+    either match a known object or be too weak to be a new one (below
+    ``stationary_new_object_min_confidence``). A new or moved object that
+    is detected confidently still emits. People are never suppressed this
+    way.
     """
-    if not boxes or subject not in _stationary_subjects() or settings.stationary_suppress_seconds <= 0:
+    if not detections or subject not in _stationary_subjects() or settings.stationary_suppress_seconds <= 0:
         return False
     known = _live_known_boxes((camera_id, subject), time.monotonic())
     if not known:
         return False
     threshold = settings.stationary_iou_threshold
-    return all(any(_same_object(box, prior, threshold) for _, prior in known) for box in boxes)
+    matched = [any(_same_object(d.bbox, prior, threshold) for _, prior in known) for d in detections]
+    if not any(matched):
+        return False
+    floor = settings.stationary_new_object_min_confidence
+    return all(m or d.confidence < floor for m, d in zip(matched, detections))
 
 
 def _stats_for(camera_id: str) -> dict[str, int]:

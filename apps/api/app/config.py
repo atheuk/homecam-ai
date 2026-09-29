@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     stationary_suppress_seconds: float = Field(default=1800.0, ge=0.0)
     stationary_iou_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
     stationary_subjects: str = "vehicle,animal,package"
+    # While a known stationary object is still in view, an unmatched box
+    # only counts as a new object at or above this confidence. On the live
+    # front-yard camera the unmatched boxes beside the parked car were all
+    # 0.51-0.65 (far street traffic and flicker at the frame edge). Each one
+    # re-emitted an event whose best photo was the parked car. A nearby
+    # arriving car scores far higher.
+    stationary_new_object_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     # How often per-camera frame acquisition statistics are logged.
     ingestion_stats_log_seconds: float = Field(default=300.0, gt=0.0)
     mediamtx_url: str = "http://localhost:8889"
