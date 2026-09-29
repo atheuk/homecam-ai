@@ -3,6 +3,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_env: str = "development"
+    # Scripted demo cameras (``mock-*``). ``None`` means automatic: shown in
+    # development, and in production only while no real provider (Dahua or
+    # Eufy) is configured, so a live dashboard never mixes fake cameras in
+    # with the owner's real ones. ``true``/``false`` force either way.
+    mock_cameras_enabled: bool | None = None
     database_url: str = "sqlite+aiosqlite:///./homecam.db"
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "development-only"

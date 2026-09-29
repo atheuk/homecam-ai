@@ -75,6 +75,26 @@ VEHICLE_CLASSES: frozenset[str] = frozenset({"car", "truck", "bicycle", "motorcy
 # model's job, not the box detector's; see :mod:`app.ai.animals`.
 ANIMAL_CLASSES: frozenset[str] = frozenset({"dog", "cat", "bird", "animal"})
 
+# Event subjects (the SPEC 9 event types that name something in front of the
+# lens) and the detector labels that count as each. An event is *about* one
+# subject: a person event must be photographed, described and re-identified
+# from a person detection, never from whichever object happened to score
+# highest in the same frame.
+SUBJECT_LABELS: dict[str, frozenset[str]] = {
+    "person": frozenset({"person"}),
+    "animal": ANIMAL_CLASSES,
+    "vehicle": VEHICLE_CLASSES,
+    "package": frozenset({"package"}),
+}
+
+
+def subject_for_label(label: str) -> str | None:
+    """The event subject a detector label belongs to, or ``None``."""
+    for subject, labels in SUBJECT_LABELS.items():
+        if label in labels:
+            return subject
+    return None
+
 
 class DetectorUnavailableError(RuntimeError):
     """Raised when a detector backend cannot be constructed locally."""
@@ -214,7 +234,16 @@ def refine_detections(
     """Turn raw backend output into one credible box per real object."""
     survivors = suppress_overlaps([d for d in detections if plausible(d)], iou_threshold)
     survivors.sort(key=lambda d: d.confidence, reverse=True)
-    return survivors[:MAX_DETECTIONS_PER_FRAME]
+    kept = survivors[:MAX_DETECTIONS_PER_FRAME]
+    # A street full of parked cars must not push the one person (or cat)
+    # out of the per-frame cap: keep the best box of every label that the
+    # confidence-ordered cut would otherwise have dropped entirely.
+    kept_labels = {d.label for d in kept}
+    for detection in survivors[MAX_DETECTIONS_PER_FRAME:]:
+        if detection.label not in kept_labels:
+            kept.append(detection)
+            kept_labels.add(detection.label)
+    return kept
 
 
 @dataclass(frozen=True)

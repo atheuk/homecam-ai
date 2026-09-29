@@ -27,7 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..ai import best_photo as best_photo_module
 from ..ai.animals import describe_animal, get_animal_identifier
 from ..ai.appearance import get_appearance_analyzer
-from ..ai.detector import ANIMAL_CLASSES, VEHICLE_CLASSES, Detection, DetectionContext, get_detector
+from ..ai.detector import (
+    ANIMAL_CLASSES,
+    SUBJECT_LABELS,
+    VEHICLE_CLASSES,
+    Detection,
+    DetectionContext,
+    get_detector,
+    subject_for_label,
+)
 from ..ai.dwell import dwell_tracker
 from ..ai.provider import AnalysisContext, get_ai_provider
 from ..ai.schemas import GroundingError
@@ -200,12 +208,20 @@ async def _identify_animal(photo):
 
 
 async def enrich_event(
-    session: AsyncSession, row: Event, event: dict, trigger_frame: bytes | None = None
+    session: AsyncSession,
+    row: Event,
+    event: dict,
+    trigger_frame: bytes | None = None,
+    frames: list[bytes] | None = None,
 ) -> dict:
     """Run detection/zone/AI stages for a persisted event row.
 
     Returns the normalized event dict augmented with everything that was
     derived, and mutates ``row`` in place (caller commits).
+
+    ``frames`` lets a caller that raises several events from the same moment
+    (a person *and* a parked car) share one frame sample between them,
+    instead of spending the NVR's scarce snapshot sessions once per event.
     """
     if not settings.ai_analysis_enabled:
         return event
@@ -217,21 +233,24 @@ async def enrich_event(
     camera_name = str(event.get("camera_name") or row.camera_id)
     now = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
 
-    provider = None
-    try:
-        provider = await find_provider_for_camera(row.camera_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("provider lookup failed for %s: %s", row.camera_id, exc)
+    if frames:
+        frames = list(frames)
+    else:
+        frames = []
+        provider = None
+        try:
+            provider = await find_provider_for_camera(row.camera_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("provider lookup failed for %s: %s", row.camera_id, exc)
 
-    frames: list[bytes] = []
-    if provider is not None:
-        frames = await _sample_frames(
-            provider, row.camera_id, settings.best_photo_frames, seed=trigger_frame
-        )
-    elif trigger_frame:
-        # No provider to top up from, but the trigger frame is still the
-        # frame this event is about and is enough to produce a photo.
-        frames = [trigger_frame]
+        if provider is not None:
+            frames = await _sample_frames(
+                provider, row.camera_id, settings.best_photo_frames, seed=trigger_frame
+            )
+        elif trigger_frame:
+            # No provider to top up from, but the trigger frame is still the
+            # frame this event is about and is enough to produce a photo.
+            frames = [trigger_frame]
 
     detector = get_detector()
     context = DetectionContext(
@@ -269,9 +288,15 @@ async def enrich_event(
     photo_boxes: list[dict] = []
     photo_verified: bool | None = None
     if frames and settings.best_photo_enabled and detections:
+        # Photograph the subject this event is about. A person event must
+        # never be illustrated - or re-identified - from a higher-confidence
+        # car in the same frame; other classes are only a fallback when the
+        # event's own subject is genuinely absent from every sampled frame.
+        subject = subject_for_label(semantics.primary_detection.label) if semantics.primary_detection else None
+        photo_targets = SUBJECT_LABELS.get(subject or "", BEST_PHOTO_TARGETS)
         try:
             photo = best_photo_module.select_best_photo(
-                frames, detector, context, BEST_PHOTO_TARGETS
+                frames, detector, context, photo_targets
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("best-photo selection failed for %s: %s", row.camera_id, exc)

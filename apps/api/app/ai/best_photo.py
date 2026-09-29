@@ -76,6 +76,9 @@ class BestPhoto:
     # coordinates, ready to be drawn over it. See :func:`overlay_boxes` for
     # why the detector's own bbox cannot be used directly.
     boxes: tuple[dict, ...] = ()
+    # Every detection in the source frame, in *full-frame* normalized
+    # coordinates, so nothing seen in the frame is lost by cropping.
+    frame_boxes: tuple[dict, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -87,6 +90,7 @@ class BestPhoto:
             "height": self.height,
             "detection": self.detection.as_dict() if self.detection else None,
             "boxes": [dict(box) for box in self.boxes],
+            "frame_boxes": [dict(box) for box in self.frame_boxes],
         }
 
 
@@ -377,20 +381,29 @@ def select_best_photo(
 
     Frames are scored independently, so a blurry motion frame loses to a
     later sharp frame of the same person even if both detect equally well.
+
+    A frame that contains the target at all always beats one that does not:
+    otherwise a person event whose second frame shows only the parked car
+    would be photographed as that car. Falling back to whatever else was
+    detected happens only when *no* frame contains the target.
     """
     if not frames:
         return None
     best: BestPhoto | None = None
+    best_key: tuple[bool, float] | None = None
     for index, frame in enumerate(frames):
         detections = detector.detect(frame, context)
         score, sharpness, detection = score_frame(frame, detections, target_labels)
-        if best is not None and score <= best.score:
+        key = (detection is not None and detection.label in target_labels, score)
+        if best_key is not None and key <= best_key:
             continue
+        best_key = key
         if crop and detection:
             image, cropped, width, height = crop_to_detection(frame, detection)
         else:
             image, cropped, width, height = frame, False, None, None
-        best = BestPhoto(            frame_index=index,
+        best = BestPhoto(
+            frame_index=index,
             score=score,
             sharpness=sharpness,
             detection=detection,
@@ -401,6 +414,7 @@ def select_best_photo(
             height=height,
             subject_image=crop_to_subject(frame, detection) if detection else None,
             boxes=_boxes_for_photo(frame, detection, detections, cropped),
+            frame_boxes=tuple(overlay_boxes(detections, None, None)),
         )
     return best
 

@@ -67,7 +67,10 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
 
 
 async def create_and_broadcast_event(
-    session: AsyncSession, event: dict, trigger_frame: bytes | None = None
+    session: AsyncSession,
+    event: dict,
+    trigger_frame: bytes | None = None,
+    frames: list[bytes] | None = None,
 ) -> Event:
     """Run the SPEC section 12 ingestion pipeline for one normalized event.
 
@@ -79,11 +82,13 @@ async def create_and_broadcast_event(
     ``trigger_frame`` is the snapshot that caused this event, when the caller
     already has one. Passing it through means analysis does not have to win a
     second race for a scarce NVR session just to look at the same moment.
+    ``frames`` is an already-sampled set shared by several events raised from
+    the same moment (see :func:`ai_pipeline.enrich_event`).
     """
     row = await persist_event(session, event)
     enriched = event
     try:
-        enriched = await ai_pipeline.enrich_event(session, row, event, trigger_frame)
+        enriched = await ai_pipeline.enrich_event(session, row, event, trigger_frame, frames)
         await activity_service.correlate_event(session, row)
         await session.commit()
         await session.refresh(row)
