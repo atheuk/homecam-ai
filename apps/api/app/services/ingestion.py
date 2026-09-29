@@ -147,15 +147,34 @@ async def poll_once(session_factory=SessionLocal) -> int:
             logger.warning("ingestion detection failed for %s: %s", camera_id, exc)
             continue
 
+        # Subject events first: a slow scene check (a Foundry mailbox/bin
+        # verification) must never delay the person/animal event from the
+        # same frame.
+        created += await _emit_subject_events(
+            session_factory, provider, camera_id, camera_name, image, detections,
+            stream_frames, frame_source,
+        )
         # Every real frame advances the persistent scene state, including
         # frames with nothing in them: that is how a vehicle departs or a
         # mailbox visit ends. Its transitions are events of their own.
         created += await _emit_scene_transitions(
             session_factory, camera_id, camera_name, image, detections, stream_frames, frame_source
         )
-        if not detections:
-            continue
+    return created
 
+
+async def _emit_subject_events(
+    session_factory,
+    provider,
+    camera_id: str,
+    camera_name: str,
+    image: bytes,
+    detections: list[Detection],
+    stream_frames: list[bytes] | None,
+    frame_source: str,
+) -> int:
+    created = 0
+    if detections:
         # Cooldown is per subject: a car parked in view all day must not
         # hold the camera's only cooldown slot and so silence the person or
         # animal that walks past it.
@@ -173,7 +192,7 @@ async def poll_once(session_factory=SessionLocal) -> int:
             due.append(subject)
             boxes_by_subject[subject] = [d.bbox for d in subject_detections]
         if not due:
-            continue
+            return 0
 
         # One frame sample shared by every event from this moment. Stream
         # frames already come as a burst from one segment; snapshot-only
