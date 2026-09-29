@@ -38,7 +38,20 @@ type CameraZone = {
 /** Zone kinds the detection pipeline understands semantically
  * (see docs/ai-pipeline.md). Any other name is stored and shown, it simply
  * carries no extra meaning. */
-const ZONE_KINDS = ["driveway", "parking", "mailbox", "entry", "street", "garden", "other"];
+const ZONE_KINDS = ["driveway", "parking", "mailbox", "bin", "entry", "street", "garden", "other"];
+
+// What the stateful detectors do with the two zone kinds that enable them.
+const ZONE_KIND_HINTS: Record<string, string> = {
+  mailbox:
+    "Mailbox delivery: draw the box tightly around the mailbox/letterbox. A person must stay at it for a few samples; walk-bys and parcels carried past are ignored.",
+  bin:
+    "Bins: draw the box around the curb spot where bins are put out. Reports a bin put out, and emptied only with evidence (collection vehicle or bin moved) — a bin simply disappearing, or a camera outage, is not \"emptied\".",
+};
+
+type SceneStateSummary = {
+  vehicles: { track_id: string; label: string; state: string; observation_count: number }[];
+  zones: { zone_id: string; kind: string; state: string }[];
+};
 
 function authHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -103,6 +116,7 @@ export default function AdminPanel() {
   const [cameras, setCameras] = useState<CameraOption[]>([]);
   const [zoneCameraId, setZoneCameraId] = useState("");
   const [zones, setZones] = useState<CameraZone[]>([]);
+  const [sceneState, setSceneState] = useState<SceneStateSummary | null>(null);
   const [zoneName, setZoneName] = useState("driveway");
   const [zoneKind, setZoneKind] = useState("driveway");
   const [zoneBox, setZoneBox] = useState({ x1: "0.0", y1: "0.5", x2: "0.6", y2: "1.0" });
@@ -156,6 +170,14 @@ export default function AdminPanel() {
       return;
     }
     setZones(await r.json());
+    try {
+      const s = await fetch(`${API}/api/v1/admin/cameras/${cameraId}/scene-state`, {
+        headers: authHeaders(activeToken),
+      });
+      setSceneState(s.ok ? await s.json() : null);
+    } catch {
+      setSceneState(null);
+    }
   }
 
   useEffect(() => {
@@ -664,7 +686,9 @@ export default function AdminPanel() {
         <p className="muted">
           Zones are labelled rectangles in normalized image coordinates (0–1, origin top-left). The AI pipeline uses
           them to turn raw detections into meaningful events: a person in a <code>driveway</code> zone, a car parked in
-          a <code>parking</code> zone, or activity at the <code>mailbox</code>. See docs/ai-pipeline.md.
+          a <code>parking</code> zone, or activity at the <code>mailbox</code>. A <code>mailbox</code> zone enables
+          mail-delivery detection and a <code>bin</code> zone enables bin put-out/emptied detection; both are off until
+          you add one. See docs/ai-pipeline.md.
         </p>
         <form onSubmit={saveZone} className="admin-form">
           <label>
@@ -691,6 +715,7 @@ export default function AdminPanel() {
               ))}
             </select>
           </label>
+          {ZONE_KIND_HINTS[zoneKind] && <p className="muted zone-kind-hint">{ZONE_KIND_HINTS[zoneKind]}</p>}
           <fieldset className="channel-editor">
             <legend>Rectangle (normalized 0–1)</legend>
             <div className="channel-row">
@@ -724,6 +749,9 @@ export default function AdminPanel() {
                 <span className="provider-type">{zone.kind}</span>
                 <span className="provider-summary">
                   {zone.name} — [{zone.x1}, {zone.y1}] → [{zone.x2}, {zone.y2}]
+                  {sceneState?.zones.find((s) => s.zone_id === zone.id) && (
+                    <> · state: {sceneState.zones.find((s) => s.zone_id === zone.id)!.state}</>
+                  )}
                 </span>
                 <div className="provider-row-actions">
                   <button type="button" onClick={() => removeZone(zone)} aria-label={`Delete zone ${zone.name}`}>
@@ -733,6 +761,14 @@ export default function AdminPanel() {
               </li>
             ))}
           </ul>
+        )}
+        {sceneState && sceneState.vehicles.length > 0 && (
+          <p className="muted" aria-label="Tracked vehicles">
+            Tracked vehicles:{" "}
+            {sceneState.vehicles
+              .map((v) => `${v.label} (${v.state}, ${v.observation_count} obs)`)
+              .join(", ")}
+          </p>
         )}
       </section>
 

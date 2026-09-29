@@ -1,7 +1,7 @@
 "use client";
 
 import {useMemo,useState} from "react";
-import {EventCard,type EventItem,type Person} from "./People";
+import {EventCard,sceneCategory,type EventItem,type Person} from "./People";
 
 export type CameraSummary={id:string;name:string};
 
@@ -14,7 +14,13 @@ type EventsPanelProps={
   onAcknowledgeNew:()=>void;
 };
 
-const FILTER_TYPES=["person","vehicle","animal","motion"] as const;
+const FILTER_TYPES=["person","vehicle","animal","package","motion"] as const;
+const ACTIVITY_FILTERS=[
+  ["all","All activity"],
+  ["vehicle","Vehicle arrivals & departures"],
+  ["mailbox","Mail deliveries"],
+  ["bin","Bins"],
+] as const;
 
 function dayLabel(value:string){
   const date=new Date(value);
@@ -33,12 +39,14 @@ export default function EventsPanel({
   const [type,setType]=useState("all");
   const [cameraId,setCameraId]=useState("all");
   const [namedOnly,setNamedOnly]=useState(false);
+  const [activity,setActivity]=useState("all");
 
   const filtered=useMemo(()=>events.filter(event=>
     (type==="all"||event.type===type)&&
     (cameraId==="all"||event.camera_id===cameraId)&&
+    (activity==="all"||sceneCategory(event)===activity)&&
     (!namedOnly||Boolean(event.person_display_name))
-  ),[events,type,cameraId,namedOnly]);
+  ),[events,type,cameraId,activity,namedOnly]);
 
   const groups=useMemo(()=>{
     const result:{label:string;events:EventItem[]}[]=[];
@@ -76,6 +84,12 @@ export default function EventsPanel({
         <select value={cameraId} onChange={event=>setCameraId(event.target.value)}>
           <option value="all">All cameras</option>
           {cameras.map(camera=><option value={camera.id} key={camera.id}>{camera.name}</option>)}
+        </select>
+      </label>
+      <label className="filter-select">
+        <span>Activity</span>
+        <select value={activity} onChange={event=>setActivity(event.target.value)}>
+          {ACTIVITY_FILTERS.map(([value,label])=><option value={value} key={value}>{label}</option>)}
         </select>
       </label>
       <label className="filter-check">

@@ -74,6 +74,36 @@ def _reset_ai_state():
     dwell_tracker.reset()
 
 
+@pytest.fixture(autouse=True)
+async def _reset_scene_state():
+    """Vehicle tracks and zone states persist in the DB by design; tests
+    must not inherit another test's parked car. The Foundry scene verifier
+    is off unless a test installs a fake one."""
+    from sqlalchemy import delete
+    from sqlalchemy.exc import OperationalError
+
+    from app.ai.scene_verifier import reset_scene_verifier, set_scene_verifier
+    from app.db import SessionLocal
+    from app.models.db import SceneState, VehicleTrack
+    from app.services import scene_state
+
+    async def _clear():
+        scene_state.reset_memory()
+        try:
+            async with SessionLocal() as session:
+                await session.execute(delete(VehicleTrack))
+                await session.execute(delete(SceneState))
+                await session.commit()
+        except OperationalError:
+            pass  # tables not created yet (no client fixture used so far)
+
+    set_scene_verifier(None)
+    await _clear()
+    yield
+    await _clear()
+    reset_scene_verifier()
+
+
 @pytest.fixture
 async def client():
     from app.main import app

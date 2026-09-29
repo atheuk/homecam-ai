@@ -189,6 +189,56 @@ class Activity(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class VehicleTrack(Base):
+    """A vehicle followed across frames, independently of event cooldowns.
+
+    Persisted so a restart does not re-announce a car that has been parked
+    in view all along. Times are epoch seconds (the tracker's clock).
+    """
+
+    __tablename__ = "vehicle_tracks"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    label: Mapped[str] = mapped_column(String(32))
+    zone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # tentative -> tracking -> stable, and departed once gone.
+    state: Mapped[str] = mapped_column(String(16), default="tentative", index=True)
+    # Box the vehicle is being held to ("same place" is IoU with this).
+    x1: Mapped[float] = mapped_column(Float)
+    y1: Mapped[float] = mapped_column(Float)
+    x2: Mapped[float] = mapped_column(Float)
+    y2: Mapped[float] = mapped_column(Float)
+    observation_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen_at: Mapped[float] = mapped_column(Float)
+    last_seen_at: Mapped[float] = mapped_column(Float)
+    anchored_at: Mapped[float] = mapped_column(Float)
+    stationary_since: Mapped[float | None] = mapped_column(Float, nullable=True)
+    departed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    appearance: Mapped[list] = mapped_column(JSON, default=list)
+    # Transient counters/flags (reported, interaction streak, ...).
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SceneState(Base):
+    """Persisted state of one watched thing on a camera.
+
+    ``kind`` is ``camera`` (frame continuity), ``mailbox`` or ``bin``; the
+    latter two are keyed by their zone. ``data`` holds the state machine.
+    """
+
+    __tablename__ = "scene_states"
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    zone_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), default="unknown")
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

@@ -45,7 +45,14 @@ async def create_zone(session: AsyncSession, camera_id: str, payload) -> CameraZ
     session.add(zone)
     await session.commit()
     await session.refresh(zone)
+    _invalidate(camera_id)
     return zone
+
+
+def _invalidate(camera_id: str) -> None:
+    from . import scene_state
+
+    scene_state.invalidate_zone_cache(camera_id)
 
 
 async def update_zone(session: AsyncSession, zone: CameraZone, payload) -> CameraZone:
@@ -58,12 +65,14 @@ async def update_zone(session: AsyncSession, zone: CameraZone, payload) -> Camer
     zone.updated_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(zone)
+    _invalidate(zone.camera_id)
     return zone
 
 
 async def delete_zone(session: AsyncSession, zone: CameraZone) -> None:
     await session.delete(zone)
     await session.commit()
+    _invalidate(zone.camera_id)
 
 
 async def zones_for_camera(session: AsyncSession, camera_id: str) -> list[Zone]:

@@ -171,6 +171,23 @@ describe("AdminPanel",()=>{
     expect(await screen.findByText(/driveway — \[0, 0.5\]/)).toBeInTheDocument();
   });
 
+  it("offers a bin zone kind with guidance and shows its current state", async()=>{
+    mockFetch({
+      ...zoneHandlers,
+      "/admin/cameras/mock-front-door/zones":()=>jsonResponse([{id:"z9",camera_id:"mock-front-door",name:"Curb",kind:"bin",x1:0.6,y1:0.5,x2:0.8,y2:0.9}]),
+      "/admin/cameras/mock-front-door/scene-state":()=>jsonResponse({
+        camera_id:"mock-front-door",
+        vehicles:[{track_id:"vt-1",label:"car",state:"stable",observation_count:12}],
+        zones:[{zone_id:"z9",kind:"bin",state:"present",data:{}}],
+      }),
+    });
+    await signIn();
+    expect(await screen.findByText(/Curb — \[0.6, 0.5\].*state: present/)).toBeInTheDocument();
+    expect(screen.getByText(/car \(stable, 12 obs\)/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Zone kind"),{target:{value:"bin"}});
+    expect(screen.getByText(/camera outage, is not "emptied"/)).toBeInTheDocument();
+  });
+
   it("posts a new zone with normalized coordinates", async()=>{
     let capturedBody:Record<string,unknown>|null=null;
     mockFetch({

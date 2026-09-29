@@ -214,3 +214,15 @@ async def delete_camera_zone(
         raise HTTPException(404, "Zone not found")
     await zone_service.delete_zone(session, zone)
     return None
+
+
+@zones_router.get("/{camera_id}/scene-state")
+async def camera_scene_state(
+    camera_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Tracked vehicles and mailbox/bin zone states for one camera."""
+    from ..services import scene_state
+
+    return await scene_state.snapshot(session, camera_id)

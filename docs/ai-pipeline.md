@@ -237,6 +237,73 @@ best photo was the parked car. A new or moved object that is detected
 confidently still emits. The subjects this applies to
 are set by `STATIONARY_SUBJECTS`; people are never suppressed.
 
+With `VEHICLE_TRACKING_ENABLED=true` (default) vehicles no longer use this
+cooldown/suppression path at all; they are handled by the persistent scene
+state below. Animals and packages still are.
+
+### Scene state: vehicles, mailbox deliveries, bins
+
+`app/services/scene_state.py` runs on **every** sampled frame (independently
+of event cooldowns) and keeps per-camera state in two tables,
+`vehicle_tracks` and `scene_states` (migration `0008_scene_state`), so it
+survives restarts. It emits only *transitions*, as ordinary events of an
+existing SPEC 9 type; what happened is in `tags`, `metadata.scene` (also
+returned top-level as `scene` by the events API) and a kind-specific
+metadata block. Enrichment keeps a scene event's type, description and tags
+and only adds to them.
+
+**Vehicles** (`metadata.vehicle_track`: `track_id`, `state`,
+`observation_count`, `first_seen`, `stationary_since`, `transition`, `box`)
+
+| Transition | When | Tags |
+|---|---|---|
+| `arrived` | a new track confirmed after `VEHICLE_CONFIRM_OBSERVATIONS` (2) samples, and the camera had been watching the spot for `VEHICLE_ABSENCE_SECONDS` before it appeared | `vehicle_arrived` |
+| `first_seen` | confirmed, but it was already there when observation began (startup, after an outage) — no arrival is claimed | — |
+| parked | `VEHICLE_STABLE_OBSERVATIONS` (5) matching samples (IoU with the anchor box ≥ `VEHICLE_STABLE_IOU`): **no new event**; the reporting event is tagged | `vehicle_parked` |
+| `moved` | a parked track's box changes materially | `vehicle_moved` |
+| `interaction` | a person overlaps a tracked vehicle for `VEHICLE_INTERACTION_OBSERVATIONS` samples (cooldown `VEHICLE_INTERACTION_COOLDOWN_SECONDS`); the count restarts | `vehicle_interaction` |
+| `departed` | unseen for `VEHICLE_ABSENCE_SECONDS` of camera time that actually delivered frames (an outage is not absence) | `vehicle_departed` |
+| `returned` | a new track in the place of a departed one within `VEHICLE_RETURN_WINDOW_SECONDS`, with a compatible colour signature | `vehicle_arrived`, `vehicle_returned` |
+
+A car seen in a single sample (passing traffic) is never reported. Each
+vehicle is its own track; a partial second box on the same car and
+low-confidence boxes (`VEHICLE_NEW_TRACK_MIN_CONFIDENCE`) do not create
+tracks. After parking, a vehicle costs no events and no Foundry calls.
+`GET /api/v1/admin/cameras/{id}/scene-state` shows the tracks and zone states.
+
+**Mailbox delivery** — add a zone of kind `mailbox` (off until you do).
+A person covering ≥ `MAILBOX_MIN_ZONE_OVERLAP` of the zone for ≥
+`MAILBOX_MIN_OBSERVATIONS` samples is a visit (fewer is a walk-by). When the
+person has left, the before/during/after evidence decides: a `package`
+detected in the zone after but not before is a deposit; a package seen only
+during the visit was carried past (no event). Otherwise (RT-DETR cannot see
+envelopes) the Foundry vision deployment is asked one closed JSON question
+about the BEFORE/DURING/AFTER crops of that zone — "was an item deposited:
+yes/no/unknown?" — rate-limited by `SCENE_VERIFIER_MIN_INTERVAL_SECONDS`.
+Only `yes` emits one `package` event tagged `mailbox`, `mailbox_delivery`
+and `parcel`/`mail` when stated, with `metadata.mailbox` (visit id,
+confidence, source `local`/`foundry`, before/after evidence). `unknown` is
+recorded on the zone state, not reported. Deliveries are deduplicated for
+`MAILBOX_DEDUPE_SECONDS`. The pre-existing "person at the mailbox" event
+from zone semantics is unchanged.
+
+**Bins** — add a zone of kind `bin` around the curb spot (off until you do).
+Every `BIN_CHECK_INTERVAL_SECONDS`, when no person/vehicle occludes it, the
+zone is compared with a brightness-normalized baseline; a change stable for
+`BIN_CHANGE_CONFIRM_CHECKS` checks is a candidate. Presence before/now comes
+from local labels (`BIN_LOCAL_LABELS`, if your model has a bin class) or a
+closed Foundry question on the BEFORE/(DURING)/NOW crops. absent → present
+emits `bin_placed_out`. `bin_emptied` needs present before **and** after, a
+recent interaction (a truck at the zone, or a person with Foundry saying the
+bin was moved/tipped), and no camera outage in between. A bin disappearing
+is never "emptied" unless `BIN_REMOVAL_COUNTS_AS_EMPTIED=true` and a
+collection vehicle was seen and there was no outage. Bin events are `motion`
+events tagged `bin` + the transition, deduplicated for `BIN_DEDUPE_SECONDS`.
+
+The Foundry prompts (`app/ai/scene_verifier.py`) are closed questions about
+the object only; they never describe people, and never infer identity,
+gender or ethnicity. Answers outside `yes/no/unknown` become `unknown`.
+
 Every ingested event still flows through the same
 `create_and_broadcast_event` → `enrich_event` pipeline as any other event
 source, so its final `type`/`zone`/`tags`/best photo/AI analysis is
@@ -400,6 +467,21 @@ request.
 | `STATIONARY_SUBJECTS` | `vehicle,animal,package` | Subjects subject to stationary suppression (never `person`). |
 | `STATIONARY_NEW_OBJECT_MIN_CONFIDENCE` | `0.7` | While a known object is still in view, the confidence an unmatched box needs to count as a new object. |
 | `INGESTION_STATS_LOG_SECONDS` | `300` | Interval of the per-camera frame acquisition log lines. |
+| `VEHICLE_TRACKING_ENABLED` | `true` | Persistent vehicle tracks (arrived/parked/moved/departed/returned) instead of cooldown events. |
+| `VEHICLE_CONFIRM_OBSERVATIONS` | `2` | Samples before a new vehicle is reported (1 = report first sighting). |
+| `VEHICLE_STABLE_OBSERVATIONS` | `5` | Matching samples after which a vehicle is parked and goes quiet. |
+| `VEHICLE_STABLE_IOU` / `VEHICLE_MATCH_IOU` | `0.7` / `0.3` | Same-place threshold / association threshold. |
+| `VEHICLE_NEW_TRACK_MIN_CONFIDENCE` | `0.7` | Confidence needed to start a new vehicle track. |
+| `VEHICLE_ABSENCE_SECONDS` | `180` | Unseen (with frames arriving) before a vehicle has departed. |
+| `VEHICLE_RETURN_WINDOW_SECONDS` | `86400` | How long a departed vehicle can be recognised as returned. |
+| `SCENE_OUTAGE_SECONDS` | `60` | A frame gap longer than this is a camera outage. |
+| `MAILBOX_DELIVERY_ENABLED` | `true` | Mailbox delivery detection (only acts on `mailbox` zones). |
+| `MAILBOX_MIN_OBSERVATIONS` / `MAILBOX_DEDUPE_SECONDS` | `2` / `900` | Walk-by threshold / one delivery per window. |
+| `BIN_DETECTION_ENABLED` | `true` | Bin detection (only acts on `bin` zones). |
+| `BIN_CHECK_INTERVAL_SECONDS` / `BIN_CHANGE_CONFIRM_CHECKS` | `20` / `3` | Region check cadence / checks a change must persist. |
+| `BIN_REMOVAL_COUNTS_AS_EMPTIED` | `false` | Explicit rule: a bin removed right after a collection vehicle counts as emptied. |
+| `BIN_LOCAL_LABELS` | empty | Detector labels that mean "bin" (none in COCO). |
+| `SCENE_VERIFIER_ENABLED` / `SCENE_VERIFIER_MIN_INTERVAL_SECONDS` | `true` / `120` | Closed Foundry questions for mailbox/bin candidates (needs Foundry), rate limit per zone. |
 | `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera *and subject* (person/animal/vehicle/package). |
 | `MOCK_CAMERAS_ENABLED` | auto | Scripted `mock-*` demo cameras. Auto: shown unless `APP_ENV=production` and a real provider is configured. |
 
@@ -422,4 +504,14 @@ request.
 - **Embeddings are JSON arrays, not a native pgvector column** (see above), so
   similarity search is not yet index-accelerated.
 - **Dwell state is in-process**, so a restart costs at most one dwell window
-  before a parked car is recognised again.
+  before a parked car is recognised again. (Vehicle scene tracks, mailbox and
+  bin states are persisted; only frame continuity is in memory, so a restart
+  counts as an outage.)
+- **Mailbox and bin detection depend on Foundry in practice.** RT-DETR (COCO)
+  has no envelope or wheelie-bin class, so without Foundry mailbox events only
+  come from a locally detected package and bins stay `unknown`. Verification
+  runs only on candidate sequences, never per frame.
+- **Vehicle identity is colour-based only.** "Returned" means a compatible
+  colour signature in the same place, not a recognised vehicle; greyscale
+  (night IR) crops compare brightness only. There is no make/model or plate
+  recognition.
