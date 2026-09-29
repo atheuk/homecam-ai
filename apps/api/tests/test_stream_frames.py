@@ -375,6 +375,22 @@ async def test_a_parked_car_is_not_re_reported(client, snapshot_camera):
     assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 2
 
 
+async def test_a_flickering_static_box_does_not_re_emit_the_parked_car(client, snapshot_camera):
+    # Live ch1: a parked car plus a half-out-of-frame car at the top edge
+    # that the detector only sometimes finds. Each reappearance used to
+    # count as "new" against the last event and re-emit every cooldown.
+    edge = Detection("car", 0.6, BoundingBox(0.86, 0.0, 0.954, 0.084))
+    far = Detection("car", 0.55, BoundingBox(0.13, 0.70, 0.22, 0.91))
+    for frame in ([CAR], [CAR, edge], [CAR], [CAR, far], [CAR], [CAR, edge], [CAR, far], [CAR, edge, far]):
+        mock_detector().set_script(CAMERA, frame)
+        await ingestion.poll_once()
+
+    # One event for the parked car, one each the first time the edge and
+    # far boxes appeared; never again for either afterwards.
+    assert [e["type"] for e in await _events(client)] == ["vehicle"] * 3
+    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 5
+
+
 async def test_a_new_or_moving_vehicle_still_emits(client, snapshot_camera):
     mock_detector().set_script(CAMERA, [CAR])
     await ingestion.poll_once()
