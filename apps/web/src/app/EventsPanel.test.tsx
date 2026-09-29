@@ -19,6 +19,12 @@ const events:EventItem[]=[
     start_time:"2026-09-28T11:00:00Z"},
   {id:"motion",camera_id:"front",type:"motion",description:"Motion at the door",
     start_time:"2026-09-27T20:00:00Z"},
+  {id:"parked",camera_id:"garden",type:"vehicle",description:"A car arrived in the Driveway",
+    start_time:"2026-09-27T19:00:00Z",tags:["car","vehicle_arrived","vehicle_parked"],
+    scene:{kind:"vehicle",transition:"arrived",zone:"Driveway",parked:true}},
+  {id:"mail",camera_id:"front",type:"package",description:"Mail was put in the Mailbox",
+    start_time:"2026-09-27T18:00:00Z",tags:["mailbox","mailbox_delivery","mail"],
+    scene:{kind:"mailbox",transition:"mailbox_delivery",zone:"Mailbox",item_type:"mail"}},
 ];
 
 function renderPanel(newEventIds=new Set<string>()){
@@ -27,6 +33,28 @@ function renderPanel(newEventIds=new Set<string>()){
 }
 
 describe("events panel",()=>{
+  it("shows what changed as badges, not raw tracker state",()=>{
+    renderPanel();
+    expect(screen.getByText("Arrived")).toBeInTheDocument();
+    expect(screen.getByText("Parked")).toBeInTheDocument();
+    expect(screen.getByText("Mail delivered")).toBeInTheDocument();
+    expect(screen.queryByText(/vehicle_parked/)).not.toBeInTheDocument();
+  });
+
+  it("filters by activity",()=>{
+    renderPanel();
+    fireEvent.change(screen.getByLabelText("Activity"),{target:{value:"mailbox"}});
+    expect(screen.getByText("Mail was put in the Mailbox")).toBeInTheDocument();
+    expect(screen.queryByText("A car arrived in the Driveway")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sarah arrived")).not.toBeInTheDocument();
+  });
+
+  it("filters packages by type",()=>{
+    renderPanel();
+    fireEvent.click(screen.getByRole("button",{name:"package"}));
+    expect(screen.getByText("Mail was put in the Mailbox")).toBeInTheDocument();
+    expect(screen.queryByText("Motion at the door")).not.toBeInTheDocument();
+  });
   it("filters by event type",()=>{
     renderPanel();
     fireEvent.click(screen.getByRole("button",{name:"person"}));

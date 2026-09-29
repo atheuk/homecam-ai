@@ -280,6 +280,8 @@ def streamed(monkeypatch):
     monkeypatch.setattr(mock_provider, "supports_stream_frames", True, raising=False)
     monkeypatch.setattr(mock_provider, "get_snapshot", snapshot)
     monkeypatch.setattr(stream_hub, "ensure", lambda camera_id: None)
+    # One frame per test here: report a vehicle on its first sighting.
+    monkeypatch.setattr(settings, "vehicle_confirm_observations", 1)
 
     def publish(frame: bytes, seq: int = 1, age: float = 0.0) -> None:
         stream_hub._readers[CAMERA] = SimpleNamespace(
@@ -361,41 +363,42 @@ def snapshot_camera(monkeypatch):
     monkeypatch.setattr(mock_provider, "get_snapshot", snapshot)
 
 
-async def test_a_parked_car_is_not_re_reported(client, snapshot_camera):
-    mock_detector().set_script(CAMERA, [CAR])
-    await ingestion.poll_once()
-    # Jittered box and an extra partial box on the same car: same object.
+async def test_a_parked_car_is_reported_once_then_marked_parked(client, snapshot_camera):
+    # Live ch1: a parked car re-emitted a vehicle event every ~3 minutes.
+    # Now it is tracked: one event once confirmed, then only local tracking;
+    # after five matching observations that event is tagged parked.
     jitter = Detection("car", 0.9, BoundingBox(0.552, 0.405, 0.95, 0.84))
     partial = Detection("car", 0.51, BoundingBox(0.56, 0.45, 0.80, 0.80))
-    mock_detector().set_script(CAMERA, [jitter, partial])
-    await ingestion.poll_once()
-    await ingestion.poll_once()
+    for frame in ([CAR], [jitter, partial], [CAR], [jitter], [CAR], [jitter], [CAR], [jitter]):
+        mock_detector().set_script(CAMERA, frame)
+        await ingestion.poll_once()
 
-    assert [e["type"] for e in await _events(client)] == ["vehicle"]
-    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 2
+    [event] = await _events(client)
+    assert event["type"] == "vehicle"
+    assert event["metadata"]["frame_source"] == "snapshot"
+    assert "vehicle_parked" in event["tags"]
+    assert event["metadata"]["vehicle_track"]["state"] == "stable"
+    assert event["metadata"]["vehicle_track"]["observation_count"] >= 5
+    assert ingestion.frame_stats()[CAMERA]["scene_events"] == 1
 
 
 async def test_a_flickering_static_box_does_not_re_emit_the_parked_car(client, snapshot_camera):
     # Live ch1: a parked car plus a half-out-of-frame car at the top edge
-    # that the detector only sometimes finds, confidently enough to count
-    # as a new object. Each reappearance used to count as "new" against the
-    # last event and re-emit every cooldown.
+    # that the detector only sometimes finds. Each is its own track: one
+    # event each once confirmed, never again while they stay put.
     edge = Detection("car", 0.75, BoundingBox(0.86, 0.0, 0.954, 0.084))
     far = Detection("car", 0.72, BoundingBox(0.13, 0.70, 0.22, 0.91))
-    for frame in ([CAR], [CAR, edge], [CAR], [CAR, far], [CAR], [CAR, edge], [CAR, far], [CAR, edge, far]):
+    frames = ([CAR], [CAR, edge], [CAR], [CAR, far], [CAR], [CAR, edge], [CAR, far], [CAR, edge, far])
+    for frame in frames * 2:
         mock_detector().set_script(CAMERA, frame)
         await ingestion.poll_once()
 
-    # One event for the parked car, one each the first time the edge and
-    # far boxes appeared; never again for either afterwards.
     assert [e["type"] for e in await _events(client)] == ["vehicle"] * 3
-    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 5
 
 
 async def test_weak_unmatched_boxes_beside_a_parked_car_do_not_re_emit_it(client, snapshot_camera):
-    # The live pattern after the fix above: distant street traffic along the
-    # top edge, each at a new position with 0.51-0.65 confidence. Each
-    # re-emitted a vehicle event whose best photo was the parked car.
+    # Distant street traffic along the top edge, each at a new position with
+    # 0.51-0.65 confidence, used to re-emit the parked car.
     mock_detector().set_script(CAMERA, [CAR])
     await ingestion.poll_once()
     for x in (0.19, 0.66, 0.73, 0.85, 0.0):
@@ -404,39 +407,16 @@ async def test_weak_unmatched_boxes_beside_a_parked_car_do_not_re_emit_it(client
         await ingestion.poll_once()
 
     assert [e["type"] for e in await _events(client)] == ["vehicle"]
-    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 5
 
 
-async def test_a_weak_vehicle_emits_once_the_parked_car_has_left(client, snapshot_camera):
+async def test_cooldown_path_still_applies_when_vehicle_tracking_is_off(client, snapshot_camera, monkeypatch):
+    monkeypatch.setattr(settings, "vehicle_tracking_enabled", False)
     mock_detector().set_script(CAMERA, [CAR])
     await ingestion.poll_once()
-    weak = Detection("car", 0.56, BoundingBox(0.05, 0.50, 0.35, 0.85))
-    mock_detector().set_script(CAMERA, [weak])
     await ingestion.poll_once()
 
-    assert [e["type"] for e in await _events(client)] == ["vehicle"] * 2
-
-
-async def test_a_new_or_moving_vehicle_still_emits(client, snapshot_camera):
-    mock_detector().set_script(CAMERA, [CAR])
-    await ingestion.poll_once()
-    arriving = Detection("car", 0.8, BoundingBox(0.05, 0.50, 0.35, 0.85))
-    mock_detector().set_script(CAMERA, [CAR, arriving])
-    await ingestion.poll_once()
-    moved = Detection("car", 0.9, BoundingBox(0.30, 0.40, 0.70, 0.85))
-    mock_detector().set_script(CAMERA, [moved])
-    await ingestion.poll_once()
-
-    assert [e["type"] for e in await _events(client)] == ["vehicle"] * 3
-
-
-async def test_a_parked_car_is_reported_again_after_the_window(client, snapshot_camera, monkeypatch):
-    mock_detector().set_script(CAMERA, [CAR])
-    await ingestion.poll_once()
-    monkeypatch.setattr(settings, "stationary_suppress_seconds", 0.0)
-    await ingestion.poll_once()
-    assert len(await _events(client)) == 2
-
+    assert [e["type"] for e in await _events(client)] == ["vehicle"]
+    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 1
 
 async def test_people_are_never_suppressed_as_stationary(client, snapshot_camera):
     mock_detector().set_script(CAMERA, [CAR, PERSON])

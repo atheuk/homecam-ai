@@ -99,6 +99,8 @@ async def _clean(client):
 def scene(monkeypatch):
     """Serve a real JPEG from the mock camera and capture what analysis saw."""
     seen: dict[str, list] = {"appearance": [], "animal": [], "embedded": []}
+    # Single-frame scenarios: report a vehicle on its first sighting.
+    monkeypatch.setattr(settings, "vehicle_confirm_observations", 1)
 
     def use(frame: bytes) -> dict[str, list]:
         async def snapshot(camera_id: str) -> bytes:

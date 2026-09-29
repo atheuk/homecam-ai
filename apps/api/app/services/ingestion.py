@@ -45,7 +45,7 @@ from ..ai.detector import (
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from . import ai_pipeline
+from . import ai_pipeline, scene_state
 from . import events as event_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
 from .stream_frames import stream_hub
@@ -127,8 +127,6 @@ async def poll_once(session_factory=SessionLocal) -> int:
             continue
         if camera.get("capabilities", {}).get("snapshot") != "SUPPORTED":
             continue
-        if not any(_cooldown_elapsed(camera_id, subject) for subject in _SUBJECT_ORDER):
-            continue
         provider = await find_provider_for_camera(camera_id)
         if provider is None:
             continue
@@ -148,6 +146,13 @@ async def poll_once(session_factory=SessionLocal) -> int:
         except Exception as exc:  # noqa: BLE001 - detector must not break ingestion
             logger.warning("ingestion detection failed for %s: %s", camera_id, exc)
             continue
+
+        # Every real frame advances the persistent scene state, including
+        # frames with nothing in them: that is how a vehicle departs or a
+        # mailbox visit ends. Its transitions are events of their own.
+        created += await _emit_scene_transitions(
+            session_factory, camera_id, camera_name, image, detections, stream_frames, frame_source
+        )
         if not detections:
             continue
 
@@ -157,6 +162,8 @@ async def poll_once(session_factory=SessionLocal) -> int:
         due: list[str] = []
         boxes_by_subject: dict[str, list[BoundingBox]] = {}
         for subject in _subjects_in({detection.label for detection in detections}):
+            if subject in _scene_tracked_subjects():
+                continue
             if not _cooldown_elapsed(camera_id, subject):
                 continue
             subject_detections = [d for d in detections if subject_for_label(d.label) == subject]
@@ -202,6 +209,63 @@ async def poll_once(session_factory=SessionLocal) -> int:
     return created
 
 
+def _scene_tracked_subjects() -> set[str]:
+    """Subjects whose events come from :mod:`scene_state`, not cooldowns."""
+    return {"vehicle"} if settings.vehicle_tracking_enabled else set()
+
+
+async def _emit_scene_transitions(
+    session_factory,
+    camera_id: str,
+    camera_name: str,
+    image: bytes,
+    detections: list[Detection],
+    stream_frames: list[bytes] | None,
+    frame_source: str,
+) -> int:
+    created = 0
+    try:
+        async with session_factory() as session:
+            transitions = await scene_state.process_frame(
+                session, camera_id, camera_name, image, detections
+            )
+    except Exception:  # noqa: BLE001 - scene state must not break ingestion
+        logger.exception("scene state update failed for %s", camera_id)
+        return 0
+    for transition in transitions:
+        frames = transition.frames or stream_frames
+        event = {
+            "id": "evt-" + uuid.uuid4().hex[:16],
+            "camera_id": camera_id,
+            "camera_name": camera_name,
+            "type": transition.event_type,
+            "priority": transition.priority,
+            "source": "local-ai",
+            "start_time": datetime.now(timezone.utc).isoformat(),
+            "description": transition.description,
+            "zone": transition.zone,
+            "tags": list(transition.tags),
+            "metadata": {"frame_source": frame_source, **transition.metadata},
+        }
+        try:
+            async with session_factory() as session:
+                row = await event_service.create_and_broadcast_event(
+                    session, event, trigger_frame=(frames or [image])[0], frames=frames
+                )
+                await scene_state.note_event(session, transition, row.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("scene event failed for %s", camera_id)
+            continue
+        logger.info(
+            "scene transition %s: %s %s -> %s", camera_id, transition.kind, transition.transition, row.id
+        )
+        stats = _stats_for(camera_id)
+        stats["events"] += 1
+        stats["scene_events"] += 1
+        created += 1
+    return created
+
+
 # Per-(camera, subject) cooldown so continued presence doesn't create a new
 # event every poll interval. Process-wide and deliberately simple (a dict,
 # not a DB table): losing it on restart just means the first post-restart
@@ -223,6 +287,7 @@ _STAT_KEYS = (
     "snapshot_failed",
     "no_frame",
     "stationary_suppressed",
+    "scene_events",
     "events",
 )
 
@@ -338,7 +403,7 @@ def _maybe_log_stats(camera_id: str) -> None:
     logger.info(
         "ingestion frames %s: window=%.0fs frames=%d success=%s%% cadence=%s stream=%d "
         "stream_repeat=%d stream_missing=%d snapshot=%d snapshot_failed=%d no_frame=%d "
-        "stationary_suppressed=%d events=%d",
+        "stationary_suppressed=%d scene_events=%d events=%d",
         camera_id,
         window,
         frames,
@@ -351,6 +416,7 @@ def _maybe_log_stats(camera_id: str) -> None:
         stats["snapshot_failed"],
         stats["no_frame"],
         stats["stationary_suppressed"],
+        stats["scene_events"],
         stats["events"],
     )
     _frame_stats[camera_id] = dict.fromkeys(_STAT_KEYS, 0)
@@ -365,6 +431,7 @@ def reset_cooldowns() -> None:
     _last_stream_seq.clear()
     _frame_stats.clear()
     _stats_since.clear()
+    scene_state.reset_memory()
 
 
 class IngestionService:

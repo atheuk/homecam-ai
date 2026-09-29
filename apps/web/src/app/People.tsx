@@ -59,7 +59,46 @@ export type EventItem={
   person_id?:string|null;person_name?:string|null;person_display_name?:string|null;
   person_trust?:Trust|null;
   person_confidence?:number|null;person_confirmed?:boolean;
+  tags?:string[]|null;zone?:string|null;
+  // What changed, for scene transitions (see apps/api/app/services/scene_state.py).
+  scene?:EventScene|null;
 };
+export type EventScene={
+  kind:"vehicle"|"mailbox"|"bin"|string;transition:string;
+  zone?:string|null;confidence?:number|null;source?:string|null;parked?:boolean;
+  item_type?:string|null;
+};
+
+const SCENE_LABELS:Record<string,string>={
+  first_seen:"Vehicle seen",arrived:"Arrived",returned:"Returned",moved:"Moved",
+  departed:"Left",interaction:"Someone at vehicle",
+  mailbox_delivery:"Mail delivered",bin_placed_out:"Bin put out",bin_emptied:"Bin emptied",
+};
+
+/** Short, human labels for a scene transition (plus "Parked" once stable). */
+export function sceneBadges(event:Pick<EventItem,"scene"|"tags">):string[]{
+  const scene=event.scene;
+  if(!scene) return [];
+  const labels:string[]=[];
+  if(scene.kind==="mailbox"&&scene.item_type&&scene.item_type!=="unknown"){
+    labels.push(scene.item_type==="parcel"?"Parcel delivered":"Mail delivered");
+  }else{
+    const label=SCENE_LABELS[scene.transition];
+    if(label) labels.push(label);
+  }
+  if(scene.parked||event.tags?.includes("vehicle_parked")) labels.push("Parked");
+  return labels;
+}
+
+/** Activity bucket used by the events filter. */
+export function sceneCategory(event:Pick<EventItem,"scene"|"tags">):"vehicle"|"mailbox"|"bin"|null{
+  const kind=event.scene?.kind;
+  if(kind==="vehicle"||kind==="mailbox"||kind==="bin") return kind;
+  const tags=event.tags||[];
+  if(tags.includes("mailbox_delivery")) return "mailbox";
+  if(tags.includes("bin_placed_out")||tags.includes("bin_emptied")) return "bin";
+  return null;
+}
 export type Person={
   id:string;name:string|null;display_name:string;named:boolean;notes:string|null;
   trust?:Trust;
@@ -181,6 +220,7 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
   // name instead of a bare class ("Sarah 93%" / "Border Collie 88%").
   const subject=identified||(animal?describeAnimal(animal):null);
   const chips=event.appearance?appearanceChips(event.appearance):[];
+  const badges=sceneBadges(event);
   return <article className="event-card">
     <div className="event-photo">
       {event.has_photo&&event.photo_url
@@ -198,6 +238,10 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
         <small>{new Date(event.start_time).toLocaleString()}</small>
       </div>
       <p className="event-desc">{event.description}</p>
+      {badges.length>0&&<p className="scene" aria-label="What changed">
+        {badges.map(label=><span key={label} className="badge scene-badge">{label}</span>)}
+        {event.scene?.zone&&<span className="muted"> · {event.scene.zone}</span>}
+      </p>}
       {/* The caption is what makes a small crop understandable at a glance. */}
       {event.photo_caption&&<p className="caption">“{event.photo_caption}”</p>}
       {/* Saying so is the honest alternative to silently showing a border

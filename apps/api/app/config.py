@@ -149,6 +149,78 @@ class Settings(BaseSettings):
     stationary_new_object_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     # How often per-camera frame acquisition statistics are logged.
     ingestion_stats_log_seconds: float = Field(default=300.0, gt=0.0)
+    # Persistent scene state (see app/services/scene_state.py). Vehicles are
+    # tracked across frames and restarts instead of re-emitted on a cooldown:
+    # one event when a vehicle is confirmed, none while it stays parked, and
+    # one per supported transition (moved / departed / returned / a person
+    # at the vehicle).
+    vehicle_tracking_enabled: bool = True
+    # A new track needs at least this confidence; weaker boxes can only
+    # continue an existing track. Street traffic and edge flicker on the live
+    # front-yard camera scored 0.51-0.65.
+    vehicle_new_track_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Matching observations before a track is reported (an arrival event).
+    # 2 means a car driving past, seen in one sample, is not an "arrival".
+    vehicle_confirm_observations: int = Field(default=2, ge=1, le=20)
+    # Matching observations in the same place before a vehicle is parked;
+    # from then on it emits nothing until something changes.
+    vehicle_stable_observations: int = Field(default=5, ge=2, le=100)
+    # IoU with the track's anchor box counted as "same place". Box jitter
+    # on a parked car at 704x576 stays well above this.
+    vehicle_stable_iou: float = Field(default=0.7, gt=0.0, le=1.0)
+    # IoU (or containment) at which a box can belong to a track at all.
+    vehicle_match_iou: float = Field(default=0.3, gt=0.0, le=1.0)
+    # Unseen for this long, while the camera was actually delivering frames,
+    # counts as departed. Camera outages do not count toward it.
+    vehicle_absence_seconds: float = Field(default=180.0, gt=0.0)
+    # A departed vehicle seen again in the same place within this window,
+    # with a compatible appearance, is reported as returned.
+    vehicle_return_window_seconds: float = Field(default=86400.0, ge=0.0)
+    # Appearance (colour signature) is checked when a track is re-associated
+    # after a gap at least this long; consecutive samples seconds apart are
+    # the same car whatever the lighting does.
+    vehicle_appearance_gap_seconds: float = Field(default=60.0, ge=0.0)
+    vehicle_appearance_min_similarity: float = Field(default=0.5, ge=0.0, le=1.0)
+    # A person overlapping a reported vehicle for this many consecutive
+    # samples is an interaction; re-reported at most once per cooldown.
+    vehicle_interaction_observations: int = Field(default=2, ge=1, le=20)
+    vehicle_interaction_cooldown_seconds: float = Field(default=600.0, ge=0.0)
+    # No frame from a camera for this long is an outage: absence timers and
+    # zone comparisons restart instead of treating the gap as evidence.
+    scene_outage_seconds: float = Field(default=60.0, gt=0.0)
+    # Mailbox delivery (zones of kind "mailbox"; nothing happens without one).
+    mailbox_delivery_enabled: bool = True
+    # Samples a person must overlap the mailbox for; a walk-by is one.
+    mailbox_min_observations: int = Field(default=2, ge=1, le=20)
+    # Share of the mailbox rectangle a person box must cover.
+    mailbox_min_zone_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
+    # Samples without the person before a visit is over.
+    mailbox_end_after_misses: int = Field(default=2, ge=1, le=20)
+    # One delivery event per this window, however many visits.
+    mailbox_dedupe_seconds: float = Field(default=900.0, ge=0.0)
+    # Bins placed out / emptied (zones of kind "bin"; nothing without one).
+    bin_detection_enabled: bool = True
+    # Seconds between region comparisons (a bin does not move quickly).
+    bin_check_interval_seconds: float = Field(default=20.0, gt=0.0)
+    # Normalized region difference counted as a change, and how many
+    # consecutive unoccluded checks must agree before it is a candidate.
+    bin_change_threshold: float = Field(default=0.35, gt=0.0)
+    bin_change_confirm_checks: int = Field(default=3, ge=1, le=20)
+    # How long an interaction (person / collection vehicle at the bin)
+    # remains evidence for a following change.
+    bin_interaction_window_seconds: float = Field(default=900.0, gt=0.0)
+    bin_dedupe_seconds: float = Field(default=3600.0, ge=0.0)
+    # Explicit opt-in rule: a present bin that disappears while the camera
+    # was continuously observing, right after a collection vehicle, counts
+    # as emptied. Off: disappearance alone never means emptied.
+    bin_removal_counts_as_emptied: bool = False
+    # Detector labels that directly evidence a bin in the zone. RT-DETR's
+    # COCO classes have none, so empty by default.
+    bin_local_labels: str = ""
+    # Mailbox/bin questions to the Foundry vision deployment are only asked
+    # on candidate sequences, and at most this often per zone.
+    scene_verifier_enabled: bool = True
+    scene_verifier_min_interval_seconds: float = Field(default=120.0, ge=0.0)
     mediamtx_url: str = "http://localhost:8889"
     # Own public FQDN (e.g. the Container App's https://... ingress URL). Used
     # to rewrite private-only (Tailscale tailnet / container-localhost) live

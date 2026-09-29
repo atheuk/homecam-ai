@@ -280,6 +280,16 @@ async def enrich_event(
     row.tags = list(semantics.tags)
     if semantics.description:
         row.description = semantics.description[:500]
+    scene = (row.event_metadata or {}).get("scene")
+    if scene:
+        # A scene transition (vehicle arrived/departed, mailbox delivery,
+        # bin put out) already says what happened; the frame's detections
+        # only add to it. A departed car is by definition not in the frame.
+        row.type = event["type"]
+        row.zone = event.get("zone") or semantics.zone
+        row.description = str(event["description"])[:500]
+        merged = list(event.get("tags") or [])
+        row.tags = merged + [tag for tag in semantics.tags if tag not in merged]
     row.source = "local-ai" if detections else row.source
 
     person_match = None
@@ -381,7 +391,7 @@ async def enrich_event(
     # whole point of naming people, and it should be visible without opening
     # the event. Only applied to already-named identities, because
     # "Unknown person 4F2A detected" is noise, not information.
-    if person_match is not None and person_match.person.name:
+    if person_match is not None and person_match.person.name and not scene:
         row.description = f"{person_match.person.name} seen on {camera_name}"[:500]
 
     enriched = dict(event)

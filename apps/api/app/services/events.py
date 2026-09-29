@@ -140,5 +140,9 @@ def to_dict(row: Event) -> dict:
         # clothing, carried items, whether the face is visible.
         "appearance": metadata.get("appearance"),
         "animal": metadata.get("animal"),
+        # What changed, for scene transitions (vehicle arrived/parked/moved/
+        # departed/returned, mailbox delivery, bin put out/emptied). The UI
+        # renders this instead of the raw tracker state.
+        "scene": metadata.get("scene"),
         "metadata": metadata,
     }
