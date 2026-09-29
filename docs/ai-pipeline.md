@@ -221,13 +221,16 @@ and a per-reader `stream frames …` line.
 ### Stationary objects
 
 A parked car used to re-emit a vehicle event every cooldown, all day. Each
-emitted event now remembers its subject's boxes. A later detection of the same
-camera and subject where every box matches a remembered one (IoU, or
-containment in it, of at least `STATIONARY_IOU_THRESHOLD`) is treated as the
-same object that has not moved. It is suppressed for
-`STATIONARY_SUPPRESS_SECONDS`. A new or moved object still emits. The
-subjects this applies to are set by `STATIONARY_SUBJECTS`; people are never
-suppressed.
+emitted event now adds its subject's boxes to a per-camera, per-subject set
+of known objects. Each object in the set expires on its own after
+`STATIONARY_SUPPRESS_SECONDS` from when it was first reported. A later
+detection where every box matches a known object (IoU, or containment in
+it, of at least `STATIONARY_IOU_THRESHOLD`) is treated as the same objects,
+not moved, and is suppressed. The set is cumulative on purpose. A
+half-out-of-frame car that the detector only sometimes finds is learned
+once. It does not re-emit the parked car beside it each time it
+reappears. A new or moved object still emits. The subjects this applies to
+are set by `STATIONARY_SUBJECTS`; people are never suppressed.
 
 Every ingested event still flows through the same
 `create_and_broadcast_event` → `enrich_event` pipeline as any other event

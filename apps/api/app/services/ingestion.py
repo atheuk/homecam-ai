@@ -206,8 +206,9 @@ async def poll_once(session_factory=SessionLocal) -> int:
 # not a DB table): losing it on restart just means the first post-restart
 # detection creates one event immediately, which is harmless.
 _last_event_at: dict[tuple[str, str], float] = {}
-# Boxes of the last event per (camera, subject), for stationary suppression.
-_last_event_boxes: dict[tuple[str, str], tuple[float, list[BoundingBox]]] = {}
+# Objects already reported per (camera, subject), with when each was first
+# reported, for stationary suppression.
+_last_event_boxes: dict[tuple[str, str], list[tuple[float, BoundingBox]]] = {}
 _last_snapshot_at: dict[str, float] = {}
 _last_stream_seq: dict[str, int] = {}
 _frame_stats: dict[str, dict[str, int]] = {}
@@ -238,8 +239,29 @@ def _snapshot_due(camera_id: str) -> bool:
 def _mark_created(camera_id: str, subject: str, boxes: list[BoundingBox] | None = None) -> None:
     now = time.monotonic()
     _last_event_at[(camera_id, subject)] = now
-    if boxes:
-        _last_event_boxes[(camera_id, subject)] = (now, list(boxes))
+    if not boxes:
+        return
+    # Remember every object this event reported, each on its own clock.
+    # Keeping only the latest event's boxes let a low-confidence static box
+    # that flickers in and out (a car half out of frame) count as "new" on
+    # each appearance and re-emit the parked car beside it every cooldown.
+    # Already-known objects keep their original time, so a parked car still
+    # re-emits once per window rather than never.
+    key = (camera_id, subject)
+    known = _live_known_boxes(key, now)
+    threshold = settings.stationary_iou_threshold
+    for box in boxes:
+        if not any(_same_object(box, prior, threshold) for _, prior in known):
+            known.append((now, box))
+    _last_event_boxes[key] = known[-_MAX_KNOWN_BOXES:]
+
+
+_MAX_KNOWN_BOXES = 32
+
+
+def _live_known_boxes(key: tuple[str, str], now: float) -> list[tuple[float, BoundingBox]]:
+    window = settings.stationary_suppress_seconds
+    return [(at, box) for at, box in _last_event_boxes.get(key, []) if now - at < window]
 
 
 def _stationary_subjects() -> set[str]:
@@ -270,14 +292,11 @@ def _is_stationary_repeat(camera_id: str, subject: str, boxes: list[BoundingBox]
     """
     if not boxes or subject not in _stationary_subjects() or settings.stationary_suppress_seconds <= 0:
         return False
-    last = _last_event_boxes.get((camera_id, subject))
-    if last is None:
-        return False
-    emitted_at, previous = last
-    if time.monotonic() - emitted_at >= settings.stationary_suppress_seconds:
+    known = _live_known_boxes((camera_id, subject), time.monotonic())
+    if not known:
         return False
     threshold = settings.stationary_iou_threshold
-    return all(any(_same_object(box, prior, threshold) for prior in previous) for box in boxes)
+    return all(any(_same_object(box, prior, threshold) for _, prior in known) for box in boxes)
 
 
 def _stats_for(camera_id: str) -> dict[str, int]:
