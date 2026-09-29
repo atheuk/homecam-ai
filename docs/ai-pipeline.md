@@ -184,6 +184,51 @@ every poll, but a car parked in view all day never silences the people or
 animals that pass it. Events raised from the same moment share one frame
 sample, to spare the NVR's small concurrent-session budget.
 
+### Frame source: the sub-stream, not `snapshot.cgi`
+
+The Dahua NVR behind the edge connector sustains only ~1-2 concurrent CGI
+sessions. In production its 4K `snapshot.cgi` was refused 69-82% of the time,
+so ingestion saw each camera roughly once every ~100s and a person crossing in
+5-10s was almost never sampled. Cameras whose provider sets
+`supports_stream_frames` (Dahua edge mode) are therefore sampled from the
+H.264 sub-stream (704x576) that the edge already relays through MediaMTX as
+LL-HLS. MediaMTX holds a single RTSP session per channel however many clients
+read it, so this adds no NVR CGI load and needs no edge add-on update.
+
+`app/services/stream_frames.py` runs one reader per camera. Every
+`STREAM_SAMPLE_INTERVAL_SECONDS` it re-reads the media playlist, downloads
+only the newest complete segment (~2s, starting on a keyframe), decodes it
+with OpenCV/FFmpeg and keeps the last few frames in memory (they double as
+the event's best-photo candidates). The anamorphic D1 picture is stretched to
+the camera's real aspect ratio, learned from its last real snapshot or set
+with `STREAM_FRAME_ASPECT_RATIO`. Readers back off exponentially on failure,
+re-resolve the stream URL after repeated failures, and stop when idle.
+Ingestion only uses a frame younger than `STREAM_FRAME_MAX_AGE_SECONDS` and
+never runs detection twice on the same segment. Without one it falls back to
+a CGI snapshot, at most once per `EVENT_POLL_INTERVAL_SECONDS` per camera, so
+a stream outage never puts more load on the NVR than before. Each event
+records `metadata.frame_source` (`stream` or `snapshot`). The dashboard
+`/cameras/{id}/snapshot` also serves a fresh cached stream frame when one
+exists (response header `X-Frame-Source`).
+
+The 4s default costs RT-DETR r18 ~225ms plus ~100ms of segment decoding per
+camera per sample, about 0.33 of a core for four cameras. Cooldowns still bound
+the number of events, and Foundry calls are made per event, never per frame.
+Every `INGESTION_STATS_LOG_SECONDS` the API logs a per-camera
+`ingestion frames …` line (frames, success %, cadence, sources, suppressions)
+and a per-reader `stream frames …` line.
+
+### Stationary objects
+
+A parked car used to re-emit a vehicle event every cooldown, all day. Each
+emitted event now remembers its subject's boxes. A later detection of the same
+camera and subject where every box matches a remembered one (IoU, or
+containment in it, of at least `STATIONARY_IOU_THRESHOLD`) is treated as the
+same object that has not moved. It is suppressed for
+`STATIONARY_SUPPRESS_SECONDS`. A new or moved object still emits. The
+subjects this applies to are set by `STATIONARY_SUBJECTS`; people are never
+suppressed.
+
 Every ingested event still flows through the same
 `create_and_broadcast_event` → `enrich_event` pipeline as any other event
 source, so its final `type`/`zone`/`tags`/best photo/AI analysis is
@@ -336,7 +381,16 @@ request.
 | `ACTIVITY_CORRELATION_ENABLED` | `true` | Group related events into activities. |
 | `ACTIVITY_CORRELATION_WINDOW_SECONDS` | `120` | Temporal grouping window. |
 | `EVENT_INGESTION_ENABLED` | `false` | Background loop that creates real events from live camera snapshots. |
-| `EVENT_POLL_INTERVAL_SECONDS` | `20` | Seconds between ingestion passes. |
+| `EVENT_POLL_INTERVAL_SECONDS` | `20` | Minimum spacing between CGI snapshots of one camera (snapshot-only cameras, and the fallback for stream cameras). |
+| `STREAM_FRAMES_ENABLED` | `true` | Sample stream-capable cameras (Dahua edge) from their relayed sub-stream. |
+| `STREAM_SAMPLE_INTERVAL_SECONDS` | `4` | Stream sampling interval and ingestion loop tick. |
+| `STREAM_FRAME_MAX_AGE_SECONDS` | `15` | Older stream frames are stale; ingestion falls back to a snapshot. |
+| `STREAM_READER_IDLE_SECONDS` | `300` | A stream reader nobody asked for a frame within this long stops. |
+| `STREAM_FRAME_ASPECT_RATIO` | learned | Display width/height for stream frames (default: learned from a real snapshot). |
+| `STATIONARY_SUPPRESS_SECONDS` | `1800` | How long an unmoved object (same camera+subject, matching box) is not re-reported. |
+| `STATIONARY_IOU_THRESHOLD` | `0.8` | IoU/containment at which a box counts as the same, unmoved object. |
+| `STATIONARY_SUBJECTS` | `vehicle,animal,package` | Subjects subject to stationary suppression (never `person`). |
+| `INGESTION_STATS_LOG_SECONDS` | `300` | Interval of the per-camera frame acquisition log lines. |
 | `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera *and subject* (person/animal/vehicle/package). |
 | `MOCK_CAMERAS_ENABLED` | auto | Scripted `mock-*` demo cameras. Auto: shown unless `APP_ENV=production` and a real provider is configured. |
 

@@ -219,6 +219,7 @@ async def test_animal_is_not_suppressed_by_a_more_confident_car(client, scene):
 
 async def test_a_parked_car_does_not_hold_the_cooldown_for_people(client, scene, monkeypatch):
     monkeypatch.setattr(settings, "event_cooldown_seconds", 9999.0)
+    monkeypatch.setattr(settings, "event_poll_interval_seconds", 0.0)
     scene(_scene((PERSON, PERSON_RGB), (CAR, CAR_RGB)))
 
     mock_detector().set_script(CAMERA, [CAR])
