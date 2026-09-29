@@ -138,3 +138,10 @@ def test_summary_reads_like_a_sentence_fragment():
 
 def test_summary_of_an_empty_appearance_is_empty():
     assert Appearance(person_present=True).summary == ""
+
+
+def test_a_reply_without_an_age_band_serialises():
+    """Regression: enrichment crashed rounding a missing confidence."""
+    result = parse_appearance_reply('{"person_present": true, "age_band": null}')
+    assert result is not None
+    assert result.as_dict()["age_confidence"] is None

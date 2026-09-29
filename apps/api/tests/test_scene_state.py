@@ -670,3 +670,18 @@ async def test_a_track_that_was_never_announced_never_departs_loudly(scene):
     out = await scene.run(1, [car(far, 0.75)], _frame((far, BLUE)))
     out += await scene.run(60, [])
     assert out == []
+
+
+async def test_failed_enrichment_does_not_abort_the_poll(client, live, monkeypatch):
+    from app.services import ai_pipeline
+
+    async def broken(*args, **kwargs):
+        raise TypeError("analysis blew up")
+
+    monkeypatch.setattr(ai_pipeline, "enrich_event", broken)
+    live["current"] = WITH_PERSON
+    mock_detector().set_script(CAMERA, [person()])
+    await ingestion.poll_once()  # must not raise
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(Event).where(Event.camera_id == CAMERA))).scalars().all()
+    assert [r.type for r in rows] == ["person"]

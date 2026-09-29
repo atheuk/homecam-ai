@@ -133,7 +133,7 @@ class Appearance:
 
     person_present: bool
     age_band: str | None = None
-    age_confidence: float = 0.0
+    age_confidence: float | None = 0.0
     build: str | None = None
     clothing: str | None = None
     carrying: str | None = None
@@ -144,7 +144,7 @@ class Appearance:
         return {
             "person_present": self.person_present,
             "age_band": self.age_band,
-            "age_confidence": round(self.age_confidence, 3),
+            "age_confidence": round(self.age_confidence, 3) if self.age_confidence is not None else None,
             "build": self.build,
             "clothing": self.clothing,
             "carrying": self.carrying,

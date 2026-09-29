@@ -95,6 +95,9 @@ async def create_and_broadcast_event(
     except Exception:  # noqa: BLE001 - analysis must never break ingestion
         logger.exception("event analysis failed for %s", row.id)
         await session.rollback()
+        # The rollback expires the already-committed row; reload it here so
+        # callers never trigger an implicit (sync) load outside the greenlet.
+        await session.refresh(row)
     enriched = {**enriched, "activity_id": row.activity_id}
     await event_bus.publish(enriched)
     return row
