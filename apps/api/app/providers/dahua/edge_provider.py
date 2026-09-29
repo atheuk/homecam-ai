@@ -111,6 +111,10 @@ class DahuaEdgeProvider:
     """
 
     id = "dahua"
+    # Frames for ingestion come from the MediaMTX-relayed sub-stream rather
+    # than snapshot.cgi, which this NVR refuses most of the time (see
+    # app.services.stream_frames).
+    supports_stream_frames = True
 
     def __init__(
         self,

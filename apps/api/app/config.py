@@ -102,8 +102,46 @@ class Settings(BaseSettings):
     # dev never spawn a background polling loop unexpectedly; the deployed
     # Azure API turns this on explicitly.
     event_ingestion_enabled: bool = False
+    # Minimum spacing between CGI snapshots of one camera by the ingestion
+    # loop. Cameras with a live sub-stream (see ``stream_frames_*``) only use
+    # snapshots as a fallback, still at most this often, so a stream outage
+    # never turns into more load on a session-limited NVR than before.
     event_poll_interval_seconds: float = Field(default=20.0, gt=0.0)
     event_cooldown_seconds: float = Field(default=120.0, gt=0.0)
+    # Stream-based frame source (incident fix). A Dahua NVR sustains only
+    # ~1-2 concurrent CGI sessions and refused 69-82% of 4K snapshot.cgi
+    # requests in production, so a camera yielded one usable frame per
+    # ~100s and people crossing in 5-10s were never sampled. Frames are read
+    # instead from the H.264 sub-stream (704x576) the edge already relays via
+    # MediaMTX HLS, which costs no extra NVR CGI sessions.
+    stream_frames_enabled: bool = True
+    # How often each camera is sampled from its stream (and the ingestion
+    # loop tick). RT-DETR r18 costs ~225ms of CPU per frame and decoding a
+    # 2s sub-stream segment ~100ms, so 4s with four cameras is ~0.33 of a
+    # core, inside the API's 0.5 vCPU while still sampling anyone in view
+    # for >=4s at least once. Cooldowns still bound events (and so Foundry
+    # calls, which are per event, never per frame).
+    stream_sample_interval_seconds: float = Field(default=4.0, gt=0.0)
+    # A cached stream frame older than this is stale: ingestion falls back
+    # to a CGI snapshot (rate limited by event_poll_interval_seconds).
+    stream_frame_max_age_seconds: float = Field(default=15.0, gt=0.0)
+    # A reader nobody has asked for a frame within this long stops, so a
+    # camera that went away does not keep an HLS session open forever.
+    stream_reader_idle_seconds: float = Field(default=300.0, gt=0.0)
+    # Display aspect (width/height) for stream frames. Dahua sub-streams are
+    # anamorphic (704x576 of a 16:9 scene, no SAR flag); when unset the
+    # aspect is learned from the camera's last real snapshot.
+    stream_frame_aspect_ratio: float | None = Field(default=None, gt=0.0)
+    # Stationary-object suppression: a new event for the same camera and
+    # subject whose every box matches (IoU / containment >= threshold) a box
+    # of the last emitted event is a repeat of an object that has not moved
+    # (a parked car) and is suppressed for this long. People are never
+    # suppressed this way.
+    stationary_suppress_seconds: float = Field(default=1800.0, ge=0.0)
+    stationary_iou_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
+    stationary_subjects: str = "vehicle,animal,package"
+    # How often per-camera frame acquisition statistics are logged.
+    ingestion_stats_log_seconds: float = Field(default=300.0, gt=0.0)
     mediamtx_url: str = "http://localhost:8889"
     # Own public FQDN (e.g. the Container App's https://... ingress URL). Used
     # to rewrite private-only (Tailscale tailnet / container-localhost) live

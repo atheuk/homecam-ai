@@ -44,6 +44,7 @@ from ..services import activities as activity_service
 from ..services import cameras as camera_service
 from ..services import events as event_service
 from ..services import persons as person_service
+from ..services.stream_frames import stream_hub
 from ..services.provider_registry import (
     active_mock_providers,
     discover_all_cameras,
@@ -211,17 +212,25 @@ async def camera_capabilities(camera_id: str):
 
 @router.get("/cameras/{camera_id}/snapshot")
 async def snapshot(camera_id: str):
+    # A fresh frame already decoded from the camera's sub-stream costs the
+    # NVR nothing; asking snapshot.cgi competes with ingestion for its ~1-2
+    # CGI sessions. Only readers ingestion already runs are consulted.
+    cached = stream_hub.latest(camera_id)
+    if cached is not None:
+        return Response(cached.frame, media_type="image/jpeg", headers={"X-Frame-Source": "stream"})
     provider = await find_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
-        return Response(await provider.get_snapshot(camera_id), media_type="image/jpeg")
+        image = await provider.get_snapshot(camera_id)
     except CameraNotFoundError as exc:
         raise HTTPException(404, "Camera not found") from exc
     except CameraOfflineError as exc:
         raise HTTPException(503, f"Camera '{camera_id}' is currently offline") from exc
     except ProviderUnavailableError as exc:
         raise HTTPException(503, f"Provider '{provider.id}' is currently unavailable") from exc
+    stream_hub.note_snapshot(camera_id, image)
+    return Response(image, media_type="image/jpeg", headers={"X-Frame-Source": "snapshot"})
 
 
 @router.get("/cameras/{camera_id}/live")
