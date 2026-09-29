@@ -304,6 +304,14 @@ The Foundry prompts (`app/ai/scene_verifier.py`) are closed questions about
 the object only; they never describe people, and never infer identity,
 gender or ethnicity. Answers outside `yes/no/unknown` become `unknown`.
 
+Foundry checks never run on the frame path. Each poll emits person/animal/
+vehicle subject events first, then advances the scene state; a mailbox or bin
+candidate that needs Foundry starts a background check (bounded by
+`FOUNDRY_TIMEOUT_SECONDS`) and the zone reports `verifying` until a later
+frame picks up the answer and decides. If the persisted scene state for a
+camera cannot be used (corrupt or incompatible rows), that camera's scene
+state is reset and rebuilt from new frames instead of failing every poll.
+
 Every ingested event still flows through the same
 `create_and_broadcast_event` → `enrich_event` pipeline as any other event
 source, so its final `type`/`zone`/`tags`/best photo/AI analysis is
@@ -506,7 +514,8 @@ request.
 - **Dwell state is in-process**, so a restart costs at most one dwell window
   before a parked car is recognised again. (Vehicle scene tracks, mailbox and
   bin states are persisted; only frame continuity is in memory, so a restart
-  counts as an outage.)
+  counts as an outage. In-flight Foundry checks are also memory-only: a
+  restart during one drops that candidate.)
 - **Mailbox and bin detection depend on Foundry in practice.** RT-DETR (COCO)
   has no envelope or wheelie-bin class, so without Foundry mailbox events only
   come from a locally detected package and bins stay `unknown`. Verification

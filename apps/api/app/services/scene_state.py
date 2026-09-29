@@ -42,13 +42,14 @@ Bins (zones of kind ``bin``)
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import scene_signals as signals
@@ -150,6 +151,9 @@ class CameraScene:
     crops: dict[str, dict] = field(default_factory=dict)
     zone_cache: list[tuple[str, Zone]] = field(default_factory=list)
     zone_cache_at: float = 0.0
+    # Foundry checks in flight per zone: (task, context). They run off the
+    # frame path; a later frame picks up the answer. Memory only.
+    pending: dict[str, tuple[asyncio.Task, dict]] = field(default_factory=dict)
 
 
 _scenes: dict[str, CameraScene] = {}
@@ -335,6 +339,49 @@ async def process_frame(
 ) -> list[SceneTransition]:
     """Advance every state machine for one camera by one real frame."""
     now = time.time() if now is None else now
+    try:
+        return await _process(session, camera_id, camera_name, frame, detections, now)
+    except Exception:  # noqa: BLE001 - corrupt state must not fail every frame
+        logger.exception("scene state for %s is unusable; resetting it", camera_id)
+        await session.rollback()
+        await reset_camera(session, camera_id)
+        return []
+
+
+async def reset_camera(session: AsyncSession, camera_id: str) -> None:
+    """Forget a camera's scene state (memory and DB)."""
+    _scenes.pop(camera_id, None)
+    await session.execute(delete(VehicleTrack).where(VehicleTrack.camera_id == camera_id))
+    await session.execute(delete(SceneState).where(SceneState.camera_id == camera_id))
+    await session.commit()
+
+
+async def _verify(call, camera_id: str, what: str) -> dict | None:
+    try:
+        return await asyncio.wait_for(call, timeout=settings.foundry_timeout_seconds + 5.0)
+    except Exception as exc:  # noqa: BLE001 - verification must not break ingestion
+        logger.warning("%s verification failed for %s: %s", what, camera_id, exc)
+        return None
+
+
+def _take_answer(scene: CameraScene, zone_id: str) -> tuple[bool, dict | None, dict | None]:
+    """``(finished, answer, context)`` for a zone's in-flight check."""
+    pending = scene.pending.get(zone_id)
+    if pending is None or not pending[0].done():
+        return False, None, None
+    task, context = scene.pending.pop(zone_id)
+    answer = None if task.cancelled() or task.exception() else task.result()
+    return True, answer, context
+
+
+async def _process(
+    session: AsyncSession,
+    camera_id: str,
+    camera_name: str,
+    frame: bytes | None,
+    detections: list[Detection],
+    now: float,
+) -> list[SceneTransition]:
     scene = await _load(session, camera_id)
     outage = scene.last_frame_at is None or now - scene.last_frame_at > settings.scene_outage_seconds
     if outage:
@@ -766,6 +813,15 @@ async def _mailbox_step(
     record = _record(scene, zone_id, "mailbox", "idle")
     crops = scene.crops.setdefault(zone_id, {})
     data = record.data
+    finished, answer, context = _take_answer(scene, zone_id)
+    if finished:
+        scene.dirty_zones.add(zone_id)
+        verdict = None
+        if answer is not None:
+            verdict = {**answer, "source": "foundry"}
+            if answer.get("person_interacted") == "no":
+                verdict["item_deposited"] = "no"
+        return _mailbox_result(scene, record, zone, camera_name, context, verdict)
     cover = max(
         (_zone_cover(d.bbox, zone.bbox) for d in detections if d.label == "person"), default=0.0
     )
@@ -852,10 +908,17 @@ async def _finish_visit(
         data["last_outcome"] = "deduplicated"
         return None
 
-    package_before = bool(data.get("package_before"))
+    context = {
+        "visit_id": visit_id,
+        "observations": observations,
+        "package_before": bool(data.get("package_before")),
+        "package_after": package_after,
+        "now": now,
+        "crops": {key: crops.get(key) for key in ("before", "after")},
+        "frames": [f for f in (crops.get("during_frame"), frame) if f],
+    }
     package_during = bool(data.get("package_during"))
-    verdict: dict | None = None
-    if package_after and not package_before:
+    if package_after and not context["package_before"]:
         verdict = {
             "item_deposited": "yes",
             "item_type": "parcel",
@@ -863,28 +926,48 @@ async def _finish_visit(
             "source": "local",
             "evidence": "package detected in the mailbox zone after the visit, not before",
         }
-    elif package_during and not package_after:
+        return _mailbox_result(scene, record, zone, camera_name, context, verdict)
+    if package_during and not package_after:
         data["last_outcome"] = "carried_past"
         return None
-    else:
-        verifier = get_scene_verifier()
-        images = [(label, crops[key]) for label, key in (("BEFORE", "before"), ("DURING", "during"), ("AFTER", "after")) if crops.get(key)]
-        if verifier is not None and crops.get("after") and len(images) >= 2 and _verifier_allowed(record, now):
-            data["verifier_last_at"] = now
-            try:
-                answer = await verifier.verify_mailbox(images)
-            except Exception as exc:  # noqa: BLE001 - verification must not break ingestion
-                logger.warning("mailbox verification failed for %s: %s", scene.camera_id, exc)
-                answer = None
-            if answer is not None:
-                verdict = {**answer, "source": "foundry"}
-                if answer.get("person_interacted") == "no":
-                    verdict["item_deposited"] = "no"
+    verifier = get_scene_verifier()
+    images = [(label, crops[key]) for label, key in (("BEFORE", "before"), ("DURING", "during"), ("AFTER", "after")) if crops.get(key)]
+    if (
+        verifier is not None
+        and crops.get("after")
+        and len(images) >= 2
+        and _verifier_allowed(record, now)
+        and record.zone_id not in scene.pending
+    ):
+        data["verifier_last_at"] = now
+        data["last_outcome"] = "verifying"
+        task = asyncio.create_task(_verify(verifier.verify_mailbox(images), scene.camera_id, "mailbox"))
+        scene.pending[record.zone_id] = (task, context)
+        return None
+    return _mailbox_result(scene, record, zone, camera_name, context, None)
+
+
+def _mailbox_result(
+    scene: CameraScene,
+    record: ZoneRecord,
+    zone: Zone,
+    camera_name: str,
+    context: dict,
+    verdict: dict | None,
+) -> SceneTransition | None:
+    s = settings
+    data = record.data
+    now = float(context["now"])
     if verdict is None or verdict.get("item_deposited") != "yes":
         data["last_outcome"] = "no_deposit" if verdict else "unverified"
         data["last_verdict"] = verdict
         return None
+    last = data.get("last_delivery_at")
+    if last is not None and now - float(last) < s.mailbox_dedupe_seconds:
+        data["last_outcome"] = "deduplicated"
+        return None
 
+    visit_id = context["visit_id"]
     data["last_delivery_at"] = now
     data["last_outcome"] = "delivery"
     data["last_delivery_visit"] = visit_id
@@ -893,19 +976,20 @@ async def _finish_visit(
     if item in ("parcel", "mail"):
         tags.append(item)
     noun = {"parcel": "A parcel", "mail": "Mail"}.get(item, "An item")
+    crops = context["crops"]
     evidence = {
         "visit_id": visit_id,
         "zone": zone.name,
-        "observations": observations,
+        "observations": context["observations"],
         "item_deposited": "yes",
         "item_type": item,
         "confidence": verdict.get("confidence"),
         "source": verdict.get("source"),
         "evidence": verdict.get("evidence"),
-        "before": {"package_detected": package_before, "image": bool(crops.get("before"))},
-        "after": {"package_detected": package_after, "image": bool(crops.get("after"))},
+        "before": {"package_detected": context["package_before"], "image": bool(crops.get("before"))},
+        "after": {"package_detected": context["package_after"], "image": bool(crops.get("after"))},
     }
-    frames = [f for f in (crops.get("during_frame"), frame) if f]
+    frames = context["frames"]
     return SceneTransition(
         camera_id=scene.camera_id,
         kind="mailbox",
@@ -975,6 +1059,13 @@ async def _bin_step(
         crops["during"] = signals.crop_jpeg(image.get(), region) or crops.get("during")
         scene.dirty_zones.add(zone_id)
 
+    if zone_id in scene.pending:
+        finished, answer, context = _take_answer(scene, zone_id)
+        if not finished:
+            return None  # a check is in flight; this candidate is decided then
+        scene.dirty_zones.add(zone_id)
+        return _bin_decide(scene, record, zone, camera_name, context, answer)
+
     occluded = any(
         d.label == "person" or d.label in VEHICLE_CLASSES
         for d in detections
@@ -1023,7 +1114,16 @@ async def _bin_step(
     now_crop = signals.crop_jpeg(image.get(), region)
     before_state = record.state
     now_state = "present" if local_present else "unknown"
-    answer: dict | None = None
+    context = {
+        "now": now,
+        "signature": signature,
+        "now_crop": now_crop,
+        "difference": difference,
+        "before_state": before_state,
+        "now_state": now_state,
+        "local_present": local_present,
+        "frame": frame,
+    }
     verifier = get_scene_verifier()
     if not local_present and verifier is not None and now_crop:
         if not _verifier_allowed(record, now):
@@ -1033,11 +1133,31 @@ async def _bin_step(
             images.append(("DURING", crops["during"]))
         images.append(("NOW", now_crop))
         data["verifier_last_at"] = now
-        try:
-            answer = await verifier.verify_bin(images)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("bin verification failed for %s: %s", scene.camera_id, exc)
-            answer = None
+        task = asyncio.create_task(_verify(verifier.verify_bin(images), scene.camera_id, "bin"))
+        scene.pending[zone_id] = (task, context)
+        return None
+    return _bin_decide(scene, record, zone, camera_name, context, None)
+
+
+def _bin_decide(
+    scene: CameraScene,
+    record: ZoneRecord,
+    zone: Zone,
+    camera_name: str,
+    context: dict,
+    answer: dict | None,
+) -> SceneTransition | None:
+    s = settings
+    data = record.data
+    crops = scene.crops.setdefault(record.zone_id, {})
+    now = float(context["now"])
+    signature = context["signature"]
+    now_crop = context["now_crop"]
+    difference = float(context["difference"])
+    before_state = context["before_state"]
+    now_state = context["now_state"]
+    local_present = context["local_present"]
+    frame = context["frame"]
     if answer is not None:
         now_state = {"yes": "present", "no": "absent"}.get(answer["bin_present_now"], now_state)
         if before_state == "unknown" and crops.get("before"):

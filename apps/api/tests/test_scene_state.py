@@ -433,7 +433,7 @@ async def test_a_bin_emptied_by_a_collection_vehicle(scene):
 async def test_a_bin_that_disappears_is_not_emptied(scene):
     verifier = FakeVerifier(bins=[bin_answer("no", "yes"), bin_answer("yes", "no")])
     await _bin_out(scene, verifier)
-    out = await scene.run(5, [], NO_BIN, advance=BIN_STEP)
+    out = await scene.run(6, [], NO_BIN, advance=BIN_STEP)
     assert out == []
     [zone] = (await scene.state())["zones"]
     assert zone["state"] == "absent"
@@ -564,6 +564,7 @@ async def test_ingestion_emits_a_mailbox_delivery_event_that_enrichment_keeps(cl
         (WITH_PERSON, [person()]),
         (EMPTY_MAILBOX, []),
         (EMPTY_MAILBOX, []),
+        (EMPTY_MAILBOX, []),  # the Foundry answer is picked up off the frame path
     ):
         live["current"] = frame
         mock_detector().set_script(CAMERA, detections)
@@ -590,3 +591,82 @@ async def test_ingestion_reports_a_parked_car_once(client, live):
     assert event["scene"]["kind"] == "vehicle"
     assert event["metadata"]["vehicle_track"]["track_id"]
     assert "vehicle_parked" in event["tags"]
+
+
+# --- review follow-ups: latency and robustness ------------------------------------
+
+
+class SlowVerifier(FakeVerifier):
+    def __init__(self, gate, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.gate = gate
+
+    async def verify_mailbox(self, images):
+        await self.gate.wait()
+        return await super().verify_mailbox(images)
+
+
+async def test_a_slow_foundry_check_does_not_hold_up_frames(scene):
+    import asyncio
+    import time as _time
+
+    await _zone("mailbox", MAILBOX)
+    gate = asyncio.Event()
+    set_scene_verifier(SlowVerifier(gate, mailbox=YES))
+    await scene.run(3, [], EMPTY_MAILBOX)
+    await scene.run(3, [person()], WITH_PERSON)
+    started = _time.monotonic()
+    out = await scene.run(4, [], EMPTY_MAILBOX)  # visit ends; check in flight
+    assert _time.monotonic() - started < 2.0
+    assert out == []
+    [zone] = (await scene.state())["zones"]
+    assert zone["data"]["last_outcome"] == "verifying"
+
+    gate.set()
+    await asyncio.sleep(0)
+    out = await scene.run(1, [], EMPTY_MAILBOX)
+    assert _kinds(out) == ["mailbox_delivery"]
+
+
+async def test_person_events_are_emitted_before_scene_checks(client, live, monkeypatch):
+    order: list[str] = []
+    real_subjects = ingestion._emit_subject_events
+    real_scene = ingestion._emit_scene_transitions
+
+    async def subjects(*args, **kwargs):
+        order.append("subjects")
+        return await real_subjects(*args, **kwargs)
+
+    async def scene_step(*args, **kwargs):
+        order.append("scene")
+        return await real_scene(*args, **kwargs)
+
+    monkeypatch.setattr(ingestion, "_emit_subject_events", subjects)
+    monkeypatch.setattr(ingestion, "_emit_scene_transitions", scene_step)
+    live["current"] = WITH_PERSON
+    mock_detector().set_script(CAMERA, [person()])
+    await ingestion.poll_once()
+    assert order[:2] == ["subjects", "scene"]
+
+
+async def test_unusable_persisted_state_resets_the_camera(scene):
+    await scene.run(6, [car()], _frame((CAR, RED)))
+    async with SessionLocal() as session:
+        [row] = (await session.execute(select(VehicleTrack).where(VehicleTrack.camera_id == CAMERA))).scalars()
+        row.data = ["not", "a", "dict"]  # e.g. hand-edited or from a bad migration
+        await session.commit()
+    scene_state.reset_memory()
+
+    assert await scene.run(1, [car()], _frame((CAR, RED))) == []
+    # Reset, not stuck: the next frames rebuild state from scratch.
+    await scene.run(3, [car()], _frame((CAR, RED)))
+    [track] = (await scene.state())["vehicles"]
+    assert track["state"] == "tracking"
+
+
+async def test_a_track_that_was_never_announced_never_departs_loudly(scene):
+    await scene.run(40, [])
+    far = BoundingBox(0.02, 0.02, 0.08, 0.06)
+    out = await scene.run(1, [car(far, 0.75)], _frame((far, BLUE)))
+    out += await scene.run(60, [])
+    assert out == []
