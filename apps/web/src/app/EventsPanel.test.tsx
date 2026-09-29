@@ -49,9 +49,16 @@ describe("events panel",()=>{
   });
 
   it("groups events by day",()=>{
-    renderPanel();
-    expect(screen.getByRole("heading",{name:"Today"})).toBeInTheDocument();
-    expect(screen.getByRole("heading",{name:"Yesterday"})).toBeInTheDocument();
+    // The fixtures carry fixed dates, so pin "now" to the day they describe.
+    vi.useFakeTimers({toFake:["Date"]});
+    vi.setSystemTime(new Date("2026-09-28T13:00:00Z"));
+    try{
+      renderPanel();
+      expect(screen.getByRole("heading",{name:"Today"})).toBeInTheDocument();
+      expect(screen.getByRole("heading",{name:"Yesterday"})).toBeInTheDocument();
+    }finally{
+      vi.useRealTimers();
+    }
   });
 
   it("surfaces newly received events",()=>{
