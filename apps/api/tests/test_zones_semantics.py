@@ -123,11 +123,12 @@ def test_stationary_vehicle_becomes_a_parked_car_event():
     assert "parked" in (result.description or "")
 
 
-def test_detection_in_mailbox_zone_derives_a_mailbox_event():
+def test_person_in_mailbox_zone_is_tagged_not_called_a_delivery():
     result = _derive([_detection("person", BoundingBox(0.72, 0.35, 0.92, 0.65))])
     assert result.zone == "mailbox"
     assert "mailbox" in result.tags
-    assert result.type == "package"
+    assert result.type == "person"
+    assert "mailbox_delivery" not in result.tags
     assert "mailbox" in (result.description or "").lower()
 
 

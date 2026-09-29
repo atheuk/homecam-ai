@@ -33,21 +33,27 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from ..ai.detector import (
     SUBJECT_LABELS,
+    VEHICLE_CLASSES,
     BoundingBox,
     Detection,
     DetectionContext,
     get_detector,
     subject_for_label,
 )
+from ..ai.zones import Zone
 from ..config import settings
 from ..db import SessionLocal
+from ..models.db import Event, EventEvidence
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from . import ai_pipeline
 from . import events as event_service
+from . import zones as zone_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
+from .scene_state import INTERACTION, TemporalEmission, scene_engine
 from .stream_frames import stream_hub
 
 logger = logging.getLogger(__name__)
@@ -127,8 +133,6 @@ async def poll_once(session_factory=SessionLocal) -> int:
             continue
         if camera.get("capabilities", {}).get("snapshot") != "SUPPORTED":
             continue
-        if not any(_cooldown_elapsed(camera_id, subject) for subject in _SUBJECT_ORDER):
-            continue
         provider = await find_provider_for_camera(camera_id)
         if provider is None:
             continue
@@ -148,50 +152,92 @@ async def poll_once(session_factory=SessionLocal) -> int:
         except Exception as exc:  # noqa: BLE001 - detector must not break ingestion
             logger.warning("ingestion detection failed for %s: %s", camera_id, exc)
             continue
-        if not detections:
-            continue
+        created += await _process_frame(
+            session_factory, provider, camera_id, camera_name, image, stream_frames, frame_source, detections
+        )
+    return created
 
-        # Cooldown is per subject: a car parked in view all day must not
-        # hold the camera's only cooldown slot and so silence the person or
-        # animal that walks past it.
-        due: list[str] = []
-        boxes_by_subject: dict[str, list[BoundingBox]] = {}
-        for subject in _subjects_in({detection.label for detection in detections}):
-            if not _cooldown_elapsed(camera_id, subject):
-                continue
-            subject_detections = [d for d in detections if subject_for_label(d.label) == subject]
-            if _is_stationary_repeat(camera_id, subject, subject_detections):
-                _stats_for(camera_id)["stationary_suppressed"] += 1
-                continue
-            due.append(subject)
-            boxes_by_subject[subject] = [d.bbox for d in subject_detections]
-        if not due:
-            continue
 
+async def _process_frame(
+    session_factory,
+    provider,
+    camera_id: str,
+    camera_name: str,
+    image: bytes,
+    stream_frames: list[bytes] | None,
+    frame_source: str,
+    detections: list[Detection],
+) -> int:
+    """Turn one processed frame into events.
+
+    Every processed frame, including an empty one, advances the temporal
+    scene first. A car that stays still is counted into "parked" and a car
+    that has gone is noticed. Only then are per-subject events considered.
+    """
+    now_wall = time.time()
+    tracking = settings.vehicle_tracking_enabled
+    interactions: dict[int, Any] = {}
+    parked_updates: list = []
+    scene = None
+    try:
+        scene = await scene_engine.scene(camera_id, session_factory, now_wall)
+        scene.last_frame_at = now_wall
+        if tracking:
+            interactions, parked_updates, _ = scene.observe_vehicles(detections, now_wall)
+    except Exception:  # noqa: BLE001 - the scene must never silence people or animals
+        logger.exception("scene engine failed for %s; its state is reset", camera_id)
+        scene_engine.discard(camera_id)
+        scene = None
+        interactions, parked_updates = {}, []
+    tracking = tracking and scene is not None
+    # Cooldown is per subject: a car parked in view all day must not hold
+    # the camera's only cooldown slot and so silence the person or animal
+    # that walks past it.
+    due: list[str] = []
+    boxes_by_subject: dict[str, list[BoundingBox]] = {}
+    for subject in _subjects_in({detection.label for detection in detections}):
+        if subject == "vehicle" and tracking:
+            continue  # the vehicle tracker decides, below
+        if not _cooldown_elapsed(camera_id, subject):
+            continue
+        subject_detections = [d for d in detections if subject_for_label(d.label) == subject]
+        if _is_stationary_repeat(camera_id, subject, subject_detections):
+            _stats_for(camera_id)["stationary_suppressed"] += 1
+            continue
+        due.append(subject)
+        boxes_by_subject[subject] = [d.bbox for d in subject_detections]
+
+    vehicle_emission = None
+    if tracking and _cooldown_elapsed(camera_id, "vehicle"):
+        vehicle_emission = scene.vehicles.emission(
+            [d for d in detections if d.label in VEHICLE_CLASSES], camera_name
+        )
+    elif tracking and scene.vehicles.emission([], camera_name) is not None:
+        _stats_for(camera_id)["vehicle_deferred"] += 1
+
+    created = 0
+    if due or vehicle_emission is not None:
         # One frame sample shared by every event from this moment. Stream
         # frames already come as a burst from one segment; snapshot-only
         # cameras spend the NVR's tiny session budget once, not per event.
         # The frame we just detected on leads, since it is the correct
         # moment to photograph.
         frames: list[bytes] | None = stream_frames
-        if frames is None and len(due) > 1 and settings.ai_analysis_enabled:
+        if frames is None and len(due) + (vehicle_emission is not None) > 1 and settings.ai_analysis_enabled:
             frames = await ai_pipeline._sample_frames(
                 provider, camera_id, settings.best_photo_frames, seed=image
             )
 
+        interaction_tracks = list({id(t): t for t in interactions.values()}.values())
         for subject in due:
-            now = datetime.now(timezone.utc)
-            event = {
-                "id": "evt-" + uuid.uuid4().hex[:16],
-                "camera_id": camera_id,
-                "camera_name": camera_name,
-                "type": subject,
-                "priority": "high" if subject == "person" else "normal",
-                "source": "local-ai",
-                "start_time": now.isoformat(),
-                "description": f"{subject.title()} detected on {camera_name}",
-                "metadata": {"frame_source": frame_source},
-            }
+            metadata: dict = {"frame_source": frame_source}
+            tags: list[str] = []
+            if subject == "person" and interaction_tracks:
+                tags.append(INTERACTION)
+                metadata["vehicle_tracks"] = [track.describe() for track in interaction_tracks]
+            event = _new_event(camera_id, camera_name, subject, f"{subject.title()} detected on {camera_name}")
+            event["metadata"] = metadata
+            event["tags"] = tags
             async with session_factory() as session:
                 await event_service.create_and_broadcast_event(
                     session, event, trigger_frame=image, frames=frames
@@ -199,7 +245,139 @@ async def poll_once(session_factory=SessionLocal) -> int:
             _mark_created(camera_id, subject, boxes_by_subject[subject])
             _stats_for(camera_id)["events"] += 1
             created += 1
+
+        if vehicle_emission is not None:
+            event = _new_event(camera_id, camera_name, "vehicle", vehicle_emission.description)
+            event["tags"] = list(vehicle_emission.tags)
+            event["metadata"] = {
+                "frame_source": frame_source,
+                "vehicle_tracks": [track.describe() for track in vehicle_emission.tracks]
+                + vehicle_emission.departures,
+            }
+            if vehicle_emission.temporal:
+                event["metadata"]["temporal"] = {
+                    "kind": "vehicle",
+                    "transitions": list(vehicle_emission.tags),
+                    "photo": vehicle_emission.photo,
+                }
+            async with session_factory() as session:
+                await event_service.create_and_broadcast_event(
+                    session, event, trigger_frame=image, frames=frames
+                )
+            scene.vehicles.commit(vehicle_emission, event["id"])
+            _mark_created(camera_id, "vehicle")
+            _stats_for(camera_id)["events"] += 1
+            created += 1
+
+    for update in parked_updates:
+        await _tag_parked_event(session_factory, update)
+
+    if scene is None:
+        return created
+
+    # Mail and bin checks can wait on a vision call, so they run after the
+    # frame's person/animal/vehicle events are already out.
+    temporal: list[TemporalEmission] = []
+    try:
+        zones = await _zones_for(camera_id, session_factory)
+        if zones:
+            temporal = await scene.observe_zones(image, detections, zones, now_wall, camera_name)
+    except Exception:  # noqa: BLE001 - supplementary; never stops ingestion
+        logger.exception("temporal zone check failed for %s", camera_id)
+
+    for emission in temporal:
+        event = _new_event(camera_id, camera_name, emission.type, emission.description)
+        event["zone"] = emission.zone
+        event["tags"] = list(emission.tags)
+        event["metadata"] = {"frame_source": frame_source, "temporal": emission.temporal}
+        async with session_factory() as session:
+            event["metadata"]["temporal"]["evidence"] = {
+                role: f"/api/v1/events/{event['id']}/evidence/{role}" for role in emission.evidence
+            }
+            await event_service.create_and_broadcast_event(
+                session, event, trigger_frame=emission.trigger_frame, frames=[emission.trigger_frame]
+            )
+            await _store_evidence(session, event["id"], emission.evidence)
+        _stats_for(camera_id)[emission.kind] += 1
+        _stats_for(camera_id)["events"] += 1
+        created += 1
+
+    await scene_engine.save(scene, session_factory, now_wall)
     return created
+
+
+def _new_event(camera_id: str, camera_name: str, subject: str, description: str) -> dict:
+    return {
+        "id": "evt-" + uuid.uuid4().hex[:16],
+        "camera_id": camera_id,
+        "camera_name": camera_name,
+        "type": subject,
+        "priority": "high" if subject == "person" else "normal",
+        "source": "local-ai",
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "description": description,
+        "metadata": {},
+    }
+
+
+async def _store_evidence(session, event_id: str, evidence: dict[str, bytes]) -> None:
+    if not evidence:
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        for role, image in evidence.items():
+            session.add(EventEvidence(event_id=event_id, role=role, image=image, created_at=now))
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 - evidence is supplementary
+        logger.warning("evidence not stored for %s: %s", event_id, exc)
+        await session.rollback()
+
+
+async def _tag_parked_event(session_factory, update) -> None:
+    """Record on the vehicle's own event that it has now parked.
+
+    Tagging the existing event, rather than raising another one, keeps one
+    event per car arrival. Settling is not news on its own.
+    """
+    try:
+        async with session_factory() as session:
+            row = await session.get(Event, update.event_id)
+            if row is None:
+                return
+            tags = list(row.tags or [])
+            for tag in update.tags:
+                if tag not in tags:
+                    tags.append(tag)
+            row.tags = tags
+            metadata = dict(row.event_metadata or {})
+            tracks = [
+                update.track if t.get("track_id") == update.track["track_id"] else t
+                for t in metadata.get("vehicle_tracks") or []
+            ]
+            metadata["vehicle_tracks"] = tracks or [update.track]
+            row.event_metadata = metadata
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 - a tag is not worth failing ingestion
+        logger.warning("parked tag not recorded for %s: %s", update.event_id, exc)
+
+
+_zone_cache: dict[str, tuple[float, list[Zone]]] = {}
+_ZONE_CACHE_SECONDS = 30.0
+
+
+async def _zones_for(camera_id: str, session_factory) -> list[Zone]:
+    cached = _zone_cache.get(camera_id)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _ZONE_CACHE_SECONDS:
+        return cached[1]
+    zones: list[Zone] = []
+    try:
+        async with session_factory() as session:
+            zones = await zone_service.zones_for_camera(session, camera_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("zones unavailable for %s: %s", camera_id, exc)
+    _zone_cache[camera_id] = (now, zones)
+    return zones
 
 
 # Per-(camera, subject) cooldown so continued presence doesn't create a new
@@ -223,6 +401,9 @@ _STAT_KEYS = (
     "snapshot_failed",
     "no_frame",
     "stationary_suppressed",
+    "vehicle_deferred",
+    "mailbox",
+    "bins",
     "events",
 )
 
@@ -338,7 +519,7 @@ def _maybe_log_stats(camera_id: str) -> None:
     logger.info(
         "ingestion frames %s: window=%.0fs frames=%d success=%s%% cadence=%s stream=%d "
         "stream_repeat=%d stream_missing=%d snapshot=%d snapshot_failed=%d no_frame=%d "
-        "stationary_suppressed=%d events=%d",
+        "stationary_suppressed=%d events=%d vehicle_tracks=%s",
         camera_id,
         window,
         frames,
@@ -352,9 +533,21 @@ def _maybe_log_stats(camera_id: str) -> None:
         stats["no_frame"],
         stats["stationary_suppressed"],
         stats["events"],
+        _track_summary(camera_id),
     )
     _frame_stats[camera_id] = dict.fromkeys(_STAT_KEYS, 0)
     _stats_since[camera_id] = now
+
+
+def _track_summary(camera_id: str) -> str:
+    """Compact vehicle-track states for the stats line, e.g. ``parked:2,new:1``."""
+    scene = scene_engine.peek(camera_id)
+    if scene is None or not scene.vehicles.tracks:
+        return "none"
+    counts: dict[str, int] = {}
+    for track in scene.vehicles.tracks:
+        counts[track.state] = counts.get(track.state, 0) + 1
+    return ",".join(f"{state}:{n}" for state, n in sorted(counts.items()))
 
 
 def reset_cooldowns() -> None:
@@ -365,6 +558,8 @@ def reset_cooldowns() -> None:
     _last_stream_seq.clear()
     _frame_stats.clear()
     _stats_since.clear()
+    _zone_cache.clear()
+    scene_engine.reset()
 
 
 class IngestionService:

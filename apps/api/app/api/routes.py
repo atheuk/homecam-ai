@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
-from ..models.db import AIAnalysis, Event, EventPhoto, Person
+from ..models.db import AIAnalysis, Event, EventEvidence, EventPhoto, Person, SceneState
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from ..providers.capabilities import AUDIO_DETECTION
 from ..schemas import (
@@ -375,6 +375,49 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
             "Content-Disposition": f'inline; filename="{event_id}.jpg"',
         },
     )
+
+
+@router.get("/events/{event_id}/evidence/{role}")
+async def event_evidence(event_id: str, role: str, session: AsyncSession = Depends(get_db)):
+    """A before/during/after crop that a temporal event (mailbox, bins) rests on."""
+    if role not in ("before", "during", "after"):
+        raise HTTPException(404, "Unknown evidence role")
+    evidence = await session.get(EventEvidence, (event_id, role))
+    if evidence is None:
+        raise HTTPException(404, "No such evidence for this event")
+    return Response(
+        content=evidence.image,
+        media_type=evidence.content_type or "image/jpeg",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+            "Content-Disposition": f'inline; filename="{event_id}-{role}.jpg"',
+        },
+    )
+
+
+@router.get("/cameras/{camera_id}/scene-state")
+async def camera_scene_state(camera_id: str, session: AsyncSession = Depends(get_db)):
+    """What the temporal engine currently believes about a camera's scene.
+
+    Vehicle tracks (and which are parked, since when, over how many
+    observations), mailbox episodes and bin state. It is read-only and has
+    no identities in it. It lets an owner check *why* a car is not being
+    re-announced, and lets a tester check what the engine sees.
+    """
+    from ..services.scene_state import scene_engine
+
+    scene = scene_engine.peek(camera_id)
+    if scene is not None:
+        return {"source": "live", **scene.summary()}
+    row = await session.get(SceneState, camera_id)
+    if row is None:
+        raise HTTPException(404, "No scene state for this camera yet")
+    state = row.state if isinstance(row.state, dict) else {}
+    vehicles = state.get("vehicles") if isinstance(state.get("vehicles"), dict) else {}
+    tracks = vehicles.get("tracks") if isinstance(vehicles.get("tracks"), list) else []
+    return {"source": "persisted", "camera_id": camera_id,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "vehicles": tracks}
 
 
 @router.post("/events/{event_id}/rating")

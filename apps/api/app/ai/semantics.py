@@ -122,16 +122,15 @@ def derive_semantics(
         tags.append("driveway-access")
         description = f"A person is in the {zone_name} at {camera_name}."
     elif zone_kind in MAILBOX_KINDS:
+        # Being at the mailbox is not a delivery. Deliveries are decided over
+        # several frames by the temporal engine (app/services/scene_state.py),
+        # so a single frame only notes where the subject was.
         tags.append("mailbox")
         if primary.label == "package":
             derived_type = "package"
             description = f"Package activity at the {zone_name} on {camera_name}."
         else:
-            derived_type = "package" if base_event_type not in PROTECTED_EVENT_TYPES else derived_type
-            description = (
-                f"The {zone_name} was accessed by a {primary.label} on {camera_name} "
-                "(mailbox opened or reached into)."
-            )
+            description = f"A {primary.label} was at the {zone_name} on {camera_name}."
     elif primary.label in ANIMAL_CLASSES:
         where = f" in the {zone_name}" if zone_name else ""
         # ``animal`` is the generic "some other creature" class, so it needs

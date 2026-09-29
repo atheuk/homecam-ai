@@ -275,11 +275,23 @@ async def enrich_event(
         parked_after_seconds=settings.parked_vehicle_seconds,
     )
 
-    row.type = semantics.type
-    row.zone = semantics.zone
-    row.tags = list(semantics.tags)
-    if semantics.description:
-        row.description = semantics.description[:500]
+    temporal = (event.get("metadata") or {}).get("temporal") or None
+    if temporal:
+        # The temporal engine already decided what this event is from
+        # evidence over several frames (a delivery, bins put out, a parked
+        # car that left). A single-frame reclassification must not undo it.
+        row.type = event["type"]
+        row.zone = event.get("zone") or semantics.zone
+    else:
+        row.type = semantics.type
+        row.zone = semantics.zone
+        if semantics.description:
+            row.description = semantics.description[:500]
+    tags: list[str] = []
+    for tag in [*(event.get("tags") or []), *semantics.tags]:
+        if tag not in tags:
+            tags.append(tag)
+    row.tags = tags
     row.source = "local-ai" if detections else row.source
 
     person_match = None
@@ -287,16 +299,19 @@ async def enrich_event(
     appearance = None
     photo_boxes: list[dict] = []
     photo_verified: bool | None = None
-    if frames and settings.best_photo_enabled and detections:
+    scene_photo = bool(temporal) and temporal.get("photo") == "scene"
+    if frames and settings.best_photo_enabled and (detections or scene_photo):
         # Photograph the subject this event is about. A person event must
         # never be illustrated - or re-identified - from a higher-confidence
         # car in the same frame; other classes are only a fallback when the
         # event's own subject is genuinely absent from every sampled frame.
         subject = subject_for_label(semantics.primary_detection.label) if semantics.primary_detection else None
         photo_targets = SUBJECT_LABELS.get(subject or "", BEST_PHOTO_TARGETS)
+        if temporal and not scene_photo:
+            photo_targets = SUBJECT_LABELS.get(row.type, photo_targets)
         try:
             photo = best_photo_module.select_best_photo(
-                frames, detector, context, photo_targets
+                frames, detector, context, photo_targets, crop=not scene_photo
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("best-photo selection failed for %s: %s", row.camera_id, exc)
@@ -308,9 +323,14 @@ async def enrich_event(
 
             # Only bother captioning/embedding when a person is actually the
             # subject: a caption of a passing car costs a model call and
-            # teaches the identity matcher nothing.
-            is_person_photo = photo.detection is not None and photo.detection.label == "person"
-            is_animal_photo = photo.detection is not None and photo.detection.label in ANIMAL_CLASSES
+            # teaches the identity matcher nothing. Temporal events are about
+            # a mailbox, bins or a vehicle, never about who is in the frame.
+            is_person_photo = (
+                not temporal and photo.detection is not None and photo.detection.label == "person"
+            )
+            is_animal_photo = (
+                not temporal and photo.detection is not None and photo.detection.label in ANIMAL_CLASSES
+            )
 
             # One structured vision call replaces the plain caption when it
             # is available: it yields the same sentence plus the fields the

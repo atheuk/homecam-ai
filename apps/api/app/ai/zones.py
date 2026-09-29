@@ -13,7 +13,16 @@ from .detector import BoundingBox, Detection
 
 # Canonical zone kinds HomeCam understands semantically. Any other name is
 # still allowed and preserved; it simply carries no extra meaning.
-ZONE_KINDS: tuple[str, ...] = ("driveway", "parking", "mailbox", "entry", "street", "garden", "other")
+ZONE_KINDS: tuple[str, ...] = (
+    "driveway",
+    "parking",
+    "mailbox",
+    "bins",
+    "entry",
+    "street",
+    "garden",
+    "other",
+)
 
 DEFAULT_MIN_OVERLAP = 0.3
 

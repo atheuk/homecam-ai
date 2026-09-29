@@ -135,7 +135,9 @@ async def test_person_in_driveway_zone_is_tagged(client):
     assert body["type"] == "person"
 
 
-async def test_mailbox_zone_detection_becomes_a_package_event(client):
+async def test_a_person_at_the_mailbox_is_tagged_but_not_called_a_delivery(client):
+    # A single frame of someone at the mailbox is not evidence of a delivery;
+    # that needs the multi-frame temporal engine (test_scene_state.py).
     await _add_zone(client, "mock-garden", MAILBOX)
     mock_detector().set_script(
         "mock-garden", [Detection("person", 0.88, BoundingBox(0.72, 0.35, 0.92, 0.65))]
@@ -144,7 +146,8 @@ async def test_mailbox_zone_detection_becomes_a_package_event(client):
     body = (await client.get(f"/api/v1/events/{created.json()['id']}")).json()
     assert body["zone"] == "mailbox"
     assert "mailbox" in body["tags"]
-    assert body["type"] == "package"
+    assert "mailbox_delivery" not in body["tags"]
+    assert body["type"] == "person"
 
 
 async def test_animal_detection_produces_an_animal_event(client):

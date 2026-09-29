@@ -191,6 +191,24 @@ describe("AdminPanel",()=>{
     await screen.findByText("Zone saved.");
   });
 
+  it("offers a bins zone for bin tracking", async()=>{
+    let capturedBody:Record<string,unknown>|null=null;
+    mockFetch({
+      ...zoneHandlers,
+      "/admin/cameras/mock-front-door/zones":(init)=>{
+        if(init?.method==="POST"){capturedBody=JSON.parse(String(init.body));return jsonResponse({id:"z2"},201);}
+        return jsonResponse([]);
+      },
+    });
+    await signIn();
+    await screen.findByText("Detection zones");
+    fireEvent.change(screen.getByLabelText("Zone name"),{target:{value:"kerb"}});
+    fireEvent.change(screen.getByLabelText("Zone kind"),{target:{value:"bins"}});
+    fireEvent.click(screen.getByText("Add zone"));
+    await waitFor(()=>expect(capturedBody).not.toBeNull());
+    expect(capturedBody!.kind).toBe("bins");
+  });
+
   it("reports an inline error when a zone rectangle is rejected", async()=>{
     mockFetch({
       ...zoneHandlers,

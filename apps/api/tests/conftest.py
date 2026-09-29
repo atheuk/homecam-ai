@@ -66,12 +66,29 @@ def _reset_ai_state():
     dependent."""
     from app.ai.detector import mock_detector
     from app.ai.dwell import dwell_tracker
+    from app.ai.temporal_vision import set_temporal_verifier
+    from app.services.scene_state import scene_engine
+
+    def _forget_scenes() -> None:
+        # Temporal scene state is persisted (so it survives restarts); a
+        # previous test's parked car must not be "restored" into this one.
+        scene_engine.reset()
+        set_temporal_verifier(None)
+        import sqlite3
+
+        with sqlite3.connect(_db_path) as db:
+            try:
+                db.execute("DELETE FROM scene_states")
+            except sqlite3.OperationalError:
+                pass  # table not created yet
 
     mock_detector().clear_script()
     dwell_tracker.reset()
+    _forget_scenes()
     yield
     mock_detector().clear_script()
     dwell_tracker.reset()
+    _forget_scenes()
 
 
 @pytest.fixture

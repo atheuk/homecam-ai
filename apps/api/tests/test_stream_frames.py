@@ -31,7 +31,7 @@ from app.services.stream_frames import (
     variant_playlist_url,
 )
 
-from test_subject_selection import CAR, CAR_RGB, PERSON, PERSON_RGB, _scene
+from test_subject_selection import CAR, CAR_RGB, DOG, PERSON, PERSON_RGB, _scene
 
 CAMERA = "mock-front-door"
 
@@ -372,30 +372,23 @@ async def test_a_parked_car_is_not_re_reported(client, snapshot_camera):
     await ingestion.poll_once()
 
     assert [e["type"] for e in await _events(client)] == ["vehicle"]
-    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 2
 
 
 async def test_a_flickering_static_box_does_not_re_emit_the_parked_car(client, snapshot_camera):
-    # Live ch1: a parked car plus a half-out-of-frame car at the top edge
-    # that the detector only sometimes finds, confidently enough to count
-    # as a new object. Each reappearance used to count as "new" against the
-    # last event and re-emit every cooldown.
+    # Live ch1: a parked car plus half-out-of-frame cars at the frame edge
+    # that the detector only sometimes finds. They are under 2% of the frame
+    # and so are tracked but never announced.
     edge = Detection("car", 0.75, BoundingBox(0.86, 0.0, 0.954, 0.084))
     far = Detection("car", 0.72, BoundingBox(0.13, 0.70, 0.22, 0.91))
     for frame in ([CAR], [CAR, edge], [CAR], [CAR, far], [CAR], [CAR, edge], [CAR, far], [CAR, edge, far]):
         mock_detector().set_script(CAMERA, frame)
         await ingestion.poll_once()
 
-    # One event for the parked car, one each the first time the edge and
-    # far boxes appeared; never again for either afterwards.
-    assert [e["type"] for e in await _events(client)] == ["vehicle"] * 3
-    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 5
+    assert [e["type"] for e in await _events(client)] == ["vehicle"]
 
 
 async def test_weak_unmatched_boxes_beside_a_parked_car_do_not_re_emit_it(client, snapshot_camera):
-    # The live pattern after the fix above: distant street traffic along the
-    # top edge, each at a new position with 0.51-0.65 confidence. Each
-    # re-emitted a vehicle event whose best photo was the parked car.
+    # Distant street traffic along the top edge, each at a new position.
     mock_detector().set_script(CAMERA, [CAR])
     await ingestion.poll_once()
     for x in (0.19, 0.66, 0.73, 0.85, 0.0):
@@ -404,16 +397,17 @@ async def test_weak_unmatched_boxes_beside_a_parked_car_do_not_re_emit_it(client
         await ingestion.poll_once()
 
     assert [e["type"] for e in await _events(client)] == ["vehicle"]
-    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 5
 
 
-async def test_a_weak_vehicle_emits_once_the_parked_car_has_left(client, snapshot_camera):
+async def test_a_weak_new_vehicle_is_announced_once_confirmed(client, snapshot_camera):
     mock_detector().set_script(CAMERA, [CAR])
     await ingestion.poll_once()
     weak = Detection("car", 0.56, BoundingBox(0.05, 0.50, 0.35, 0.85))
     mock_detector().set_script(CAMERA, [weak])
     await ingestion.poll_once()
-
+    # One low-confidence sighting is not enough; a second one confirms it.
+    assert [e["type"] for e in await _events(client)] == ["vehicle"]
+    await ingestion.poll_once()
     assert [e["type"] for e in await _events(client)] == ["vehicle"] * 2
 
 
@@ -430,14 +424,6 @@ async def test_a_new_or_moving_vehicle_still_emits(client, snapshot_camera):
     assert [e["type"] for e in await _events(client)] == ["vehicle"] * 3
 
 
-async def test_a_parked_car_is_reported_again_after_the_window(client, snapshot_camera, monkeypatch):
-    mock_detector().set_script(CAMERA, [CAR])
-    await ingestion.poll_once()
-    monkeypatch.setattr(settings, "stationary_suppress_seconds", 0.0)
-    await ingestion.poll_once()
-    assert len(await _events(client)) == 2
-
-
 async def test_people_are_never_suppressed_as_stationary(client, snapshot_camera):
     mock_detector().set_script(CAMERA, [CAR, PERSON])
     await ingestion.poll_once()
@@ -445,6 +431,15 @@ async def test_people_are_never_suppressed_as_stationary(client, snapshot_camera
 
     types = sorted(e["type"] for e in await _events(client))
     assert types == ["person", "person", "vehicle"]
+
+
+async def test_a_stationary_animal_is_not_re_reported(client, snapshot_camera):
+    mock_detector().set_script(CAMERA, [DOG])
+    await ingestion.poll_once()
+    await ingestion.poll_once()
+
+    assert [e["type"] for e in await _events(client)] == ["animal"]
+    assert ingestion.frame_stats()[CAMERA]["stationary_suppressed"] == 1
 
 
 # --- dashboard snapshot -------------------------------------------------------

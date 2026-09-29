@@ -148,6 +148,38 @@ class CameraZone(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class SceneState(Base):
+    """Durable temporal scene state for one camera (parked vehicles, bins).
+
+    The temporal engine (``app/services/scene_state.py``) keeps its working
+    state in memory and writes it here after every transition. Without it,
+    each redeploy would reset what was already known. The parked car would
+    be announced again, and bins that were already out would look newly
+    placed. ``state`` is engine-owned JSON.
+    """
+
+    __tablename__ = "scene_states"
+    camera_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EventEvidence(Base):
+    """Before/during/after crops that justify a temporal event.
+
+    A mailbox delivery is a claim about a change over time, so the frames it
+    rests on are kept with the event for a human to check. They are stored
+    in the database for the same reason as :class:`EventPhoto`.
+    """
+
+    __tablename__ = "event_evidence"
+    event_id: Mapped[str] = mapped_column(String(64), ForeignKey("events.id"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(16), primary_key=True)
+    image: Mapped[bytes] = mapped_column(LargeBinary)
+    content_type: Mapped[str] = mapped_column(String(64), default="image/jpeg")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AIAnalysis(Base):
     """AI analysis persistence (SPEC section 32).
 

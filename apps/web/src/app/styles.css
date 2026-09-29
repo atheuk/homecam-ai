@@ -341,3 +341,7 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible{
     transition-duration:.01ms!important;
   }
 }
+.situations{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
+.badge.situation{background:#223044;color:#cfe0f5}
+.evidence{display:flex;gap:10px;margin:0;font:11px 'DM Mono'}
+.evidence a{color:var(--accent)}

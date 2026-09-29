@@ -51,7 +51,7 @@ Derivation rules:
 | Person overlapping a `driveway` zone | `person`, tag `driveway-access` |
 | Vehicle in a `driveway`/`parking` zone, stationary ≥ `PARKED_VEHICLE_SECONDS` | `vehicle`, tag `parked` |
 | Vehicle in the same zone but moving | `vehicle`, tag `passing` |
-| Any detection overlapping a `mailbox` zone | `package`, tag `mailbox` |
+| Person at a `mailbox` zone | stays `person`, tag `mailbox` (a delivery is decided by the mailbox watcher, below) |
 | `dog`/`cat` anywhere | `animal` |
 | Doorbell press | stays `doorbell` (never overwritten) |
 | No detection | unchanged (e.g. stays `motion`) |
@@ -235,7 +235,85 @@ object. Live, the unmatched boxes beside the parked car were distant street
 traffic and edge flicker at 0.51-0.65. Each one re-emitted an event whose
 best photo was the parked car. A new or moved object that is detected
 confidently still emits. The subjects this applies to
-are set by `STATIONARY_SUBJECTS`; people are never suppressed.
+are set by `STATIONARY_SUBJECTS` (default `animal,package`); people are never
+suppressed. Vehicles use the scene engine below instead.
+
+## Temporal scene engine (parked cars, mail, bins)
+
+Some things worth knowing are not visible in any single frame: a car that
+has been parked all day, post dropped in the letterbox, bins put out or
+emptied. `app/services/scene_state.py` keeps a small per-camera state across
+frames and emits an event only when that state *changes*. The state is
+persisted in the `scene_states` table (version 1, ignored when older than
+`SCENE_STATE_MAX_AGE_SECONDS`), so a redeploy does not re-announce everything
+in view. Every transition event carries `metadata.temporal` (what changed,
+the basis, and anything that could not be confirmed under `unknowns`), and
+the before/during/after crops are stored in `event_evidence` and served at
+`GET /api/v1/events/{id}/evidence/{before|during|after}`.
+`GET /api/v1/cameras/{id}/scene-state` shows the live state.
+
+### Parked vehicles (no zone needed)
+
+Each vehicle box is matched to a track (IoU ≥ `VEHICLE_TRACK_MATCH_IOU`, or
+containment ≥ `VEHICLE_TRACK_CONTAINMENT`, so detector jitter and a half-seen
+car stay one track). The first event for a car is raised once it is
+confirmed (two frames, or confidence ≥ `VEHICLE_CONFIRM_CONFIDENCE`, and at
+least `VEHICLE_MIN_AREA` of the frame, so distant street traffic never
+counts). After `VEHICLE_PARKED_OBSERVATIONS` unmoved frames the track is
+`parked` and that same event is tagged `vehicle_parked` (plus
+`vehicle_arrived` if the car was seen driving in, rather than being there
+when the camera was first watched). From then on it is silent. Tags:
+
+| Tag | When |
+| --- | --- |
+| `vehicle_arrived`, `vehicle_parked` | A new car came to rest (tags the car's first event, no new event). |
+| `vehicle_moved` | A parked car's box moved by more than `VEHICLE_MOVE_THRESHOLD` (centre) and below `VEHICLE_MOVED_IOU`. |
+| `vehicle_departed` | A parked car was absent for `VEHICLE_ABSENCE_FRAMES` processed frames *and* `VEHICLE_ABSENCE_SECONDS`. A camera outage produces no frames, so it is never a departure. |
+| `vehicle_returned` | A car reappears in a spot a car departed from within `VEHICLE_RETURN_WINDOW_SECONDS`. |
+| `vehicle_interaction` | On a *person* event: the person overlapped a parked car (≥ `VEHICLE_INTERACTION_OVERLAP` of their box) for two frames in a row. The car then counts afresh, so a drive-off is reported. |
+
+Person events are never suppressed by any of this. All vehicle transitions
+still respect the per-camera vehicle `EVENT_COOLDOWN_SECONDS`.
+
+### Mail delivery (needs a `mailbox` zone)
+
+Draw a tight `mailbox` zone around the letterbox. A visit starts when a
+person covers ≥ `MAILBOX_ZONE_COVER` of the zone and ends when they leave;
+visits shorter than `MAILBOX_MIN_FRAMES` frames are walk-bys and are
+dropped. After a visit, a before/during/after set of zone crops goes to
+Foundry as one closed question ("was an item put in, letter or parcel?").
+The prompt describes the mailbox only and never the person. A confident
+yes (≥ `MAILBOX_MIN_CONFIDENCE`) gives a `package` event tagged `mailbox`,
+`mailbox_delivery`, `letter`/`parcel`. Anything less gives a `motion` event
+tagged `mailbox_activity` with the reason in `unknowns`. A parcel the
+detector itself sees left in the zone counts without the vision check.
+`MAILBOX_COOLDOWN_SECONDS` separates deliveries.
+
+### Bins (needs a `bins` zone)
+
+Draw a `bins` zone where the bins stand when they are out. The zone keeps a
+lighting-normalised 32×32 fingerprint. When it changes by more than
+`BIN_CHANGE_THRESHOLD` for `BIN_SETTLE_FRAMES` frames with nothing in front
+of it, a before/after pair is assessed by Foundry (bin counts only). Frames
+where a person or vehicle covers the zone, and dark/blank frames, are
+skipped. Transitions: `bin_placed_out` (none → some), and `bin_emptied`,
+which needs evidence: a truck at the bins within
+`BIN_COLLECTION_WINDOW_SECONDS`, or a confident "emptied" from the vision
+check. Bins simply disappearing only counts as emptied if
+`BIN_EMPTIED_ON_DISAPPEARANCE=true`. The first look after setup only learns
+the state and emits nothing.
+
+### Limitations
+
+- Mail and bins need a zone per camera and Foundry (`TEMPORAL_VISION_ENABLED`);
+  without them those watchers do nothing rather than guess.
+- RT-DETR's COCO classes have no "bin" or "parcel", so these rely on the zone
+  fingerprint and the vision check, not the detector.
+- A car hidden behind another for longer than the absence window can be
+  reported as departed; a car that moves by less than the move threshold is
+  still "parked".
+- None of this identifies anyone. It never infers gender or ethnicity, and
+  trust stays a human decision.
 
 Every ingested event still flows through the same
 `create_and_broadcast_event` → `enrich_event` pipeline as any other event
@@ -397,8 +475,25 @@ request.
 | `STREAM_FRAME_ASPECT_RATIO` | learned | Display width/height for stream frames (default: learned from a real snapshot). |
 | `STATIONARY_SUPPRESS_SECONDS` | `1800` | How long an unmoved object (same camera+subject, matching box) is not re-reported. |
 | `STATIONARY_IOU_THRESHOLD` | `0.8` | IoU/containment at which a box counts as the same, unmoved object. |
-| `STATIONARY_SUBJECTS` | `vehicle,animal,package` | Subjects subject to stationary suppression (never `person`). |
+| `STATIONARY_SUBJECTS` | `animal,package` | Subjects subject to stationary suppression (never `person`; vehicles use the scene engine). |
 | `STATIONARY_NEW_OBJECT_MIN_CONFIDENCE` | `0.7` | While a known object is still in view, the confidence an unmatched box needs to count as a new object. |
+| `VEHICLE_TRACKING_ENABLED` | `true` | Parked-vehicle state machine (arrived/parked/moved/departed/returned). |
+| `VEHICLE_PARKED_OBSERVATIONS` | `5` | Unmoved frames before a car counts as parked and goes silent. |
+| `VEHICLE_TRACK_MATCH_IOU` / `VEHICLE_TRACK_CONTAINMENT` | `0.3` / `0.8` | Box match to an existing track. |
+| `VEHICLE_MOVE_THRESHOLD` / `VEHICLE_MOVED_IOU` | `0.05` / `0.7` | A parked car moved: centre shift above, and IoU with its parked box below. |
+| `VEHICLE_ABSENCE_FRAMES` / `VEHICLE_ABSENCE_SECONDS` | `10` / `300` | Both needed before a parked car is reported departed. |
+| `VEHICLE_MIN_AREA` / `VEHICLE_CONFIRM_CONFIDENCE` | `0.02` / `0.8` | A vehicle is announced only above this size, after two frames or at this confidence. |
+| `VEHICLE_RETURN_WINDOW_SECONDS` | `86400` | A car back in a departed spot within this is `vehicle_returned`. |
+| `VEHICLE_INTERACTION_OVERLAP` | `0.3` | Share of a person's box on a parked car for `vehicle_interaction`. |
+| `SCENE_STATE_MAX_AGE_SECONDS` | `86400` | Persisted scene state older than this is ignored on start. |
+| `MAILBOX_ZONE_COVER` / `MAILBOX_MIN_FRAMES` | `0.25` / `2` | A mailbox visit: share of the zone covered, and minimum frames. |
+| `MAILBOX_MAX_EPISODE_SECONDS` / `MAILBOX_BEFORE_MAX_AGE_SECONDS` | `120` / `60` | Longest visit, and oldest usable "before" frame. |
+| `MAILBOX_COOLDOWN_SECONDS` / `MAILBOX_MIN_CONFIDENCE` | `600` / `0.6` | Between deliveries; vision confidence for a confirmed delivery. |
+| `BIN_CHANGE_THRESHOLD` / `BIN_SETTLE_FRAMES` / `BIN_BASELINE_ALPHA` | `0.35` / `3` / `0.1` | Zone fingerprint change, frames it must hold, baseline adaptation. |
+| `BIN_COOLDOWN_SECONDS` | `900` | Minimum time between two identical bin transitions. |
+| `BIN_COLLECTION_WINDOW_SECONDS` | `14400` | How long a truck at the bins counts as collection evidence. |
+| `BIN_EMPTIED_ON_DISAPPEARANCE` | `false` | Treat bins vanishing (no truck, no vision "emptied") as emptied. |
+| `TEMPORAL_VISION_ENABLED` | `true` | Foundry closed-question checks for mail and bins. |
 | `INGESTION_STATS_LOG_SECONDS` | `300` | Interval of the per-camera frame acquisition log lines. |
 | `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera *and subject* (person/animal/vehicle/package). |
 | `MOCK_CAMERAS_ENABLED` | auto | Scripted `mock-*` demo cameras. Auto: shown unless `APP_ENV=production` and a real provider is configured. |

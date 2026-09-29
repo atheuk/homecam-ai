@@ -59,7 +59,33 @@ export type EventItem={
   person_id?:string|null;person_name?:string|null;person_display_name?:string|null;
   person_trust?:Trust|null;
   person_confidence?:number|null;person_confirmed?:boolean;
+  tags?:string[]|null;zone?:string|null;
+  metadata?:{temporal?:TemporalDetails|null;[key:string]:unknown}|null;
 };
+
+/** What the scene engine recorded about a before/after situation. */
+export type TemporalDetails={
+  kind?:string;zone?:string;basis?:string|null;
+  unknowns?:string[];evidence?:Record<string,string>;
+};
+
+// Situation tags, in the order they read best. Each is a fact about the
+// scene (post, bins, a parked car) - never about who someone is.
+const SITUATIONS:[string,string][]=[
+  ["mailbox_delivery","Mail delivered"],["parcel","Parcel"],["letter","Letter"],
+  ["mailbox_activity","At mailbox"],
+  ["bin_placed_out","Bins out"],["bin_emptied","Bins emptied"],
+  ["vehicle_arrived","Arrived"],["vehicle_parked","Parked"],["vehicle_moved","Moved"],
+  ["vehicle_departed","Left"],["vehicle_returned","Returned"],["vehicle_interaction","At parked car"],
+];
+
+/** Plain-language badges for the situation tags on an event. */
+export function situationBadges(event:Pick<EventItem,"tags">){
+  const tags=new Set(event.tags||[]);
+  return SITUATIONS.filter(([tag])=>tags.has(tag)).map(([tag,label])=>({tag,label}));
+}
+
+const EVIDENCE_ROLES=["before","during","after"] as const;
 export type Person={
   id:string;name:string|null;display_name:string;named:boolean;notes:string|null;
   trust?:Trust;
@@ -181,6 +207,11 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
   // name instead of a bare class ("Sarah 93%" / "Border Collie 88%").
   const subject=identified||(animal?describeAnimal(animal):null);
   const chips=event.appearance?appearanceChips(event.appearance):[];
+  const situations=situationBadges(event);
+  const temporal=event.metadata?.temporal;
+  const evidence=EVIDENCE_ROLES
+    .filter(role=>temporal?.evidence?.[role])
+    .map(role=>[role,temporal!.evidence![role]] as const);
   return <article className="event-card">
     <div className="event-photo">
       {event.has_photo&&event.photo_url
@@ -198,6 +229,15 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
         <small>{new Date(event.start_time).toLocaleString()}</small>
       </div>
       <p className="event-desc">{event.description}</p>
+      {situations.length>0&&<ul className="situations" aria-label="Situation">
+        {situations.map(item=><li key={item.tag} className={`badge situation situation-${item.tag}`}>{item.label}</li>)}
+      </ul>}
+      {temporal?.unknowns&&temporal.unknowns.length>0&&<p className="unconfirmed">
+        Not confirmed: {temporal.unknowns.join("; ")}.
+      </p>}
+      {evidence.length>0&&<p className="evidence" aria-label="Evidence photos">
+        {evidence.map(([role,url])=><a key={role} href={mediaUrl(url)} target="_blank" rel="noreferrer">{role}</a>)}
+      </p>}
       {/* The caption is what makes a small crop understandable at a glance. */}
       {event.photo_caption&&<p className="caption">“{event.photo_caption}”</p>}
       {/* Saying so is the honest alternative to silently showing a border

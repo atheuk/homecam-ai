@@ -132,14 +132,14 @@ class Settings(BaseSettings):
     # anamorphic (704x576 of a 16:9 scene, no SAR flag); when unset the
     # aspect is learned from the camera's last real snapshot.
     stream_frame_aspect_ratio: float | None = Field(default=None, gt=0.0)
-    # Stationary-object suppression: a new event for the same camera and
-    # subject whose every box matches (IoU / containment >= threshold) a box
-    # of the last emitted event is a repeat of an object that has not moved
-    # (a parked car) and is suppressed for this long. People are never
-    # suppressed this way.
+    # Stationary-object suppression for animals and packages: a new event for
+    # the same camera and subject whose every box matches (IoU / containment
+    # >= threshold) an object already reported is a repeat of something that
+    # has not moved, and is suppressed for this long. Vehicles use the track
+    # engine below instead; people are never suppressed.
     stationary_suppress_seconds: float = Field(default=1800.0, ge=0.0)
     stationary_iou_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
-    stationary_subjects: str = "vehicle,animal,package"
+    stationary_subjects: str = "animal,package"
     # While a known stationary object is still in view, an unmatched box
     # only counts as a new object at or above this confidence. On the live
     # front-yard camera the unmatched boxes beside the parked car were all
@@ -147,6 +147,70 @@ class Settings(BaseSettings):
     # re-emitted an event whose best photo was the parked car. A nearby
     # arriving car scores far higher.
     stationary_new_object_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    # --- Temporal scene engine (app/services/scene_state.py) ----------------
+    # Vehicle tracks. Each vehicle is a track matched frame to frame by box
+    # overlap, independently of event cooldowns. A track becomes "parked"
+    # after this many matching, unmoved observations and then emits nothing
+    # until it moves, leaves, or a person interacts with it.
+    vehicle_tracking_enabled: bool = True
+    vehicle_parked_observations: int = Field(default=5, ge=2, le=100)
+    # IoU (or containment of the smaller box) at which a detection continues
+    # a track. Deliberately looser than "has not moved": a parked car's box
+    # jitters, and a partial box of it must not become a second vehicle.
+    vehicle_track_match_iou: float = Field(default=0.3, gt=0.0, le=1.0)
+    vehicle_track_containment: float = Field(default=0.8, gt=0.0, le=1.0)
+    # A parked track has moved when its box centre shifts by more than this
+    # share of the frame from where it parked AND its IoU with that box
+    # drops below vehicle_moved_iou.
+    vehicle_move_threshold: float = Field(default=0.05, gt=0.0, le=1.0)
+    vehicle_moved_iou: float = Field(default=0.7, gt=0.0, le=1.0)
+    # A parked vehicle has left only after it is missing from at least this
+    # many processed frames AND for at least this long. Frames that never
+    # arrive (camera or stream outage) do not count, so an outage is never
+    # mistaken for a departure, and detector flicker is absorbed.
+    vehicle_absence_frames: int = Field(default=10, ge=1)
+    vehicle_absence_seconds: float = Field(default=300.0, ge=0.0)
+    # Vehicles smaller than this share of the frame are tracked but never
+    # announced. Live, far street traffic and half-visible cars along the
+    # frame edge were 0.8-1.5% of the frame at 0.5-0.79 confidence and
+    # re-announced "a vehicle" every cooldown. A car on the property is
+    # typically well over 5%.
+    vehicle_min_area: float = Field(default=0.02, ge=0.0, le=1.0)
+    # A new track is announced once seen in two frames, or at once if the
+    # detector is at least this sure (a car passing in a single frame).
+    vehicle_confirm_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    # A new parked vehicle where one recently left is tagged "returned".
+    vehicle_return_window_seconds: float = Field(default=86400.0, ge=0.0)
+    # Share of a person box overlapping a parked vehicle that counts as the
+    # person interacting with it.
+    vehicle_interaction_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
+    # Persisted scene state older than this is ignored on startup.
+    scene_state_max_age_seconds: float = Field(default=86400.0, gt=0.0)
+    # Mailbox deliveries (needs a zone of kind "mailbox"; off until one is
+    # configured). A person must cover at least mailbox_zone_cover of the
+    # zone in at least mailbox_min_frames frames. A single-frame walk-by is
+    # discarded without spending a vision call.
+    mailbox_zone_cover: float = Field(default=0.25, gt=0.0, le=1.0)
+    mailbox_min_frames: int = Field(default=2, ge=1)
+    mailbox_max_episode_seconds: float = Field(default=120.0, gt=0.0)
+    mailbox_before_max_age_seconds: float = Field(default=60.0, gt=0.0)
+    mailbox_cooldown_seconds: float = Field(default=600.0, ge=0.0)
+    mailbox_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Garbage bins (needs a zone of kind "bins"; off until one is
+    # configured). The zone's appearance is compared with a slowly adapting
+    # baseline. A change that persists for bin_settle_frames unoccluded
+    # frames is a candidate, and only candidates go to the vision check.
+    bin_change_threshold: float = Field(default=0.35, gt=0.0)
+    bin_settle_frames: int = Field(default=3, ge=1)
+    bin_baseline_alpha: float = Field(default=0.1, gt=0.0, le=1.0)
+    bin_cooldown_seconds: float = Field(default=900.0, ge=0.0)
+    # A collection vehicle seen at the bins within this long before they are
+    # taken in counts as evidence that they were emptied.
+    bin_collection_window_seconds: float = Field(default=14400.0, ge=0.0)
+    # Off by default: bins disappearing is not evidence they were emptied.
+    bin_emptied_on_disappearance: bool = False
+    # Foundry vision closed-question checks for mailbox/bin candidates.
+    temporal_vision_enabled: bool = True
     # How often per-camera frame acquisition statistics are logged.
     ingestion_stats_log_seconds: float = Field(default=300.0, gt=0.0)
     mediamtx_url: str = "http://localhost:8889"

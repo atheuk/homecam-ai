@@ -15,6 +15,20 @@ type EventsPanelProps={
 };
 
 const FILTER_TYPES=["person","vehicle","animal","motion"] as const;
+// Situations cut across types: a delivery is a "package" or a "motion" event
+// depending on how sure the check was, so they filter on tags instead.
+const SITUATION_FILTERS:{value:string;label:string;tags:string[]}[]=[
+  {value:"mail",label:"Mail",tags:["mailbox","mailbox_delivery","mailbox_activity"]},
+  {value:"bins",label:"Bins",tags:["bins","bin_placed_out","bin_emptied"]},
+  {value:"parked",label:"Parked cars",tags:["vehicle_arrived","vehicle_parked","vehicle_moved","vehicle_departed","vehicle_returned","vehicle_interaction"]},
+];
+
+function matchesFilter(event:EventItem,filter:string){
+  if(filter==="all") return true;
+  const situation=SITUATION_FILTERS.find(item=>item.value===filter);
+  if(situation) return (event.tags||[]).some(tag=>situation.tags.includes(tag));
+  return event.type===filter;
+}
 
 function dayLabel(value:string){
   const date=new Date(value);
@@ -35,7 +49,7 @@ export default function EventsPanel({
   const [namedOnly,setNamedOnly]=useState(false);
 
   const filtered=useMemo(()=>events.filter(event=>
-    (type==="all"||event.type===type)&&
+    matchesFilter(event,type)&&
     (cameraId==="all"||event.camera_id===cameraId)&&
     (!namedOnly||Boolean(event.person_display_name))
   ),[events,type,cameraId,namedOnly]);
@@ -70,6 +84,11 @@ export default function EventsPanel({
         {FILTER_TYPES.map(value=><button type="button" key={value}
           className={type===value?"active":""} aria-pressed={type===value}
           onClick={()=>setType(value)}>{value}</button>)}
+      </div>
+      <div className="filter-group" role="group" aria-label="Situation">
+        {SITUATION_FILTERS.map(item=><button type="button" key={item.value}
+          className={type===item.value?"active":""} aria-pressed={type===item.value}
+          onClick={()=>setType(item.value)}>{item.label}</button>)}
       </div>
       <label className="filter-select">
         <span>Camera</span>

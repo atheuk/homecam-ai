@@ -38,7 +38,7 @@ type CameraZone = {
 /** Zone kinds the detection pipeline understands semantically
  * (see docs/ai-pipeline.md). Any other name is stored and shown, it simply
  * carries no extra meaning. */
-const ZONE_KINDS = ["driveway", "parking", "mailbox", "entry", "street", "garden", "other"];
+const ZONE_KINDS = ["driveway", "parking", "mailbox", "bins", "entry", "street", "garden", "other"];
 
 function authHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -665,6 +665,10 @@ export default function AdminPanel() {
           Zones are labelled rectangles in normalized image coordinates (0–1, origin top-left). The AI pipeline uses
           them to turn raw detections into meaningful events: a person in a <code>driveway</code> zone, a car parked in
           a <code>parking</code> zone, or activity at the <code>mailbox</code>. See docs/ai-pipeline.md.
+        </p>
+        <p className="muted">
+          Mail-delivery and bin tracking stay off until you draw a tight <code>mailbox</code> or <code>bins</code> zone
+          around the letterbox or the spot where the bins stand. Parked cars are tracked without a zone.
         </p>
         <form onSubmit={saveZone} className="admin-form">
           <label>
