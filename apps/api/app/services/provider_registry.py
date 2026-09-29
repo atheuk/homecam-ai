@@ -118,7 +118,35 @@ async def _configured_real_providers() -> list[CameraProvider]:
 
 
 async def all_providers() -> list[CameraProvider]:
-    return [*MOCK_PROVIDERS, *await _configured_real_providers()]
+    real = await _configured_real_providers()
+    return [*_visible_mock_providers(bool(real)), *real]
+
+
+def _visible_mock_providers(real_providers_configured: bool) -> list[MockCameraProvider]:
+    """Mock providers that should be exposed alongside the real ones."""
+    enabled = settings.mock_cameras_enabled
+    if enabled is None:
+        enabled = not (
+            settings.app_env.strip().lower() == "production" and real_providers_configured
+        )
+    return list(MOCK_PROVIDERS) if enabled else []
+
+
+async def active_mock_providers() -> list[MockCameraProvider]:
+    """Mock providers currently exposed; the ``/mock/*`` routes act only on these."""
+    if settings.mock_cameras_enabled is not None or settings.app_env.strip().lower() != "production":
+        return _visible_mock_providers(False)
+    return _visible_mock_providers(bool(await _configured_real_providers()))
+
+
+async def hidden_provider_ids() -> set[str]:
+    """Provider ids whose cameras must not be listed right now.
+
+    Camera rows are persisted, so a mock camera synced before a real
+    provider was configured would otherwise linger in the listing forever.
+    """
+    visible = {provider.id for provider in await active_mock_providers()}
+    return {provider.id for provider in MOCK_PROVIDERS} - visible
 
 
 def mock_providers() -> list[MockCameraProvider]:

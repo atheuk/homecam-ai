@@ -30,22 +30,29 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from ..ai.detector import DetectionContext, get_detector
+from ..ai.detector import SUBJECT_LABELS, DetectionContext, get_detector, subject_for_label
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
+from . import ai_pipeline
 from . import events as event_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
 
 logger = logging.getLogger(__name__)
 
+# Order in which simultaneous subjects are raised: "start with people".
+_SUBJECT_ORDER: tuple[str, ...] = tuple(SUBJECT_LABELS)
 
-def _event_type_for(labels: set[str]) -> str:
-    # "start with people": if a person is among what was detected, that is
-    # always the headline event type, even alongside a vehicle/animal/etc.
-    if "person" in labels:
-        return "person"
-    return sorted(labels)[0]
+
+def _subjects_in(labels: set[str]) -> list[str]:
+    """Every event subject present among ``labels``, people first.
+
+    Each subject gets its own event. Collapsing a frame to one headline
+    type meant a parked car and a passing person shared one event (and one
+    photo), and a car in view could stand in for the person entirely.
+    """
+    present = {subject_for_label(label) for label in labels} - {None}
+    return [subject for subject in _SUBJECT_ORDER if subject in present]
 
 
 async def poll_once(session_factory=SessionLocal) -> int:
@@ -62,7 +69,7 @@ async def poll_once(session_factory=SessionLocal) -> int:
             continue
         if camera.get("capabilities", {}).get("snapshot") != "SUPPORTED":
             continue
-        if not _cooldown_elapsed(camera_id):
+        if not any(_cooldown_elapsed(camera_id, subject) for subject in _SUBJECT_ORDER):
             continue
         provider = await find_provider_for_camera(camera_id)
         if provider is None:
@@ -85,43 +92,62 @@ async def poll_once(session_factory=SessionLocal) -> int:
         if not detections:
             continue
 
-        labels = {detection.label for detection in detections}
-        event_type = _event_type_for(labels)
-        now = datetime.now(timezone.utc)
-        event = {
-            "id": "evt-" + uuid.uuid4().hex[:16],
-            "camera_id": camera_id,
-            "camera_name": camera_name,
-            "type": event_type,
-            "priority": "high" if event_type == "person" else "normal",
-            "source": "local-ai",
-            "start_time": now.isoformat(),
-            "description": f"{event_type.replace('_', ' ').title()} detected on {camera_name}",
-        }
-        async with session_factory() as session:
-            # Hand the analysis stage the frame we just detected on: it is
-            # the correct moment to photograph, and re-fetching it competes
-            # with this NVR's tiny concurrent-session budget.
-            await event_service.create_and_broadcast_event(session, event, trigger_frame=image)
-        _mark_created(camera_id)
-        created += 1
+        # Cooldown is per subject: a car parked in view all day must not
+        # hold the camera's only cooldown slot and so silence the person or
+        # animal that walks past it.
+        due = [
+            subject
+            for subject in _subjects_in({detection.label for detection in detections})
+            if _cooldown_elapsed(camera_id, subject)
+        ]
+        if not due:
+            continue
+
+        # One frame sample shared by every event from this moment: this
+        # NVR's concurrent-session budget is tiny, and the events are all
+        # about the same instant anyway. The frame we just detected on
+        # leads, since it is the correct moment to photograph.
+        frames: list[bytes] | None = None
+        if len(due) > 1 and settings.ai_analysis_enabled:
+            frames = await ai_pipeline._sample_frames(
+                provider, camera_id, settings.best_photo_frames, seed=image
+            )
+
+        for subject in due:
+            now = datetime.now(timezone.utc)
+            event = {
+                "id": "evt-" + uuid.uuid4().hex[:16],
+                "camera_id": camera_id,
+                "camera_name": camera_name,
+                "type": subject,
+                "priority": "high" if subject == "person" else "normal",
+                "source": "local-ai",
+                "start_time": now.isoformat(),
+                "description": f"{subject.title()} detected on {camera_name}",
+            }
+            async with session_factory() as session:
+                await event_service.create_and_broadcast_event(
+                    session, event, trigger_frame=image, frames=frames
+                )
+            _mark_created(camera_id, subject)
+            created += 1
     return created
 
 
-# Per-camera cooldown so continued presence doesn't create a new event every
-# poll interval. Process-wide and deliberately simple (a dict, not a DB
-# table): losing it on restart just means the first post-restart detection
-# creates one event immediately, which is harmless.
-_last_event_at: dict[str, float] = {}
+# Per-(camera, subject) cooldown so continued presence doesn't create a new
+# event every poll interval. Process-wide and deliberately simple (a dict,
+# not a DB table): losing it on restart just means the first post-restart
+# detection creates one event immediately, which is harmless.
+_last_event_at: dict[tuple[str, str], float] = {}
 
 
-def _cooldown_elapsed(camera_id: str) -> bool:
-    last = _last_event_at.get(camera_id)
+def _cooldown_elapsed(camera_id: str, subject: str) -> bool:
+    last = _last_event_at.get((camera_id, subject))
     return last is None or (time.monotonic() - last) >= settings.event_cooldown_seconds
 
 
-def _mark_created(camera_id: str) -> None:
-    _last_event_at[camera_id] = time.monotonic()
+def _mark_created(camera_id: str, subject: str) -> None:
+    _last_event_at[(camera_id, subject)] = time.monotonic()
 
 
 def reset_cooldowns() -> None:

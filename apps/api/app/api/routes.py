@@ -45,17 +45,20 @@ from ..services import cameras as camera_service
 from ..services import events as event_service
 from ..services import persons as person_service
 from ..services.provider_registry import (
+    active_mock_providers,
     discover_all_cameras,
     find_provider_for_camera,
     get_all_provider_health,
-    mock_providers,
+    hidden_provider_ids,
 )
 
 router = APIRouter(prefix="/api/v1")
 
 
-def find_mock_provider_for_camera(camera_id: str):
-    return next((provider for provider in mock_providers() if provider.has_camera(camera_id)), None)
+async def find_mock_provider_for_camera(camera_id: str):
+    return next(
+        (provider for provider in await active_mock_providers() if provider.has_camera(camera_id)), None
+    )
 
 
 def _classify_stream_url(stream_url: str) -> tuple[str, bool]:
@@ -169,6 +172,7 @@ async def cameras(session: AsyncSession = Depends(get_db)):
     discovered = await discover_all_cameras(settings.camera_discovery_cache_seconds)
     await camera_service.sync_cameras(session, discovered)
     rows = await camera_service.list_cameras(session)
+    hidden = await hidden_provider_ids()
     return [
         {
             "id": row.id, "provider_id": row.provider_id, "name": row.name, "type": row.type,
@@ -176,13 +180,14 @@ async def cameras(session: AsyncSession = Depends(get_db)):
             "battery_level": row.battery_level, "capabilities": row.capabilities,
         }
         for row in rows
+        if row.provider_id not in hidden
     ]
 
 
 @router.get("/cameras/{camera_id}")
 async def camera(camera_id: str, session: AsyncSession = Depends(get_db)):
     row = await camera_service.get_camera(session, camera_id)
-    if row is None:
+    if row is None or row.provider_id in await hidden_provider_ids():
         raise HTTPException(404, "Camera not found")
     return {
         "id": row.id, "provider_id": row.provider_id, "name": row.name, "type": row.type,
@@ -571,7 +576,7 @@ async def activity_detail(activity_id: str, session: AsyncSession = Depends(get_
 
 @router.post("/mock/events")
 async def create_event(payload: MockEventIn, session: AsyncSession = Depends(get_db)):
-    provider = find_mock_provider_for_camera(payload.camera_id)
+    provider = await find_mock_provider_for_camera(payload.camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     event = provider.event(payload.camera_id, payload.type)
@@ -583,7 +588,7 @@ async def create_event(payload: MockEventIn, session: AsyncSession = Depends(get
 async def set_camera_status(camera_id: str, payload: CameraStatusIn, session: AsyncSession = Depends(get_db)):
     """Development control to simulate a camera going offline/degraded
     (SPEC section 40/43)."""
-    provider = find_mock_provider_for_camera(camera_id)
+    provider = await find_mock_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
@@ -599,7 +604,7 @@ async def set_camera_battery(camera_id: str, payload: CameraBatteryIn, session: 
     """Development control to simulate battery drain; automatically raises
     a high-priority ``battery_low`` event under the configurable threshold
     (SPEC section 8.3)."""
-    provider = find_mock_provider_for_camera(camera_id)
+    provider = await find_mock_provider_for_camera(camera_id)
     if provider is None:
         raise HTTPException(404, "Camera not found")
     try:
@@ -649,7 +654,7 @@ async def analyze_audio(
     analysis = analyze_pcm(pcm, settings.audio_energy_threshold)
     event_id: str | None = None
     if analysis.speech_like:
-        mock = find_mock_provider_for_camera(camera_id)
+        mock = await find_mock_provider_for_camera(camera_id)
         if mock is not None:
             event = mock.event(camera_id, "motion")
             event["description"] = (
@@ -666,7 +671,7 @@ async def analyze_audio(
 async def set_provider_outage(provider_id: str, payload: ProviderOutageIn):
     """Development control to simulate an entire provider (e.g. the Eufy
     HomeBase) becoming unreachable, to verify provider failure isolation."""
-    provider = next((p for p in mock_providers() if p.id == provider_id), None)
+    provider = next((p for p in await active_mock_providers() if p.id == provider_id), None)
     if provider is None:
         raise HTTPException(404, "Provider not found")
     provider.simulate_outage(payload.unavailable)

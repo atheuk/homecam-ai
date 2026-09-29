@@ -52,7 +52,7 @@ async def test_poll_once_creates_a_real_event_when_the_detector_sees_a_person(cl
     assert matching[0].source == "local-ai"
 
 
-async def test_poll_once_prefers_person_when_multiple_labels_are_seen(client):
+async def test_poll_once_raises_an_event_per_subject_people_first(client):
     mock_detector().set_script(
         "mock-garden",
         [
@@ -64,7 +64,8 @@ async def test_poll_once_prefers_person_when_multiple_labels_are_seen(client):
     async with SessionLocal() as session:
         rows = (await session.execute(Event.__table__.select())).fetchall()
     garden = [r for r in rows if r.camera_id == "mock-garden"]
-    assert garden and garden[0].type == "person"
+    assert sorted(r.type for r in garden) == ["animal", "person"]
+    assert {r.type: r.priority for r in garden}["person"] == "high"
 
 
 async def test_poll_once_respects_the_per_camera_cooldown(client, monkeypatch):

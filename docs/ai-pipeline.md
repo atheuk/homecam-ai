@@ -97,6 +97,16 @@ frame — cropped to the detection box with 8% padding — under
 `MEDIA_ROOT/best-photos/`. It is exposed as `best_photo_path` and
 `thumbnail_path` on the event, and is distinct from any raw motion snapshot.
 
+The photo is always of **the event's own subject**: a person event is cropped
+to the person, an animal event to the animal, a vehicle event to the vehicle,
+however confident any other object in the frame is. A frame that contains the
+subject beats a sharper frame that doesn't; other classes are used only when
+the subject is absent from every sampled frame. Appearance analysis and
+re-identification therefore never receive a car crop for a person event.
+`best_photo.boxes` (drawn as `photo_boxes`) are in the stored photo's
+coordinates; `best_photo.frame_boxes` keep every detection in full-frame
+coordinates.
+
 Sharpness uses a Laplacian-variance blur metric via Pillow + numpy when those
 are importable. Without them the module falls back to a deterministic
 pure-Python byte-delta proxy and stores the frame uncropped, so the default
@@ -166,8 +176,13 @@ loop (started from the FastAPI `lifespan`, alongside the API's own
 Tailscale-connected provider access) periodically snapshots every online,
 snapshot-capable camera across every provider, runs it through the configured
 local detector, and creates a real event whenever the detector actually sees
-something. A per-camera cooldown (`EVENT_COOLDOWN_SECONDS`) stops continued
-presence from creating a new event every poll interval.
+something. Each subject present in the frame — person, animal, vehicle,
+package — raises its own event, so a person walking past a parked car yields a
+person event *and* a vehicle event. The cooldown (`EVENT_COOLDOWN_SECONDS`) is
+per camera **and subject**: continued presence doesn't create a new event
+every poll, but a car parked in view all day never silences the people or
+animals that pass it. Events raised from the same moment share one frame
+sample, to spare the NVR's small concurrent-session budget.
 
 Every ingested event still flows through the same
 `create_and_broadcast_event` → `enrich_event` pipeline as any other event
@@ -322,7 +337,8 @@ request.
 | `ACTIVITY_CORRELATION_WINDOW_SECONDS` | `120` | Temporal grouping window. |
 | `EVENT_INGESTION_ENABLED` | `false` | Background loop that creates real events from live camera snapshots. |
 | `EVENT_POLL_INTERVAL_SECONDS` | `20` | Seconds between ingestion passes. |
-| `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera. |
+| `EVENT_COOLDOWN_SECONDS` | `120` | Minimum time between two created events for the same camera *and subject* (person/animal/vehicle/package). |
+| `MOCK_CAMERAS_ENABLED` | auto | Scripted `mock-*` demo cameras. Auto: shown unless `APP_ENV=production` and a real provider is configured. |
 
 ## Known limitations
 

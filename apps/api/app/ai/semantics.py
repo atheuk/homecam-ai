@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .detector import ANIMAL_CLASSES, VEHICLE_CLASSES, Detection
+from .detector import ANIMAL_CLASSES, SUBJECT_LABELS, VEHICLE_CLASSES, Detection, subject_for_label
 from .dwell import DwellTracker
 from .zones import Zone, primary_zone
 
@@ -39,15 +39,7 @@ class SemanticResult:
 
 
 def _type_for_label(label: str) -> str:
-    if label == "person":
-        return "person"
-    if label in VEHICLE_CLASSES:
-        return "vehicle"
-    if label in ANIMAL_CLASSES:
-        return "animal"
-    if label == "package":
-        return "package"
-    return "motion"
+    return subject_for_label(label) or "motion"
 
 
 def _rank(detection: Detection) -> tuple[int, float]:
@@ -56,6 +48,24 @@ def _rank(detection: Detection) -> tuple[int, float]:
         detection.label, 2 if detection.label in VEHICLE_CLASSES else 1
     )
     return (priority, detection.confidence)
+
+
+def primary_detection_for(base_event_type: str, detections: list[Detection]) -> Detection | None:
+    """The detection an event is about.
+
+    An event raised *for* a subject (``person``/``animal``/``vehicle``/
+    ``package``) is about that subject's most confident detection, however
+    confident any other object in the same frame is. Only when that subject
+    is genuinely absent does the global ranking apply.
+    """
+    if not detections:
+        return None
+    labels = SUBJECT_LABELS.get(base_event_type)
+    if labels:
+        matching = [d for d in detections if d.label in labels]
+        if matching:
+            return max(matching, key=lambda d: d.confidence)
+    return max(detections, key=_rank)
 
 
 def derive_semantics(
@@ -73,7 +83,7 @@ def derive_semantics(
     if not detections:
         return SemanticResult(type=base_event_type, tags=[])
 
-    primary = max(detections, key=_rank)
+    primary = primary_detection_for(base_event_type, detections)
     zone = primary_zone(primary, zones)
     zone_name = zone.name if zone else None
     zone_kind = zone.kind if zone else None
