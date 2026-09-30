@@ -42,11 +42,13 @@ from ..ai.detector import (
     get_detector,
     subject_for_label,
 )
+from ..ai import camera_health
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from . import ai_pipeline, scene_state
 from . import events as event_service
+from . import incidents as incident_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
 from .stream_frames import stream_hub
 
@@ -123,7 +125,19 @@ async def poll_once(session_factory=SessionLocal) -> int:
     created = 0
     for camera in await discover_all_cameras(settings.camera_discovery_cache_seconds):
         camera_id = camera.get("id")
-        if not camera_id or not camera.get("online"):
+        if not camera_id:
+            continue
+        camera_name = str(camera.get("name") or camera_id)
+        # Camera-health (offline transition) must be evaluated for *every*
+        # discovered camera, online or not - this is why it runs before the
+        # offline-skip below, unlike everything else in this loop.
+        try:
+            await camera_health.evaluate_online_state(
+                session_factory, camera_id, camera_name, bool(camera.get("online"))
+            )
+        except Exception as exc:  # noqa: BLE001 - health checks must never break ingestion
+            logger.warning("camera health (online) check failed for %s: %s", camera_id, exc)
+        if not camera.get("online"):
             continue
         if camera.get("capabilities", {}).get("snapshot") != "SUPPORTED":
             continue
@@ -135,8 +149,11 @@ async def poll_once(session_factory=SessionLocal) -> int:
         if acquired is None:
             continue
         image, stream_frames, frame_source = acquired
+        try:
+            await camera_health.evaluate_frame(session_factory, camera_id, camera_name, image)
+        except Exception as exc:  # noqa: BLE001 - health checks must never break ingestion
+            logger.warning("camera health (frame) check failed for %s: %s", camera_id, exc)
 
-        camera_name = str(camera.get("name") or camera_id)
         try:
             # Off the event loop: RT-DETR takes ~225ms of CPU per frame, and
             # with frames every few seconds the API must stay responsive.
@@ -160,6 +177,13 @@ async def poll_once(session_factory=SessionLocal) -> int:
         created += await _emit_scene_transitions(
             session_factory, camera_id, camera_name, image, detections, stream_frames, frame_source
         )
+    try:
+        # Once per poll tick (not per camera): sweep every open incident for
+        # overdue escalation. Cheap (one query) and independent of any
+        # particular camera's frame.
+        await incident_service.escalate_due_incidents(session_factory)
+    except Exception as exc:  # noqa: BLE001 - escalation must never break ingestion
+        logger.warning("incident escalation sweep failed: %s", exc)
     return created
 
 

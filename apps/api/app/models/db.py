@@ -249,6 +249,12 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Auth hardening (SPEC section 27 follow-up, OWASP IoT/ASVS brute-force
+    # guidance): consecutive bad passwords since the last success, and the
+    # timestamp until which login is refused regardless of password
+    # correctness. Both reset to 0/NULL on a successful login.
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -284,4 +290,98 @@ class ProviderConfig(Base):
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SecurityState(Base):
+    """Household arming state (SPEC follow-up: arming/home/away/night modes).
+
+    A single row (``id="default"``) since HomeCam is a single-household,
+    single-system deployment (see ``ProviderConfig``/``User`` for the same
+    assumption elsewhere). ``mode`` is one of ``disarmed``, ``home``,
+    ``away``, ``night`` and is purely a *human decision*, never inferred:
+    changing it always requires an authenticated user and is audit-logged.
+
+    This state never gates whether events are detected/stored/searchable —
+    only whether a detected event also raises an actionable ``Incident``
+    (see ``app/services/security_modes.py`` and ``app/services/incidents.py``).
+    Camera-health incidents (tamper/obstruction/offline) are not gated by
+    this at all: system integrity is not the same thing as intrusion
+    detection, matching how a physical alarm panel still reports a cut wire
+    while disarmed.
+    """
+
+    __tablename__ = "security_states"
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="default")
+    mode: Mapped[str] = mapped_column(String(16), default="disarmed")
+    changed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Incident(Base):
+    """An actionable grouping of one or more events (SPEC follow-up:
+    incident grouping/timeline, acknowledgment/escalation, evidence export).
+
+    Deliberately separate from ``Event``: an event is "something the
+    detector saw"; an incident is "something a human may need to act on".
+    New alert-worthy events for the same camera+zone+kind merge into an
+    existing open incident within ``incident_merge_window_seconds`` instead
+    of raising a duplicate (SPEC follow-up: detection confidence/dedup),
+    bumping ``event_count``/``last_seen_at``/``severity`` rather than
+    creating a new row.
+    """
+
+    __tablename__ = "incidents"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # "intrusion" (a gated subject event) or "camera_health" (tamper /
+    # obstruction / offline). Camera-health incidents are never suppressed
+    # by arming mode.
+    kind: Mapped[str] = mapped_column(String(24), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="low")
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    zone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The arming mode in effect when this incident was opened, so the
+    # timeline/export always explains *why* an event became actionable.
+    mode_at_creation: Mapped[str] = mapped_column(String(16), default="disarmed")
+    event_ids: Mapped[list] = mapped_column(JSON, default=list)
+    event_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Bumped by the escalation sweep for unacknowledged incidents past a
+    # time threshold; purely a severity/urgency signal surfaced to the UI
+    # and audit trail. HomeCam never pages/dispatches anyone automatically.
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
+    last_escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Deterministic, template-built description - always present.
+    summary: Mapped[str] = mapped_column(String(500), default="")
+    # Optional AI-assisted risk summary (Foundry chat deployment), same
+    # opt-in/degrade-gracefully pattern as photo captioning: absent unless
+    # Foundry is configured, and never authoritative on its own.
+    ai_summary: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AuditLog(Base):
+    """Append-only record of security-relevant actions (SPEC follow-up:
+    audit trail). Covers auth events (login/lockout/logout/session revoke),
+    arming-mode changes, and incident acknowledge/resolve/escalate. Never
+    covers camera imagery/content - only who did what, to what, and when.
+    """
+
+    __tablename__ = "audit_logs"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Human-readable actor label for actions with no authenticated user yet
+    # (e.g. a failed login attempt for an unknown/locked email).
+    actor_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.db import Event
 from . import activities as activity_service
 from . import ai_pipeline
+from . import incidents as incident_service
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,15 @@ async def create_and_broadcast_event(
         await session.refresh(row)
     enriched = {**enriched, "activity_id": row.activity_id}
     await event_bus.publish(enriched)
+    try:
+        # Incident routing happens after the event is fully enriched/final
+        # (row.type/zone reflect the AI pipeline's final classification) and
+        # strictly after the event itself is persisted/broadcast, so an
+        # incident-routing failure can never suppress or delay the event.
+        await incident_service.route_event(session, row)
+    except Exception:  # noqa: BLE001 - incident routing must never break ingestion
+        logger.exception("incident routing failed for %s", row.id)
+        await session.rollback()
     return row
 
 

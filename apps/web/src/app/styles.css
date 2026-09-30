@@ -413,3 +413,44 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible{
   display: grid;
   gap: 0.5rem;
 }
+
+/* --- Security: arming modes, incidents, audit trail --- */
+.mode-switcher{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+.mode-btn{background:#0c1110;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:10px 18px;font-weight:700;font-size:13px;cursor:pointer}
+.mode-btn.active{background:var(--accent);color:#0c1110;border-color:var(--accent)}
+.mode-btn[disabled]{opacity:.6;cursor:not-allowed}
+.mode-hint{margin:6px 0 0}
+.mode-changed{margin:2px 0 0}
+.camera-health-banner{margin-top:14px}
+.incidents-panel .filter-group{margin:10px 0 16px}
+.incident-card{border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}
+.incident-card.severity-high{border-left:3px solid #f26b6b}
+.incident-card.severity-medium{border-left:3px solid var(--orange)}
+.incident-card.severity-low{border-left:3px solid var(--line)}
+.incident-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.incident-head small{color:var(--muted);font:11px 'DM Mono'}
+.incident-card h4{margin:10px 0 4px;font-size:15px}
+.incident-summary{margin:0 0 6px;font-size:14px}
+.ai-summary{margin:0 0 6px;font-size:13px;color:var(--muted);font-style:italic;display:flex;gap:8px;align-items:flex-start}
+.incident-meta{margin:0 0 10px}
+.incident-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.incident-actions button{background:var(--accent);color:#0c1110;border:0;border-radius:6px;padding:7px 12px;font-weight:700;font-size:12px;cursor:pointer}
+.incident-actions button[disabled]{opacity:.5;cursor:not-allowed}
+.incident-actions .text-button{background:none;color:var(--accent);font-weight:600;padding:7px 4px}
+.incident-timeline{list-style:none;margin:12px 0 0;padding:12px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.incident-timeline li{display:flex;gap:10px;font-size:13px}
+.incident-timeline-time{color:var(--muted);font:11px 'DM Mono';flex:0 0 auto}
+.badge.status-open{background:#8a4b1f;color:#fbeee2}
+.badge.status-acknowledged{background:#20362d;color:var(--accent)}
+.badge.status-resolved{background:var(--accent);color:#0c1110}
+.badge.severity-high{background:#5c2020;color:#ffd7d7}
+.badge.severity-medium{background:#5c3f1a;color:#ffe6c2}
+.badge.severity-low{background:#20362d;color:var(--muted)}
+.badge.escalation{background:#f26b6b;color:#0c1110}
+.badge.ai{background:#20362d;color:var(--accent);margin-right:2px}
+.incident-head .badge{margin-right:6px}
+.audit-list{list-style:none;margin:10px 0 0;padding:0}
+.audit-row{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
+.audit-action{font:12px 'DM Mono';color:var(--accent)}
+.audit-row small{color:var(--muted);font:11px 'DM Mono'}
+@media(max-width:650px){.audit-row{grid-template-columns:1fr}}

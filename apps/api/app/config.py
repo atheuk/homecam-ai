@@ -252,6 +252,54 @@ class Settings(BaseSettings):
     eufy_adapter_token: str | None = None
     eufy_timeout_seconds: float = Field(default=10.0, gt=0)
     eufy_retries: int = Field(default=1, ge=0, le=5)
+    # --- Security essentials (arming modes, incidents, audit, auth hardening) ---
+    # New alert-worthy events for the same camera+zone+kind merge into an
+    # already-open incident within this window instead of raising a
+    # duplicate (detection dedup at the *actionable* layer; the underlying
+    # Event rows are never deduplicated/deleted).
+    incident_merge_window_seconds: float = Field(default=300.0, gt=0.0)
+    # An open, unacknowledged incident is escalated (bumped a severity/urgency
+    # level, re-broadcast, and audit-logged) after this long unattended. A
+    # physical alarm panel keeps sounding until someone silences it; this is
+    # the software equivalent, without ever paging/dispatching anyone.
+    incident_escalation_seconds: float = Field(default=180.0, gt=0.0)
+    # No more than this many escalation bumps per incident, so an incident
+    # nobody ever acknowledges settles at a high-but-bounded severity instead
+    # of growing without limit.
+    incident_max_escalation_level: int = Field(default=3, ge=0, le=10)
+    # AI-assisted incident risk summary (Foundry chat deployment). Purely
+    # descriptive/advisory text alongside the deterministic summary -
+    # disabled it changes nothing about whether/when an incident is raised,
+    # only whether it also carries a plain-language summary.
+    incident_ai_summary_enabled: bool = True
+    # Camera health watchdog (deterministic pixel heuristics, see
+    # app/ai/camera_health.py - never a learned model). A frame whose
+    # standard deviation of luminance falls below this is flat/uniform
+    # enough to be a lens covered/blocked, not a real scene.
+    camera_obstruction_std_threshold: float = Field(default=6.0, ge=0.0)
+    # Consecutive obstruction-looking samples required before raising an
+    # incident, so one dark/glare frame is not a false tamper alert.
+    camera_obstruction_confirm_samples: int = Field(default=3, ge=1, le=50)
+    # Two frames whose mean pixel difference is below this are "the same"
+    # for tamper/frozen-feed purposes (compression noise still varies a real
+    # scene by more than this).
+    camera_frozen_diff_threshold: float = Field(default=1.5, ge=0.0)
+    # A camera reporting frames that are all "the same" for at least this
+    # long is flagged as a frozen/tampered feed. Long and conservative on
+    # purpose: outdoor cameras pointed at a quiet scene can look static for
+    # minutes at a time and must not misfire.
+    camera_frozen_seconds: float = Field(default=1800.0, gt=0.0)
+    # A camera-health incident is re-raised for the same camera at most once
+    # per this window after it resolves, so a flapping camera does not spam
+    # the incident feed.
+    camera_health_dedupe_seconds: float = Field(default=1800.0, ge=0.0)
+    # Auth hardening (OWASP ASVS / IoT Top 10 brute-force guidance). After
+    # this many consecutive failed logins for one account, further attempts
+    # are refused (regardless of password correctness) until the lockout
+    # expires, independent of whether the guessed password is eventually
+    # correct.
+    auth_max_failed_attempts: int = Field(default=5, ge=1, le=100)
+    auth_lockout_minutes: float = Field(default=15.0, gt=0.0)
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()
