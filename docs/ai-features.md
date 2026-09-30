@@ -115,7 +115,10 @@ The before/after JPEG crops are stored in the database as `event_evidence` rows
 (not on a replica's ephemeral filesystem). The event's
 `metadata.mailbox.before/after` and the incident's `evidence.before/after` each
 carry an `image_url` (`/api/v1/events/{event_id}/evidence/{before|after}`)
-that returns the image to an authenticated user.
+that returns the image to an authenticated user. The `image_url` metadata is
+written in the same transaction as the `event_evidence` rows. If storing the
+evidence fails, the event is kept without URLs, so it never advertises evidence
+that returns 404.
 
 Both API replicas run ingestion with their own in-process scene caches, so both
 can observe the same removal. Before a removal event is emitted, the replica
@@ -124,7 +127,10 @@ must win a database claim on `package_removed:<camera>:<zone>` in
 conditional `UPDATE` that only succeeds once the previous claim is older than
 `mailbox_dedupe_seconds`, falling back to a primary-key `INSERT`. Exactly one
 replica emits the event, so the grouped incident's `event_count` is not
-inflated by duplicates.
+inflated by duplicates. The claim is flushed but not committed on its own: it
+commits in the same transaction as the event row. If the claimant errors or
+crashes before the event is persisted, the claim rolls back with it, and the
+other replica (blocked on the uncommitted row) wins and emits the removal.
 
 While **home** or **disarmed**, a removal is recorded as an ordinary event: you
 collecting your own parcel is not a theft.

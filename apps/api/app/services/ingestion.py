@@ -278,22 +278,6 @@ async def _emit_scene_transitions(
     for transition in transitions:
         frames = transition.frames or stream_frames
         event_id = "evt-" + uuid.uuid4().hex[:16]
-        if transition.dedup_key:
-            try:
-                async with session_factory() as session:
-                    won = await scene_dedup.claim(
-                        session,
-                        transition.dedup_key,
-                        transition.observed_at if transition.observed_at is not None else time.time(),
-                        transition.dedup_window_seconds,
-                        event_id,
-                    )
-            except Exception:  # noqa: BLE001
-                logger.exception("scene dedup claim failed for %s", camera_id)
-                continue
-            if not won:
-                logger.info("scene transition %s: %s deduplicated across replicas", camera_id, transition.transition)
-                continue
         event = {
             "id": event_id,
             "camera_id": camera_id,
@@ -309,6 +293,25 @@ async def _emit_scene_transitions(
         }
         try:
             async with session_factory() as session:
+                if transition.dedup_key:
+                    # The claim is only flushed here. It commits in the same
+                    # transaction as the event row (persist_event's commit),
+                    # so an error or crash before the event is persisted
+                    # rolls the claim back too and never suppresses the
+                    # removal on the other replica.
+                    won = await scene_dedup.claim(
+                        session,
+                        transition.dedup_key,
+                        transition.observed_at if transition.observed_at is not None else time.time(),
+                        transition.dedup_window_seconds,
+                        event_id,
+                        commit=False,
+                    )
+                    if not won:
+                        logger.info(
+                            "scene transition %s: %s deduplicated across replicas", camera_id, transition.transition
+                        )
+                        continue
                 row = await event_service.create_and_broadcast_event(
                     session,
                     event,

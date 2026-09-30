@@ -188,3 +188,82 @@ async def test_different_zones_are_deduplicated_independently(monkeypatch):
     assert await _run_ingestion() == 1
     _replica_emitting(monkeypatch, _removal(zone_id="zone-mailbox"))
     assert await _run_ingestion() == 1
+
+# --- re-review: claim commits with the event, URLs only with stored evidence ------
+
+
+@pytest.mark.asyncio
+async def test_failed_persist_releases_the_claim_for_the_other_replica(monkeypatch):
+    """If the claimant fails before the event is persisted, the claim rolls
+    back with it and the other replica still emits the removal."""
+    from app.services import events as event_service
+
+    real_persist = event_service.persist_event
+    calls = {"n": 0}
+
+    async def flaky_persist(session, event):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("replica A crashed before persisting")
+        return await real_persist(session, event)
+
+    monkeypatch.setattr(event_service, "persist_event", flaky_persist)
+    transition = _removal()
+    _replica_emitting(monkeypatch, transition)
+    assert await _run_ingestion() == 0
+    async with SessionLocal() as session:
+        assert await session.get(SceneDedupClaim, transition.dedup_key) is None
+        assert (await session.execute(select(Event))).scalars().first() is None
+
+    _replica_emitting(monkeypatch, _removal())
+    assert await _run_ingestion() == 1
+    async with SessionLocal() as session:
+        claim_row = await session.get(SceneDedupClaim, transition.dedup_key)
+        event = (await session.execute(select(Event))).scalars().one()
+    assert claim_row.event_id == event.id
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_claim_rollback_restores_the_previous_claim():
+    now = time.time()
+    key = f"package_removed:cam:{uuid.uuid4().hex}"
+    async with SessionLocal() as session:
+        assert await scene_dedup.claim(session, key, now - 120, 60.0, "evt-old") is True
+    async with SessionLocal() as session:
+        assert await scene_dedup.claim(session, key, now, 60.0, "evt-new", commit=False) is True
+        await session.rollback()
+    async with SessionLocal() as other:
+        row = await other.get(SceneDedupClaim, key)
+        assert row.event_id == "evt-old"
+        assert await scene_dedup.claim(other, key, now, 60.0, "evt-b") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::sqlalchemy.exc.SAWarning")
+async def test_failed_evidence_save_advertises_no_urls(client, monkeypatch):
+    """Evidence URLs are committed with the evidence rows, so a failed save
+    leaves an event (and incident) without dangling URLs."""
+    from app.services import events as event_service
+
+    def broken_evidence(**kwargs):
+        return EventEvidence(**{**kwargs, "label": None})
+
+    monkeypatch.setattr(event_service, "EventEvidence", broken_evidence)
+    headers = await auth_headers(client)
+    async with SessionLocal() as session:
+        await security_modes.set_mode(session, "away", None)
+    _replica_emitting(monkeypatch, _removal())
+    assert await _run_ingestion() == 1
+
+    async with SessionLocal() as session:
+        event = (await session.execute(select(Event))).scalars().one()
+        stored = list((await session.execute(select(EventEvidence))).scalars())
+    assert stored == []
+    for label in ("before", "after"):
+        assert "image_url" not in event.event_metadata["mailbox"][label]
+
+    r = await client.get("/api/v1/security/incidents", headers=headers)
+    theft = [i for i in r.json() if i["kind"] == "package_theft"]
+    assert len(theft) == 1
+    for label in ("before", "after"):
+        assert "image_url" not in (theft[0]["evidence"].get(label) or {})

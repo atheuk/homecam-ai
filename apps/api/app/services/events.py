@@ -69,27 +69,35 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
     return row
 
 
-async def _store_evidence(session: AsyncSession, event_id: str, images: dict[str, bytes]) -> None:
+async def _attach_evidence(session: AsyncSession, row: Event, images: dict[str, bytes]) -> None:
+    """Store evidence rows and advertise their URLs in one transaction.
+
+    The ``image_url`` metadata and the :class:`EventEvidence` rows commit
+    together, so an event never advertises evidence URLs that would 404. On
+    failure the caller rolls back and the event keeps its URL-free metadata.
+    """
     now = datetime.now(timezone.utc)
     for label, image in images.items():
-        session.add(EventEvidence(event_id=event_id, label=label, image=image, content_type="image/jpeg", created_at=now))
+        session.add(EventEvidence(event_id=row.id, label=label, image=image, content_type="image/jpeg", created_at=now))
+    row.event_metadata = _with_evidence_urls(row.id, dict(row.event_metadata or {}), images)
     await session.commit()
+    await session.refresh(row)
 
 
 def evidence_url(event_id: str, label: str) -> str:
     return f"/api/v1/events/{event_id}/evidence/{label}"
 
 
-def _with_evidence_urls(event: dict, images: dict[str, bytes]) -> dict:
-    metadata = dict(event.get("metadata") or {})
+def _with_evidence_urls(event_id: str, metadata: dict, images: dict[str, bytes]) -> dict:
+    metadata = dict(metadata)
     mailbox = dict(metadata.get("mailbox") or {})
     for label in images:
         entry = dict(mailbox.get(label) or {})
         entry["image"] = True
-        entry["image_url"] = evidence_url(event["id"], label)
+        entry["image_url"] = evidence_url(event_id, label)
         mailbox[label] = entry
     metadata["mailbox"] = mailbox
-    return {**event, "metadata": metadata}
+    return metadata
 
 
 async def create_and_broadcast_event(
@@ -113,21 +121,21 @@ async def create_and_broadcast_event(
     the same moment (see :func:`ai_pipeline.enrich_event`).
 
     ``evidence_images`` are labelled JPEGs (e.g. package ``before``/``after``
-    crops) stored as :class:`EventEvidence` rows. Each matching
-    ``metadata["mailbox"][label]`` entry gets an ``image_url`` pointing at
-    ``GET /api/v1/events/{id}/evidence/{label}``, which incident routing copies
-    into ``Incident.evidence``.
+    crops) stored as :class:`EventEvidence` rows. Only once those rows are
+    committed does each matching ``metadata["mailbox"][label]`` entry get an
+    ``image_url`` pointing at ``GET /api/v1/events/{id}/evidence/{label}``
+    (same transaction), which incident routing copies into
+    ``Incident.evidence``.
     """
-    if evidence_images:
-        event = _with_evidence_urls(event, evidence_images)
     row = await persist_event(session, event)
     if evidence_images:
         try:
-            await _store_evidence(session, row.id, evidence_images)
+            await _attach_evidence(session, row, evidence_images)
         except Exception:  # noqa: BLE001 - evidence must never break ingestion
-            logger.exception("evidence storage failed for %s", row.id)
+            logger.exception("evidence storage failed for %s", event["id"])
             await session.rollback()
             await session.refresh(row)
+        event = {**event, "metadata": dict(row.event_metadata or {})}
     # Snapshot the arming mode immediately, before the (potentially slow,
     # AI-backed) enrichment awaits below. Incident routing runs after
     # enrichment completes; without this snapshot, a mode change that
