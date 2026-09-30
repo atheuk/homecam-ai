@@ -208,6 +208,170 @@ async def test_get_unknown_incident_is_404(client):
 
 
 @pytest.mark.asyncio
+async def test_mode_disarmed_during_enrichment_does_not_retroactively_drop_the_incident(client, monkeypatch):
+    """Regression test: incident routing (``incidents.route_event``) runs
+    *after* the AI-enrichment awaits in
+    ``events.create_and_broadcast_event``. Without capturing the arming
+    mode before those awaits, a mode change that happens *during*
+    enrichment (e.g. the household disarms mid-analysis) would be applied
+    retroactively, silently dropping an incident for an event that was
+    actually detected while armed."""
+    from app.services import events as event_service
+    from app.services import security_modes
+
+    headers = await _headers(client, "incidents-race-disarm@example.com")
+    await _set_mode(client, headers, "away")
+
+    original_enrich = event_service.ai_pipeline.enrich_event
+
+    async def enrich_then_disarm(session, row, event, trigger_frame=None, frames=None):
+        result = await original_enrich(session, row, event, trigger_frame, frames)
+        # Simulate someone disarming the system while enrichment was
+        # in-flight, before incident routing actually runs.
+        await security_modes.set_mode(session, "disarmed", changed_by=None)
+        return result
+
+    monkeypatch.setattr(event_service.ai_pipeline, "enrich_event", enrich_then_disarm)
+
+    async with SessionLocal() as session:
+        await event_service.create_and_broadcast_event(
+            session,
+            {
+                "id": "evt-race-disarm-1",
+                "camera_id": "mock-front-door",
+                "camera_name": "Front Door",
+                "type": "person",
+                "priority": "high",
+                "source": "provider",
+                "start_time": datetime.now(timezone.utc).isoformat(),
+                "description": "Race: mode changed mid-enrichment",
+            },
+        )
+
+    incidents = (await client.get("/api/v1/security/incidents", headers=headers)).json()
+    assert len(incidents) == 1
+    assert incidents[0]["mode_at_creation"] == "away"
+
+
+@pytest.mark.asyncio
+async def test_mode_armed_during_enrichment_does_not_retroactively_raise_an_incident(client, monkeypatch):
+    """Symmetric case: an event detected while disarmed must not become
+    alert-worthy just because the system was armed while enrichment was
+    still in-flight."""
+    from app.services import events as event_service
+    from app.services import security_modes
+
+    headers = await _headers(client, "incidents-race-arm@example.com")
+    await _set_mode(client, headers, "disarmed")
+
+    original_enrich = event_service.ai_pipeline.enrich_event
+
+    async def enrich_then_arm(session, row, event, trigger_frame=None, frames=None):
+        result = await original_enrich(session, row, event, trigger_frame, frames)
+        await security_modes.set_mode(session, "away", changed_by=None)
+        return result
+
+    monkeypatch.setattr(event_service.ai_pipeline, "enrich_event", enrich_then_arm)
+
+    async with SessionLocal() as session:
+        await event_service.create_and_broadcast_event(
+            session,
+            {
+                "id": "evt-race-arm-1",
+                "camera_id": "mock-front-door",
+                "camera_name": "Front Door",
+                "type": "person",
+                "priority": "high",
+                "source": "provider",
+                "start_time": datetime.now(timezone.utc).isoformat(),
+                "description": "Race: mode changed mid-enrichment",
+            },
+        )
+
+    incidents = (await client.get("/api/v1/security/incidents", headers=headers)).json()
+    assert incidents == []
+
+    await _set_mode(client, headers, "disarmed")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_events_for_the_same_camera_zone_do_not_create_duplicate_incidents(client):
+    """Two events for the same camera/zone/kind routed truly concurrently
+    (not sequentially awaited) must still merge into a single incident --
+    the check-then-act dedup section (see ``incidents._lock_for`` /
+    ``incidents._acquire_route_lock``) must hold up under genuine
+    concurrency, not just sequential/non-interleaved calls."""
+    from app.services import events as event_service
+
+    headers = await _headers(client, "incidents-concurrent@example.com")
+    await _set_mode(client, headers, "away")
+
+    async def _fire(evt_id: str):
+        async with SessionLocal() as session:
+            await event_service.create_and_broadcast_event(
+                session,
+                {
+                    "id": evt_id,
+                    "camera_id": "mock-front-door",
+                    "camera_name": "Front Door",
+                    "type": "person",
+                    "priority": "high",
+                    "source": "provider",
+                    "start_time": datetime.now(timezone.utc).isoformat(),
+                    "description": "Concurrent race",
+                },
+            )
+
+    await asyncio.gather(_fire("evt-race-a"), _fire("evt-race-b"))
+
+    incidents = (await client.get("/api/v1/security/incidents", headers=headers)).json()
+    assert len(incidents) == 1
+    assert incidents[0]["event_count"] == 2
+
+    await _set_mode(client, headers, "disarmed")
+
+
+@pytest.mark.asyncio
+async def test_acquire_route_lock_takes_a_postgres_advisory_lock_only_on_postgres():
+    """Unit-level proof of the cross-replica guard's dialect branching:
+    a real two-Postgres-replica race can't be exercised in this (SQLite)
+    test environment, so this asserts the exact SQL is issued for a
+    Postgres-bound session and that nothing happens for SQLite (already
+    single-writer, see ``incidents._acquire_route_lock`` docstring)."""
+    from app.services import incidents as incident_service
+
+    class _FakeDialect:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _FakeBind:
+        def __init__(self, dialect_name: str) -> None:
+            self.dialect = _FakeDialect(dialect_name)
+
+    class _FakeSession:
+        def __init__(self, dialect_name: str) -> None:
+            self._bind = _FakeBind(dialect_name)
+            self.calls: list[tuple[str, dict]] = []
+
+        def get_bind(self):
+            return self._bind
+
+        async def execute(self, statement, params=None):
+            self.calls.append((str(statement), params))
+
+    pg_session = _FakeSession("postgresql")
+    await incident_service._acquire_route_lock(pg_session, "mock-front-door", "Driveway", "intrusion")
+    assert len(pg_session.calls) == 1
+    sql, params = pg_session.calls[0]
+    assert "pg_advisory_xact_lock" in sql
+    assert params == {"key": "mock-front-door|Driveway|intrusion"}
+
+    sqlite_session = _FakeSession("sqlite")
+    await incident_service._acquire_route_lock(sqlite_session, "mock-front-door", "Driveway", "intrusion")
+    assert sqlite_session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_escalation_bumps_level_for_stale_unacknowledged_incidents(client):
     from app.services import incidents as incident_service
 

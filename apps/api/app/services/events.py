@@ -19,6 +19,7 @@ from ..models.db import Event
 from . import activities as activity_service
 from . import ai_pipeline
 from . import incidents as incident_service
+from . import security_modes
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,17 @@ async def create_and_broadcast_event(
     the same moment (see :func:`ai_pipeline.enrich_event`).
     """
     row = await persist_event(session, event)
+    # Snapshot the arming mode immediately, before the (potentially slow,
+    # AI-backed) enrichment awaits below. Incident routing runs after
+    # enrichment completes; without this snapshot, a mode change that
+    # happens *during* enrichment (e.g. the household disarms mid-analysis)
+    # would be applied retroactively to an event that was actually detected
+    # under a different mode - silently dropping an incident that should
+    # have been raised, or (symmetrically) raising one that shouldn't have
+    # been. This is unrelated to ``row.type``/``row.zone``, which the AI
+    # pipeline is still allowed - and expected - to reclassify below; only
+    # the point-in-time human arming decision needs to be frozen.
+    mode_at_detection = await security_modes.get_mode(session)
     enriched = event
     try:
         enriched = await ai_pipeline.enrich_event(session, row, event, trigger_frame, frames)
@@ -106,7 +118,9 @@ async def create_and_broadcast_event(
         # (row.type/zone reflect the AI pipeline's final classification) and
         # strictly after the event itself is persisted/broadcast, so an
         # incident-routing failure can never suppress or delay the event.
-        await incident_service.route_event(session, row)
+        # ``mode`` is the mode captured above, before enrichment, not
+        # whatever is active now (see comment above).
+        await incident_service.route_event(session, row, mode=mode_at_detection)
     except Exception:  # noqa: BLE001 - incident routing must never break ingestion
         logger.exception("incident routing failed for %s", row.id)
         await session.rollback()

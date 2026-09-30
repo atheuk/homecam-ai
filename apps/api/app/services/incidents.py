@@ -26,7 +26,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import incident_summary
@@ -48,14 +48,17 @@ _CAMERA_HEALTH_SEVERITY = "high"
 
 # Grouping/dedup ("one incident, not N alerts") reads whether an eligible
 # open incident already exists, then either updates it or inserts a new
-# one - a classic check-then-act. The app runs as a single Python process
-# (one asyncio event loop, no multi-worker deployment - see README), so an
-# in-process lock keyed by the same (camera_id, zone, kind) tuple the
-# dedup query groups on is sufficient to fully serialize that
-# check-then-act section for a given camera/zone/kind and prevent two
-# concurrently-routed events (e.g. a webhook and the poll loop, or two
-# rapid webhooks) from each seeing "no open incident" and creating
-# duplicates instead of merging.
+# one - a classic check-then-act. ``_lock_for`` gives an in-process
+# ``asyncio.Lock`` keyed by the same (camera_id, zone, kind) tuple the
+# dedup query groups on, which fully serializes that check-then-act
+# section for two concurrently-routed events handled by the *same*
+# process (e.g. a webhook and the poll loop, or two rapid webhooks).
+#
+# That alone is not enough in production: the API can run as up to two
+# Container Apps replicas sharing only the database (see
+# infra/modules/api.bicep's ``scale.maxReplicas: 2``), and an in-process
+# lock cannot serialize anything across processes. ``_acquire_route_lock``
+# below closes that gap with a real, cross-replica database lock.
 _incident_locks: dict[tuple[str | None, str | None, str], asyncio.Lock] = {}
 
 
@@ -66,6 +69,33 @@ def _lock_for(camera_id: str | None, zone: str | None, kind: str) -> asyncio.Loc
         lock = asyncio.Lock()
         _incident_locks[key] = lock
     return lock
+
+
+async def _acquire_route_lock(session: AsyncSession, camera_id: str | None, zone: str | None, kind: str) -> None:
+    """Serialize the incident dedup check-then-act for one (camera_id,
+    zone, kind) key across concurrent *replicas* of this API, not just
+    within one process (see the module-level comment above ``_lock_for``).
+
+    On Postgres (the real deployment target) this takes a transactional
+    advisory lock keyed by the same tuple ``_lock_for`` uses: any other
+    transaction - on this replica or the other one - requesting the same
+    key blocks here until this transaction commits or rolls back, at which
+    point Postgres releases the lock automatically. No lock table, no
+    cleanup, and it composes correctly with the existing time-window merge
+    logic below (it is a pure mutual-exclusion lock, not a uniqueness
+    constraint, so multiple *sequential* open incidents for the same key
+    are still allowed once the merge window has passed).
+
+    SQLite (dev/tests only) has no equivalent and does not need one: a
+    single SQLite file already serializes every writer globally, so
+    ``_lock_for``'s in-process lock is already sufficient there and this
+    is a no-op.
+    """
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    key = f"{camera_id or ''}|{zone or ''}|{kind}"
+    await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key})
 
 
 async def _camera_name(session: AsyncSession, camera_id: str) -> str:
@@ -119,14 +149,23 @@ async def _open_incident_for(
     return incident
 
 
-async def route_event(session: AsyncSession, row: Event) -> Incident | None:
+async def route_event(session: AsyncSession, row: Event, *, mode: str | None = None) -> Incident | None:
     """Called once per newly created/enriched event. Returns the incident
     the event was routed into, or ``None`` if the event was not
     alert-worthy (disarmed, off-mode zone, or not an intrusion-eligible
-    event type) - the event itself is unaffected either way."""
+    event type) - the event itself is unaffected either way.
+
+    ``mode`` may be pre-captured by the caller and passed through so a
+    mode change that happens during a slow enrichment step between event
+    creation and this call cannot retroactively change whether an event
+    that occurred while armed (or disarmed) is treated as alert-worthy -
+    see ``events.py``'s ``create_and_broadcast_event``. When omitted, the
+    current mode is looked up fresh (used by direct/legacy callers with no
+    such gap)."""
     if row.type not in INTRUSION_EVENT_TYPES:
         return None
-    mode = await security_modes.get_mode(session)
+    if mode is None:
+        mode = await security_modes.get_mode(session)
     zone_kind = await _zone_kind(session, row.camera_id, row.zone)
     if not security_modes.is_alert_armed(mode, zone_kind):
         return None
@@ -137,6 +176,7 @@ async def route_event(session: AsyncSession, row: Event) -> Incident | None:
     severity = _SEVERITY_BY_EVENT_TYPE.get(row.type, "low")
 
     async with _lock_for(row.camera_id, row.zone, "intrusion"):
+        await _acquire_route_lock(session, row.camera_id, row.zone, "intrusion")
         existing = await _open_incident_for(session, row.camera_id, row.zone, "intrusion", now)
         if existing is not None:
             existing.event_ids = [*existing.event_ids, row.id]
@@ -222,6 +262,7 @@ async def raise_camera_health(
     now = datetime.now(timezone.utc)
     async with _lock_for(camera_id, None, kind):
         async with session_factory() as session:
+            await _acquire_route_lock(session, camera_id, None, kind)
             recent = await session.execute(
                 select(Incident)
                 .where(Incident.camera_id == camera_id, Incident.kind == kind)
@@ -274,6 +315,7 @@ async def resolve_camera_health(session_factory, camera_id: str, subtype: str) -
     now = datetime.now(timezone.utc)
     async with _lock_for(camera_id, None, kind):
         async with session_factory() as session:
+            await _acquire_route_lock(session, camera_id, None, kind)
             result = await session.execute(
                 select(Incident)
                 .where(

@@ -1,4 +1,5 @@
 import {describe,it,expect,vi,beforeEach} from "vitest";import {render,screen,fireEvent,waitFor} from "@testing-library/react";import SecurityPanel from "./SecurityPanel";
+import {MockEventSource} from "../test-setup";
 
 function jsonResponse(body:unknown,status=200){return new Response(JSON.stringify(body),{status});}
 
@@ -31,6 +32,7 @@ async function signIn(){
 
 describe("SecurityPanel",()=>{
   beforeEach(()=>{
+    MockEventSource.instances.length=0;
     mockFetch({
       "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"user@example.com",created_at:new Date().toISOString()}}),
       "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
@@ -117,5 +119,52 @@ describe("SecurityPanel",()=>{
     await signIn();
     expect(await screen.findByText(/need attention/i)).toBeInTheDocument();
     expect(screen.getByText(/Front Door \(Camera offline\)/)).toBeInTheDocument();
+  });
+
+  it("refreshes the incident list live when an SSE incident.created event arrives, with no reload or manual action", async()=>{
+    let incidentsCallCount=0;
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>{
+        incidentsCallCount+=1;
+        // The second (and later) fetch, triggered by the SSE push, sees a
+        // brand-new incident the first load never returned.
+        return jsonResponse(incidentsCallCount===1?[]:[baseIncident]);
+      },
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    await signIn();
+    expect(screen.queryByText("Motion detected at Driveway")).not.toBeInTheDocument();
+    expect(screen.getByText("0 open")).toBeInTheDocument();
+
+    const source=MockEventSource.instances.at(-1);
+    expect(source).toBeDefined();
+    source!.dispatch("incident.created",{...baseIncident});
+
+    expect(await screen.findByText("Motion detected at Driveway")).toBeInTheDocument();
+    await waitFor(()=>expect(screen.getByText("1 open")).toBeInTheDocument());
+  });
+
+  it("refreshes on incident.updated and incident.escalated SSE events too", async()=>{
+    let incidentsCallCount=0;
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>{
+        incidentsCallCount+=1;
+        return jsonResponse(incidentsCallCount<3?[baseIncident]:[{...baseIncident,escalation_level:1}]);
+      },
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    await signIn();
+    const source=MockEventSource.instances.at(-1);
+    expect(source).toBeDefined();
+
+    source!.dispatch("incident.updated",{...baseIncident});
+    await waitFor(()=>expect(incidentsCallCount).toBeGreaterThanOrEqual(2));
+
+    source!.dispatch("incident.escalated",{...baseIncident,escalation_level:1});
+    await screen.findByText("escalated ×1");
   });
 });

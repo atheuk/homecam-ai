@@ -146,18 +146,46 @@ reading for that camera.
 
 Incident dedup/grouping and login lockout accounting are both
 check-then-act (read a count/existing row, decide, write it back) across
-`await` points, which a single Python process's cooperative event loop can
-interleave between two near-simultaneous requests for the *same* key. Both
-are serialized with an in-process `asyncio.Lock` keyed by the same tuple
-the dedup/lockout logic groups on — `(camera_id, zone, kind)` for
-intrusion incidents, `(camera_id, kind)` for camera-health incidents, and
-the normalized email for login attempts — so concurrent requests for
-*different* keys are unaffected, while requests for the *same* key are
-fully serialized. This assumes the current single-process/single-worker
-deployment (no `--workers` flag, no multi-process/multi-machine
-deployment); a horizontally-scaled deployment would need a database- or
-cache-backed lock (e.g. `SELECT ... FOR UPDATE` on a Postgres backend, or
-Redis) instead.
+`await` points, which a single Python process's cooperative event loop --
+or two replicas of the API sharing one Postgres database, see
+`infra/modules/api.bicep`'s `scale.maxReplicas: 2` -- can interleave
+between two near-simultaneous requests for the *same* key. Each guard now
+has two layers:
+
+1. **In-process `asyncio.Lock`** keyed by the same tuple the dedup/lockout
+   logic groups on -- `(camera_id, zone, kind)` for intrusion incidents,
+   `(camera_id, kind)` for camera-health incidents, and the normalized
+   email for login attempts. This serializes same-process concurrent
+   requests for the *same* key with no database round-trip, and is a fast
+   path only -- it does nothing across replicas.
+2. **A database-level guarantee that holds even across replicas:**
+   - Incident routing/grouping (`incidents._acquire_route_lock`) takes a
+     Postgres transactional advisory lock
+     (`pg_advisory_xact_lock(hashtextextended(key, 0))`) keyed on the same
+     tuple, held only for the duration of the routing transaction and
+     auto-released at commit/rollback. This is a pure mutual-exclusion
+     lock, not a uniqueness constraint, so it composes correctly with the
+     existing time-window based incident merge/reopen logic (two
+     sequential incidents for the same camera/zone/kind, once the merge
+     window elapses, are legitimate and must not be blocked). On SQLite
+     (local dev/tests) this is a no-op: a single SQLite file already
+     serializes all writers globally, so the in-process lock above is
+     already sufficient there.
+   - The login-lockout counter (`auth_routes._register_failed_attempt`)
+     uses a single atomic `UPDATE ... SET failed_attempts =
+     failed_attempts + 1, locked_until = CASE ... RETURNING` statement
+     instead of a Python read-modify-write of ORM attributes. This is
+     atomic per-row on both SQLite and Postgres (the engine evaluates the
+     `SET` expression against the current row value as one statement), so
+     no dialect branching is needed here, and the guarantee holds
+     regardless of process count.
+
+Concurrent requests for *different* keys remain unaffected by either
+layer. `apps/api/tests/test_incidents.py` and
+`apps/api/tests/test_auth_hardening.py` include regression tests that
+exercise the database-layer guarantee directly (bypassing the in-process
+lock via separate sessions/dialect stubs), not just the in-process
+fast path.
 
 ## Known accepted risks
 

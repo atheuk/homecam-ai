@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -245,6 +245,34 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
     if (token) loadIncidents(token, incidentFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidentFilter]);
+
+  // `incidentFilter` is read from a ref (not a hook dep) so an open/all
+  // toggle doesn't tear down and reopen the SSE connection.
+  const incidentFilterRef = useRef(incidentFilter);
+  useEffect(() => {
+    incidentFilterRef.current = incidentFilter;
+  }, [incidentFilter]);
+
+  // Live incident updates: without this, `openCount` and the incident list
+  // only reflected reality on page load/reload (see review finding #2 -
+  // `incident.created`/`updated`/`escalated` never refreshed the panel).
+  // This reuses the same `/api/v1/ws` bus Dashboard.tsx already subscribes
+  // to for `event.created`; incident mutations are deterministic writes
+  // (see IncidentCard's docstring), so re-fetching on any of these three
+  // events is always safe, never AI-triggered.
+  useEffect(() => {
+    if (!token) return;
+    const source = new EventSource(`${API}/api/v1/ws`);
+    const refresh = () => {
+      loadIncidents(token, incidentFilterRef.current);
+      loadAuditLog(token);
+    };
+    source.addEventListener("incident.created", refresh);
+    source.addEventListener("incident.updated", refresh);
+    source.addEventListener("incident.escalated", refresh);
+    return () => source.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();

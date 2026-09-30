@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -32,15 +32,18 @@ from ..services import audit as audit_service
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 # The failed-attempt counter / lockout threshold is a classic
-# check-then-act (read ``failed_attempts``, decide, write it back) spread
-# across two ``await``s (the SELECT and the COMMIT), which is enough for
-# two concurrent login attempts for the *same* account to interleave and
-# both read the same pre-increment count - silently losing one increment
-# and letting the attacker get one extra guess past the configured
-# threshold. The app runs as a single Python process (one event loop, no
-# multi-worker deployment - see README), so a per-email in-process lock
-# fully serializes the accounting for a given account without affecting
-# concurrent logins for *other* accounts.
+# check-then-act (read ``failed_attempts``, decide, write it back). An
+# in-process, per-email ``asyncio.Lock`` fully serializes that for two
+# concurrent attempts handled by the *same* process, and is kept below as
+# a cheap fast-path that avoids DB contention in the common case. It is
+# not sufficient on its own: the API can run as up to two Container Apps
+# replicas sharing only the database (see infra/modules/api.bicep's
+# ``scale.maxReplicas: 2``), and a lock in one replica's memory does
+# nothing to serialize an attempt handled by the other. The actual safety
+# guarantee comes from ``_register_failed_attempt`` below, which performs
+# the whole increment-and-maybe-lock decision as a single atomic ``UPDATE``
+# evaluated by the database against the current row - safe regardless of
+# which replica issues it or whether the in-process lock is even held.
 _login_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -50,6 +53,44 @@ def _lock_for_email(email: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _login_locks[email] = lock
     return lock
+
+
+async def _register_failed_attempt(session: AsyncSession, user_id: str, now: datetime) -> tuple[int, datetime | None]:
+    """Atomically increment ``failed_attempts`` and, if the new count
+    reaches the configured threshold, set ``locked_until`` - all in one
+    ``UPDATE ... RETURNING`` statement.
+
+    Doing this as a single statement (rather than reading the row in
+    Python, deciding, then writing it back) matters because two concurrent
+    failed attempts for the *same* account can be handled by two different
+    replicas of this API sharing only the database. The database evaluates
+    ``failed_attempts + 1`` against the current, row-locked value itself,
+    so concurrent UPDATEs for the same ``user_id`` are always serialized by
+    the database's own row-level locking - neither can read a stale count
+    or silently lose the other's increment, on SQLite or Postgres alike.
+
+    Returns the post-increment ``(failed_attempts, locked_until)``.
+    """
+    new_locked_until = now + timedelta(minutes=settings.auth_lockout_minutes)
+    threshold = settings.auth_max_failed_attempts
+    stmt = (
+        update(User)
+        .where(User.id == user_id)
+        .values(
+            failed_attempts=User.failed_attempts + 1,
+            locked_until=case(
+                (User.failed_attempts + 1 >= threshold, new_locked_until),
+                else_=User.locked_until,
+            ),
+        )
+        .returning(User.failed_attempts, User.locked_until)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    await session.commit()
+    if row is None:
+        return (0, None)
+    return (row[0], row[1])
 
 
 def _is_locked(user: User, now: datetime) -> bool:
@@ -95,14 +136,13 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
 
         if user is None or not verify_password(payload.password, user.password_hash):
             if user is not None:
-                user.failed_attempts += 1
-                if user.failed_attempts >= settings.auth_max_failed_attempts:
-                    user.locked_until = now + timedelta(minutes=settings.auth_lockout_minutes)
+                new_failed_attempts, new_locked_until = await _register_failed_attempt(session, user.id, now)
+                if new_locked_until is not None and new_failed_attempts >= settings.auth_max_failed_attempts:
                     await audit_service.record(
                         session, "auth.account_locked", actor_user_id=user.id, target_type="user", target_id=user.id,
-                        details={"failed_attempts": user.failed_attempts},
+                        details={"failed_attempts": new_failed_attempts},
                     )
-                await session.commit()
+                    await session.commit()
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         user.failed_attempts = 0
