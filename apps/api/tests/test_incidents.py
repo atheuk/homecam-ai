@@ -15,7 +15,6 @@ from sqlalchemy import delete
 
 from app.db import SessionLocal
 from app.models.db import CameraZone, Incident
-from app.services import security_modes
 
 
 async def _headers(client, email: str) -> dict[str, str]:

@@ -46,7 +46,7 @@ async def test_set_mode_persists_and_is_audited(client):
 
 @pytest.mark.asyncio
 async def test_invalid_mode_is_rejected(client):
-    register = await client.post("/api/v1/auth/register", json={"email": "modes3@example.com", "password": "supersecret1"})
+    await client.post("/api/v1/auth/register", json={"email": "modes3@example.com", "password": "supersecret1"})
     login = await client.post("/api/v1/auth/login", json={"email": "modes3@example.com", "password": "supersecret1"})
     token = login.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
