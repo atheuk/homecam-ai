@@ -21,9 +21,10 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..db import get_db
-from ..models.db import AIAnalysis, Event, EventPhoto, Person
+from ..models.db import AIAnalysis, Event, EventEvidence, EventPhoto, Person, User
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from ..providers.capabilities import AUDIO_DETECTION
 from ..schemas import (
@@ -365,12 +366,14 @@ async def search(
     until: datetime | None = None,
     limit: int = 20,
     session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
 ):
     """Natural-language event search ("blue van in the driveway last night").
 
-    Public for the same reason ``/events`` is: it only ever returns events
-    the dashboard already shows. Queries asking *who* someone is are
-    refused or stripped first - see :mod:`app.ai.query_moderation`.
+    Requires sign-in: results carry AI descriptions, priority reasons and
+    loitering/package-theft signals, the same class of data the incident
+    endpoints protect. Queries asking *who* someone is are refused or
+    stripped first - see :mod:`app.ai.query_moderation`.
     """
     if not settings.search_enabled:
         raise HTTPException(status_code=503, detail="Search is disabled")
@@ -404,8 +407,13 @@ async def digest(
     date: str | None = None,
     refresh: bool = False,
     session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
 ):
-    """The day-in-review digest. Defaults to today (UTC)."""
+    """The day-in-review digest. Defaults to today (UTC).
+
+    Requires sign-in, like the incident endpoints: the digest exposes
+    incident ids and summaries.
+    """
     if not settings.digest_enabled:
         raise HTTPException(status_code=503, detail="Digest is disabled")
     if date:
@@ -437,6 +445,32 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
             # Photos are immutable once captured, so let the browser keep them.
             "Cache-Control": "public, max-age=86400",
             "Content-Disposition": f'inline; filename="{event_id}.jpg"',
+        },
+    )
+
+
+@router.get("/events/{event_id}/evidence/{label}")
+async def event_evidence(
+    event_id: str,
+    label: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """A stored labelled evidence image for an event (e.g. package
+    ``before``/``after`` crops referenced by ``Incident.evidence``).
+
+    Authenticated because it is incident evidence, and served from the
+    database so any replica can return it. See ``app.models.db.EventEvidence``.
+    """
+    row = await session.get(EventEvidence, (event_id, label))
+    if row is None:
+        raise HTTPException(404, "No evidence stored for this event and label")
+    return Response(
+        content=row.image,
+        media_type=row.content_type or "image/jpeg",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "Content-Disposition": f'inline; filename="{event_id}-{label}.jpg"',
         },
     )
 

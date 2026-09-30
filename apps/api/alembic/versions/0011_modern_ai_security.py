@@ -1,8 +1,9 @@
 """Modern AI security features: zone dwell, loitering presence, digests, deterrence
 
 Adds two nullable columns (``camera_zones.dwell_seconds`` and
-``incidents.evidence``) and three new tables (``zone_presence``,
-``daily_digests``, ``deterrence_actions``). Nothing existing is modified or
+``incidents.evidence``) and five new tables (``zone_presence``,
+``daily_digests``, ``deterrence_actions``, ``scene_dedup_claims`` and
+``event_evidence``). Nothing existing is modified or
 dropped, and the new columns are nullable so existing zones keep falling
 back to the configured default dwell window and existing incidents keep
 their current shape.
@@ -58,8 +59,27 @@ def upgrade():
     op.create_index("ix_deterrence_actions_camera_id", "deterrence_actions", ["camera_id"])
     op.create_index("ix_deterrence_actions_status", "deterrence_actions", ["status"])
 
+    op.create_table(
+        "scene_dedup_claims",
+        sa.Column("key", sa.String(200), primary_key=True),
+        sa.Column("last_at", sa.Float, nullable=False),
+        sa.Column("event_id", sa.String(64), nullable=True),
+    )
+
+    op.create_table(
+        "event_evidence",
+        sa.Column("event_id", sa.String(64), sa.ForeignKey("events.id"), primary_key=True),
+        sa.Column("label", sa.String(16), primary_key=True),
+        sa.Column("image", sa.LargeBinary, nullable=False),
+        sa.Column("content_type", sa.String(64), nullable=False, server_default="image/jpeg"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    )
+
 
 def downgrade():
+    op.drop_table("event_evidence")
+    op.drop_table("scene_dedup_claims")
+
     op.drop_index("ix_deterrence_actions_status", table_name="deterrence_actions")
     op.drop_index("ix_deterrence_actions_camera_id", table_name="deterrence_actions")
     op.drop_table("deterrence_actions")

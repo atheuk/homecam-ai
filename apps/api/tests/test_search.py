@@ -13,6 +13,7 @@ from app.ai.query_moderation import moderate_query
 from app.db import SessionLocal
 from app.models.db import Event
 from app.services import search
+from _auth import auth_headers
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +98,63 @@ def test_empty_query_is_refused():
     assert moderate_query("   ").refused
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "is that a child",
+        "is it a kid or an adult",
+        "child or adult at the door",
+        "was he a teenager",
+        "is she elderly",
+        "was he old",
+        "how young was the visitor",
+        "is that person a senior",
+    ],
+)
+def test_age_inference_queries_are_refused(query):
+    result = moderate_query(query)
+    assert result.refused, query
+    assert "age" in result.categories
+    assert result.query == ""
+
+
+@pytest.mark.parametrize(
+    "query,removed",
+    [
+        ("children in the garden", "children"),
+        ("child by the gate", "child"),
+        ("kid on a bike in the driveway", "kid"),
+        ("kids in the garden", "kids"),
+        ("adult at the front door", "adult"),
+        ("older adult on the porch", "older"),
+        ("elderly visitor at the front door", "elderly"),
+        ("teen on the driveway", "teen"),
+        ("teenagers near the gate", "teenagers"),
+        ("senior at the door", "senior"),
+        ("young person near the car", "young"),
+        ("old man by the gate", "old"),
+        ("old woman at the door", "old"),
+        ("a 40 year old at the door", "40"),
+    ],
+)
+def test_age_terms_are_stripped_from_search(query, removed):
+    result = moderate_query(query)
+    assert "age" in result.categories, query
+    assert removed not in result.query.lower().split(), result.query
+    # The descriptive, non-demographic part of the query survives.
+    remaining = result.query.lower()
+    assert any(word in remaining for word in ("garden", "gate", "driveway", "door", "porch", "car")), result.query
+
+
+@pytest.mark.parametrize("query", ["old shed by the fence", "young tree in the garden", "older gate on the left"])
+def test_age_adjectives_about_objects_are_left_alone(query):
+    """young/old only strip when they describe a person."""
+    result = moderate_query(query)
+    assert not result.refused
+    assert "age" not in result.categories
+    assert result.query == query
+
+
 @pytest.mark.asyncio
 async def test_search_service_returns_no_hits_for_refused_query():
     await _seed(description="person at the front door")
@@ -166,8 +224,9 @@ async def test_search_matches_on_tags_and_zone():
 
 @pytest.mark.asyncio
 async def test_search_endpoint_returns_results(client):
+    headers = await auth_headers(client)
     await client.post("/api/v1/mock/events", json={"camera_id": "mock-front-door", "type": "person"})
-    r = await client.get("/api/v1/search", params={"q": "person"})
+    r = await client.get("/api/v1/search", params={"q": "person"}, headers=headers)
     assert r.status_code == 200
     body = r.json()
     assert body["refused"] is False
@@ -177,7 +236,8 @@ async def test_search_endpoint_returns_results(client):
 
 @pytest.mark.asyncio
 async def test_search_endpoint_refuses_identity_query(client):
-    r = await client.get("/api/v1/search", params={"q": "who is the person at my door"})
+    headers = await auth_headers(client)
+    r = await client.get("/api/v1/search", params={"q": "who is the person at my door"}, headers=headers)
     assert r.status_code == 200
     body = r.json()
     assert body["refused"] is True

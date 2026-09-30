@@ -7,6 +7,7 @@ from sqlalchemy import delete, select
 from app.db import SessionLocal, init_db
 from app.models.db import DailyDigest, Event, Incident
 from app.services import digest
+from _auth import auth_headers
 
 
 @pytest.fixture(autouse=True)
@@ -148,9 +149,10 @@ async def test_provider_failure_falls_back_to_template(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_digest_endpoint(client):
+    headers = await auth_headers(client)
     await client.post("/api/v1/mock/events", json={"camera_id": "mock-front-door", "type": "person"})
     today = datetime.now(timezone.utc).date().isoformat()
-    r = await client.get("/api/v1/digest", params={"date": today, "refresh": True})
+    r = await client.get("/api/v1/digest", params={"date": today, "refresh": True}, headers=headers)
     assert r.status_code == 200
     body = r.json()
     assert body["date"] == today
@@ -160,8 +162,18 @@ async def test_digest_endpoint(client):
 
 @pytest.mark.asyncio
 async def test_digest_endpoint_rejects_bad_date(client):
-    r = await client.get("/api/v1/digest", params={"date": "not-a-date"})
+    headers = await auth_headers(client)
+    r = await client.get("/api/v1/digest", params={"date": "not-a-date"}, headers=headers)
     assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_digest_endpoint_requires_auth(client):
+    """The digest exposes incident ids and summaries, so it is never public."""
+    r = await client.get("/api/v1/digest")
+    assert r.status_code == 401
+    r = await client.get("/api/v1/digest", headers={"Authorization": "Bearer not-a-real-token"})
+    assert r.status_code == 401
 
 
 @pytest.mark.asyncio

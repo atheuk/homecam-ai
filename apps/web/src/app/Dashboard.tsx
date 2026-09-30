@@ -5,7 +5,6 @@ import {useRouter,useSearchParams} from "next/navigation";
 import AdminPanel from "./AdminPanel";
 import EventsPanel from "./EventsPanel";
 import SecurityPanel from "./SecurityPanel";
-import {DigestCard,SearchCard} from "./Insights";
 import {HlsVideo} from "./Player";
 import {EventCard,PeoplePanel,type EventItem,type Person} from "./People";
 
@@ -256,8 +255,6 @@ export default function Dashboard(){
         {error&&<div className="inline-error" role="alert"><span>{error}</span><button type="button" onClick={load}>Retry</button></div>}
         {tab==="Overview"&&<div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
           <CameraGrid cameras={activeCameras}/>
-          <SearchCard/>
-          <DigestCard/>
           <section className="panel activity-panel">
             <div className="panel-heading"><div><span className="eyebrow">AT A GLANCE</span><h3>Recent activity</h3></div>
               <button type="button" className="text-button" onClick={()=>selectTab("Events")}>View all</button>

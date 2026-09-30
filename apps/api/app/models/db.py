@@ -180,6 +180,41 @@ class ZonePresence(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class SceneDedupClaim(Base):
+    """Cross-replica "emit at most once per window" guard for scene events.
+
+    Both API replicas run ingestion against the same cameras, so an
+    in-process "last emitted at" timestamp lets each replica emit its own
+    copy of the same package removal. One row per dedup key (for example
+    ``package_removed:<camera>:<zone>``) is claimed with a conditional
+    UPDATE/INSERT, which the database serializes - see
+    :mod:`app.services.scene_dedup`. ``last_at`` is epoch seconds so the
+    window comparison is plain arithmetic on SQLite and Postgres alike.
+    """
+
+    __tablename__ = "scene_dedup_claims"
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    last_at: Mapped[float] = mapped_column(Float)
+    event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class EventEvidence(Base):
+    """Labelled evidence images for an event (e.g. package before/after).
+
+    Stored in the database for the same reason as :class:`EventPhoto`: a
+    replica's filesystem is ephemeral, and incident evidence must be
+    retrievable from whichever replica serves the request, long after the
+    replica that captured it is gone.
+    """
+
+    __tablename__ = "event_evidence"
+    event_id: Mapped[str] = mapped_column(String(64), ForeignKey("events.id"), primary_key=True)
+    label: Mapped[str] = mapped_column(String(16), primary_key=True)
+    image: Mapped[bytes] = mapped_column(LargeBinary)
+    content_type: Mapped[str] = mapped_column(String(64), default="image/jpeg")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class DailyDigest(Base):
     """One generated day-in-review summary, keyed by its local date.
 

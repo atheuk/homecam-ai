@@ -88,6 +88,14 @@ class SceneTransition:
     priority: str = "normal"
     frames: list[bytes] | None = None
     track_id: str | None = None
+    # Labelled JPEG evidence (e.g. {"before": ..., "after": ...}) to persist
+    # as retrievable EventEvidence rows alongside the event.
+    evidence_images: dict[str, bytes] | None = None
+    # Cross-replica dedup: ingestion must win a DB claim on this key
+    # (app.services.scene_dedup) before emitting the event.
+    dedup_key: str | None = None
+    dedup_window_seconds: float = 0.0
+    observed_at: float | None = None
 
 
 @dataclass
@@ -981,6 +989,7 @@ def _package_removed_result(
     data["last_removal_at"] = now
     data["last_outcome"] = "package_removed"
     crops = context["crops"]
+    evidence_images = {label: crops[label] for label in ("before", "after") if crops.get(label)}
     evidence = {
         "visit_id": context["visit_id"],
         "zone": zone.name,
@@ -988,8 +997,10 @@ def _package_removed_result(
         "item_removed": "yes",
         "source": "local",
         "evidence": "package detected in the zone before the visit and absent after it",
-        "before": {"package_detected": True, "image": bool(crops.get("before"))},
-        "after": {"package_detected": False, "image": bool(crops.get("after"))},
+        # image_url is filled in once the crops are stored as EventEvidence
+        # rows (app.services.events), so it points at a retrievable image.
+        "before": {"package_detected": True, "image": "before" in evidence_images},
+        "after": {"package_detected": False, "image": "after" in evidence_images},
     }
     return SceneTransition(
         camera_id=scene.camera_id,
@@ -1010,6 +1021,10 @@ def _package_removed_result(
         },
         zone=zone.name,
         frames=context["frames"] or None,
+        evidence_images=evidence_images or None,
+        dedup_key=f"package_removed:{scene.camera_id}:{record.zone_id}",
+        dedup_window_seconds=float(settings.mailbox_dedupe_seconds),
+        observed_at=now,
     )
 
 

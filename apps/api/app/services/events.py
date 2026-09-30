@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.db import Event
+from ..models.db import Event, EventEvidence
 from . import activities as activity_service
 from . import ai_pipeline
 from . import incidents as incident_service
@@ -69,11 +69,35 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
     return row
 
 
+async def _store_evidence(session: AsyncSession, event_id: str, images: dict[str, bytes]) -> None:
+    now = datetime.now(timezone.utc)
+    for label, image in images.items():
+        session.add(EventEvidence(event_id=event_id, label=label, image=image, content_type="image/jpeg", created_at=now))
+    await session.commit()
+
+
+def evidence_url(event_id: str, label: str) -> str:
+    return f"/api/v1/events/{event_id}/evidence/{label}"
+
+
+def _with_evidence_urls(event: dict, images: dict[str, bytes]) -> dict:
+    metadata = dict(event.get("metadata") or {})
+    mailbox = dict(metadata.get("mailbox") or {})
+    for label in images:
+        entry = dict(mailbox.get(label) or {})
+        entry["image"] = True
+        entry["image_url"] = evidence_url(event["id"], label)
+        mailbox[label] = entry
+    metadata["mailbox"] = mailbox
+    return {**event, "metadata": metadata}
+
+
 async def create_and_broadcast_event(
     session: AsyncSession,
     event: dict,
     trigger_frame: bytes | None = None,
     frames: list[bytes] | None = None,
+    evidence_images: dict[str, bytes] | None = None,
 ) -> Event:
     """Run the SPEC section 12 ingestion pipeline for one normalized event.
 
@@ -87,8 +111,23 @@ async def create_and_broadcast_event(
     second race for a scarce NVR session just to look at the same moment.
     ``frames`` is an already-sampled set shared by several events raised from
     the same moment (see :func:`ai_pipeline.enrich_event`).
+
+    ``evidence_images`` are labelled JPEGs (e.g. package ``before``/``after``
+    crops) stored as :class:`EventEvidence` rows. Each matching
+    ``metadata["mailbox"][label]`` entry gets an ``image_url`` pointing at
+    ``GET /api/v1/events/{id}/evidence/{label}``, which incident routing copies
+    into ``Incident.evidence``.
     """
+    if evidence_images:
+        event = _with_evidence_urls(event, evidence_images)
     row = await persist_event(session, event)
+    if evidence_images:
+        try:
+            await _store_evidence(session, row.id, evidence_images)
+        except Exception:  # noqa: BLE001 - evidence must never break ingestion
+            logger.exception("evidence storage failed for %s", row.id)
+            await session.rollback()
+            await session.refresh(row)
     # Snapshot the arming mode immediately, before the (potentially slow,
     # AI-backed) enrichment awaits below. Incident routing runs after
     # enrichment completes; without this snapshot, a mode change that

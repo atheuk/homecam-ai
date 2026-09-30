@@ -46,7 +46,7 @@ from ..ai import camera_health
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from . import ai_pipeline, scene_state
+from . import ai_pipeline, scene_dedup, scene_state
 from . import events as event_service
 from . import incidents as incident_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
@@ -277,8 +277,25 @@ async def _emit_scene_transitions(
         return 0
     for transition in transitions:
         frames = transition.frames or stream_frames
+        event_id = "evt-" + uuid.uuid4().hex[:16]
+        if transition.dedup_key:
+            try:
+                async with session_factory() as session:
+                    won = await scene_dedup.claim(
+                        session,
+                        transition.dedup_key,
+                        transition.observed_at if transition.observed_at is not None else time.time(),
+                        transition.dedup_window_seconds,
+                        event_id,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("scene dedup claim failed for %s", camera_id)
+                continue
+            if not won:
+                logger.info("scene transition %s: %s deduplicated across replicas", camera_id, transition.transition)
+                continue
         event = {
-            "id": "evt-" + uuid.uuid4().hex[:16],
+            "id": event_id,
             "camera_id": camera_id,
             "camera_name": camera_name,
             "type": transition.event_type,
@@ -293,7 +310,11 @@ async def _emit_scene_transitions(
         try:
             async with session_factory() as session:
                 row = await event_service.create_and_broadcast_event(
-                    session, event, trigger_frame=(frames or [image])[0], frames=frames
+                    session,
+                    event,
+                    trigger_frame=(frames or [image])[0],
+                    frames=frames,
+                    evidence_images=transition.evidence_images,
                 )
                 await scene_state.note_event(session, transition, row.id)
         except Exception:  # noqa: BLE001

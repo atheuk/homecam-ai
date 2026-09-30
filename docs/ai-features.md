@@ -28,6 +28,12 @@ These are product guarantees. Each has tests that assert the refusal.
 | **No licence-plate recognition** in this batch. | Not implemented; vehicle events carry no plate text. |
 
 Search queries that ask for identity are refused with a plain-language message.
+Age questions are refused the same way, including "is that a child?",
+"kid or adult?" and "is she elderly?". Age descriptors used in passing are
+stripped: child/children, kid(s), teen/teenager, adult, senior, elderly,
+"N year old", and young/old/older when they describe a person ("old man",
+"young woman", "older adult"). The same words describing objects are left
+alone ("old shed").
 Queries that merely *mention* a protected attribute in passing have that term
 stripped and are answered with a notice, so a household is never silently given
 results for a question the system did not actually answer.
@@ -104,6 +110,21 @@ The existing scene-state logic already reports a package appearing in and
 disappearing from a mailbox/porch zone. When a removal happens while the
 household is armed **away** or **night**, it is escalated to a `package_theft`
 incident carrying the before/after evidence the scene state already captured.
+
+The before/after JPEG crops are stored in the database as `event_evidence` rows
+(not on a replica's ephemeral filesystem). The event's
+`metadata.mailbox.before/after` and the incident's `evidence.before/after` each
+carry an `image_url` (`/api/v1/events/{event_id}/evidence/{before|after}`)
+that returns the image to an authenticated user.
+
+Both API replicas run ingestion with their own in-process scene caches, so both
+can observe the same removal. Before a removal event is emitted, the replica
+must win a database claim on `package_removed:<camera>:<zone>` in
+`scene_dedup_claims` (`app/services/scene_dedup.py`). The claim is a
+conditional `UPDATE` that only succeeds once the previous claim is older than
+`mailbox_dedupe_seconds`, falling back to a primary-key `INSERT`. Exactly one
+replica emits the event, so the grouped incident's `event_count` is not
+inflated by duplicates.
 
 While **home** or **disarmed**, a removal is recorded as an ordinary event: you
 collecting your own parcel is not a theft.
@@ -222,5 +243,18 @@ or dispatch action and requesting one is a `422`.
 ## Migration
 
 `0011_modern_ai_security` adds `camera_zones.dwell_seconds`,
-`incidents.evidence`, and the `zone_presence`, `daily_digests` and
-`deterrence_actions` tables.
+`incidents.evidence`, and the `zone_presence`, `daily_digests`,
+`deterrence_actions`, `scene_dedup_claims` and `event_evidence` tables.
+
+## Authentication
+
+Every endpoint added in this batch requires an authenticated session
+(`Authorization: Bearer <token>` or the session cookie): `/api/v1/search`,
+`/api/v1/digest`, `/api/v1/events/{id}/evidence/{label}` and all
+`/api/v1/security/deterrence/*` routes. They return `401` otherwise. Search
+results, digests and evidence expose event summaries, incident IDs and images,
+so none of them is public. The dashboard therefore shows the search box and
+Digest card inside the signed-in **Security** tab, not on the public Overview.
+Notification priority and the unusual-activity baseline have no endpoints of
+their own. They are the `notification_priority`/`priority_reasons` fields and
+the `unusual_activity` tag on the existing `/api/v1/events` payload.

@@ -40,6 +40,10 @@ export type DigestResponse={
   };
 };
 
+function authHeaders(token:string):Record<string,string>{
+  return {Authorization:"Bearer "+token};
+}
+
 function localTime(value:string){
   const parsed=new Date(value);
   if(Number.isNaN(parsed.getTime())) return value;
@@ -48,7 +52,7 @@ function localTime(value:string){
 
 /** Natural-language event search. Identity questions are refused by the API,
  * and the refusal is shown to the household verbatim rather than hidden. */
-export function SearchCard(){
+export function SearchCard({token}:{token:string}){
   const [query,setQuery]=useState("");
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
@@ -61,7 +65,7 @@ export function SearchCard(){
     setBusy(true);
     setError("");
     try{
-      const r=await fetch(`${API}/api/v1/search?q=${encodeURIComponent(trimmed)}`);
+      const r=await fetch(`${API}/api/v1/search?q=${encodeURIComponent(trimmed)}`,{headers:authHeaders(token)});
       if(r.status===503){
         setResponse(null);
         setError("Search is turned off on this system.");
@@ -106,14 +110,14 @@ export function SearchCard(){
 }
 
 /** The day-in-review digest (counts, notable items, unusual activity). */
-export function DigestCard(){
+export function DigestCard({token}:{token:string}){
   const [digest,setDigest]=useState<DigestResponse|null>(null);
   const [state,setState]=useState<"loading"|"ready"|"error"|"off">("loading");
 
   const load=useCallback(async(refresh:boolean)=>{
     setState("loading");
     try{
-      const r=await fetch(`${API}/api/v1/digest${refresh?"?refresh=true":""}`);
+      const r=await fetch(`${API}/api/v1/digest${refresh?"?refresh=true":""}`,{headers:authHeaders(token)});
       if(r.status===503){setState("off");return;}
       if(!r.ok) throw new Error(`HTTP ${r.status}`);
       const body=await r.json() as DigestResponse;
@@ -123,7 +127,7 @@ export function DigestCard(){
     }catch{
       setState("error");
     }
-  },[]);
+  },[token]);
 
   useEffect(()=>{load(false);},[load]);
 

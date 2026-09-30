@@ -65,8 +65,13 @@ INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
     "age": (
         r"how old",
+        r"how young",
         r"\bages?\b",
         r"\baged\b",
+        r"\b(?:is|was|are|were) (?:it|that|this|he|she|they|someone|(?:the|that|this) (?:person|visitor|man|woman)) "
+        r"(?:a |an )?(?:child|kid|minor|adult|teen(?:ager)?|baby|toddler|senior|pensioner|grown[- ]?up"
+        r"|elderly|old|older|young|younger)\b",
+        r"\b(?:child|kid|minor|adult|teen(?:ager)?) or (?:an? )?(?:child|kid|minor|adult|teen(?:ager)?|grown[- ]?up)\b",
     ),
     "plate": (
         r"licen[cs]e plates?",
@@ -79,8 +84,41 @@ INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: Nouns that make a preceding "young"/"old" an age descriptor of a person.
+#: Without this anchor "old shed" or "young tree" would be stripped too.
+_PERSON_NOUNS = (
+    r"man|men|woman|women|person|people|lady|ladies|guy|guys|boy|boys|girl|girls|"
+    r"adult|adults|couple|folks?|chap|bloke|visitor|visitors|stranger|strangers|someone|"
+    r"child|children|kid|kids"
+)
+
 #: Describing a subject by a forbidden attribute. Stripped, then searched.
+#: ``age`` is listed first on purpose: "old man" must be matched while "man"
+#: is still there for the lookahead, before the gender pass removes it.
 ATTRIBUTE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "age": (
+        rf"\b(?:young|younger|youngest|old|older|oldest|middle[- ]aged|elderly)(?=\s+(?:{_PERSON_NOUNS})\b)",
+        r"\b\d+\s*-?\s*years?[- ]olds?\b",
+        r"\byear[- ]olds?\b",
+        r"\bin (?:their|his|her) (?:\d0s|teens|twenties|thirties|forties|fifties|sixties|seventies|eighties|nineties)\b",
+        r"\bchild(?:ren)?\b",
+        r"\bkids?\b",
+        r"\bkiddos?\b",
+        r"\btoddlers?\b",
+        r"\bbab(?:y|ies)\b",
+        r"\binfants?\b",
+        r"\byoungsters?\b",
+        r"\byouths?\b",
+        r"\bjuveniles?\b",
+        r"\bminors?\b",
+        r"\bteen(?:s|agers?|age)?\b",
+        r"\badolescents?\b",
+        r"\badults?\b",
+        r"\belderly\b",
+        r"\bseniors?(?: citizens?)?\b",
+        r"\bpensioners?\b",
+        r"\boaps?\b",
+    ),
     "gender": (
         r"\bmale\b",
         r"\bfemale\b",
@@ -88,16 +126,13 @@ ATTRIBUTE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bwomen\b",
         r"\bman\b",
         r"\bwoman\b",
-        r"\bguy\b",
+        r"\bguys?\b",
+        r"\bladies\b",
         r"\blady\b",
+        r"\bboys?\b",
+        r"\bgirls?\b",
     ),
     "ethnicity": (r"\bblack or white\b",),
-    "age": (
-        r"\bteenagers?\b",
-        r"\belderly\b",
-        r"\bpensioners?\b",
-        r"\bminors?\b",
-    ),
 }
 
 #: Human-readable explanation per category, used in refusals and notices.
