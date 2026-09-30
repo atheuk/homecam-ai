@@ -204,3 +204,105 @@ async def test_failed_attempt_counter_is_atomic_at_the_database_layer_without_th
     async with SessionLocal() as session:
         user = await session.get(User, user_id)
         assert user.failed_attempts == concurrency
+
+
+@pytest.mark.asyncio
+async def test_a_correct_guess_verified_before_a_concurrent_lockout_cannot_still_complete_the_login(monkeypatch):
+    """Regression test for a second, subtler cross-replica race than the
+    lost-update one above: making the failed-attempt *counter* atomic is
+    not enough on its own, because the login route verifies the password
+    against a snapshot of the user row read *before* any lock-state
+    changes, with no cross-replica lock held while it does so. Starting
+    from ``failed_attempts == threshold - 1``, a wrong guess on one
+    replica and a correct guess on another can both see the account as
+    unlocked at the moment each verifies its own password. If the wrong
+    guess's increment reaches the threshold and commits first, the correct
+    guess must still be rejected as locked -- not silently allowed to
+    complete just because its own password check happened to pass against
+    a now-stale snapshot.
+
+    This reproduces exactly that interleaving by driving the two atomic
+    helpers directly, in the order that actually breaks unguarded code:
+    the account-locking increment is forced to commit *before* the
+    already-"password-verified" success path writes its reset, simulating
+    two replicas racing with no shared in-process lock."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from app.api.auth_routes import _finalize_successful_login, _register_failed_attempt
+    from app.auth.security import hash_password
+    from app.config import settings
+    from app.db import SessionLocal
+    from app.models.db import User
+
+    monkeypatch.setattr(settings, "auth_max_failed_attempts", 3)
+    monkeypatch.setattr(settings, "auth_lockout_minutes", 15.0)
+
+    user_id = str(uuid.uuid4())
+    async with SessionLocal() as session:
+        session.add(
+            User(
+                id=user_id,
+                email="race-at-threshold@example.com",
+                password_hash=hash_password("supersecret1"),
+                created_at=datetime.now(timezone.utc),
+                failed_attempts=settings.auth_max_failed_attempts - 1,
+            )
+        )
+        await session.commit()
+
+    # Both "replicas" observe the account as unlocked and verify their own
+    # guess against that snapshot before either writes anything back --
+    # captured here as a single shared `now`, since the two requests are
+    # concurrent in wall-clock time.
+    now = datetime.now(timezone.utc)
+
+    # The wrong guess's replica reaches the threshold and its atomic
+    # increment commits first.
+    async with SessionLocal() as session_a:
+        new_failed_attempts, new_locked_until = await _register_failed_attempt(session_a, user_id, now)
+    assert new_failed_attempts == settings.auth_max_failed_attempts
+    assert new_locked_until is not None
+
+    # The correct guess's replica already verified the password against
+    # the pre-lockout snapshot and now tries to finalize the login. This
+    # must be refused -- the fix re-checks lock state at the database
+    # layer instead of trusting the stale snapshot.
+    async with SessionLocal() as session_b:
+        finalized = await _finalize_successful_login(session_b, user_id, now)
+    assert finalized is False
+
+    # The lockout must still be intact afterwards: the rejected "successful"
+    # login must not have reset the counter or lifted the lock as a
+    # side effect of its own (refused) write.
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        assert user.failed_attempts == settings.auth_max_failed_attempts
+        assert user.locked_until is not None
+
+    # Sanity check the other ordering too: if the correct guess's finalize
+    # reaches the database *before* any concurrent wrong guess locks the
+    # account, the login must still legitimately succeed and reset the
+    # counter -- the fix must not be so conservative that it blocks
+    # ordinary, non-racing logins.
+    user_id_2 = str(uuid.uuid4())
+    async with SessionLocal() as session:
+        session.add(
+            User(
+                id=user_id_2,
+                email="no-race-at-threshold@example.com",
+                password_hash=hash_password("supersecret1"),
+                created_at=datetime.now(timezone.utc),
+                failed_attempts=settings.auth_max_failed_attempts - 1,
+            )
+        )
+        await session.commit()
+
+    async with SessionLocal() as session_b:
+        finalized_first = await _finalize_successful_login(session_b, user_id_2, now)
+    assert finalized_first is True
+
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id_2)
+        assert user.failed_attempts == 0
+        assert user.locked_until is None

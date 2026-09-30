@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import case, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -32,18 +32,24 @@ from ..services import audit as audit_service
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 # The failed-attempt counter / lockout threshold is a classic
-# check-then-act (read ``failed_attempts``, decide, write it back). An
-# in-process, per-email ``asyncio.Lock`` fully serializes that for two
-# concurrent attempts handled by the *same* process, and is kept below as
-# a cheap fast-path that avoids DB contention in the common case. It is
-# not sufficient on its own: the API can run as up to two Container Apps
-# replicas sharing only the database (see infra/modules/api.bicep's
-# ``scale.maxReplicas: 2``), and a lock in one replica's memory does
-# nothing to serialize an attempt handled by the other. The actual safety
-# guarantee comes from ``_register_failed_attempt`` below, which performs
-# the whole increment-and-maybe-lock decision as a single atomic ``UPDATE``
+# check-then-act (read ``failed_attempts``/``locked_until``, decide, write
+# it back - for both the failure path and, importantly, the success path
+# that resets them). An in-process, per-email ``asyncio.Lock`` fully
+# serializes that for two concurrent attempts handled by the *same*
+# process, and is kept below as a cheap fast-path that avoids DB
+# contention in the common case. It is not sufficient on its own: the API
+# can run as up to two Container Apps replicas sharing only the database
+# (see infra/modules/api.bicep's ``scale.maxReplicas: 2``), and a lock in
+# one replica's memory does nothing to serialize an attempt handled by the
+# other. The actual safety guarantee comes from ``_register_failed_attempt``
+# and ``_finalize_successful_login`` below, which each perform their
+# respective read-decide-write as a single atomic, conditional ``UPDATE``
 # evaluated by the database against the current row - safe regardless of
-# which replica issues it or whether the in-process lock is even held.
+# which replica issues it or whether the in-process lock is even held. In
+# particular, a correct password guess can never complete a login once a
+# concurrent, independently-arriving failed attempt has committed the
+# lockout, because the success path's ``UPDATE`` re-checks ``locked_until``
+# against the database's current value, not a stale in-memory read.
 _login_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -84,6 +90,7 @@ async def _register_failed_attempt(session: AsyncSession, user_id: str, now: dat
             ),
         )
         .returning(User.failed_attempts, User.locked_until)
+        .execution_options(synchronize_session=False)
     )
     result = await session.execute(stmt)
     row = result.first()
@@ -91,6 +98,54 @@ async def _register_failed_attempt(session: AsyncSession, user_id: str, now: dat
     if row is None:
         return (0, None)
     return (row[0], row[1])
+
+
+async def _finalize_successful_login(session: AsyncSession, user_id: str, now: datetime) -> bool:
+    """Atomically reset the lockout counter for a *verified-correct* password,
+    but only if the account is still unlocked at write time.
+
+    Verifying the password happens against a snapshot read taken earlier in
+    the request, with no lock held across the ``await`` - so a second,
+    concurrent request (possibly on the other API replica) can be in the
+    middle of a failed attempt for the same account at the same moment.
+    Without this guard, two simultaneous guesses starting from
+    ``failed_attempts == threshold - 1`` can both pass their own snapshot's
+    "is this account locked?" check before either one's increment has
+    committed, letting a correct guess complete the login even though a
+    sibling wrong guess independently reaches the lockout threshold in the
+    same instant.
+
+    This single ``UPDATE ... WHERE (locked_until IS NULL OR locked_until <=
+    now) ... RETURNING`` closes that window: like
+    ``_register_failed_attempt``, the database serializes concurrent
+    UPDATEs to the same row, so if a sibling failed-attempt UPDATE that sets
+    ``locked_until`` commits first, this statement's WHERE clause is
+    re-evaluated against that new value and matches no row - the login is
+    then rejected as locked instead of succeeding. Returns ``True`` only if
+    the reset was actually applied (i.e. the account was not locked at the
+    moment this statement executed).
+    """
+    stmt = (
+        update(User)
+        .where(User.id == user_id)
+        .where(or_(User.locked_until.is_(None), User.locked_until <= now))
+        .values(failed_attempts=0, locked_until=None)
+        .returning(User.id)
+        # ``synchronize_session=False``: this UPDATE's correctness comes
+        # entirely from the database re-evaluating the WHERE clause against
+        # the current row, not from SQLAlchemy's in-Python ORM-session
+        # sync. The default "evaluate" strategy would otherwise try to
+        # compare the WHERE clause's tz-aware ``now`` against whatever
+        # possibly-naive ``locked_until`` is cached on any already-loaded
+        # ``User`` instance, which can raise on SQLite; we don't rely on
+        # any loaded instance's attributes here anyway (the caller only
+        # uses this function's boolean return value).
+        .execution_options(synchronize_session=False)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    await session.commit()
+    return row is not None
 
 
 def _is_locked(user: User, now: datetime) -> bool:
@@ -145,8 +200,16 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
                     await session.commit()
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        user.failed_attempts = 0
-        user.locked_until = None
+        # Password verified against a snapshot read taken above, with no
+        # cross-replica lock held while awaiting it - so re-check (and
+        # reset) the lockout state as a single atomic, conditional UPDATE
+        # rather than trusting that snapshot. This is what actually
+        # prevents a correct guess from completing a login that raced a
+        # concurrent failed attempt past the lockout threshold; see
+        # ``_finalize_successful_login`` for the full explanation.
+        if not await _finalize_successful_login(session, user.id, now):
+            raise HTTPException(status_code=423, detail="Account temporarily locked due to repeated failed sign-ins")
+
         token = generate_session_token()
         expires_at = now + timedelta(minutes=settings.session_ttl_minutes)
         session.add(AuthSession(

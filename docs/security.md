@@ -179,13 +179,31 @@ has two layers:
      `SET` expression against the current row value as one statement), so
      no dialect branching is needed here, and the guarantee holds
      regardless of process count.
+   - The *successful*-login path (`auth_routes._finalize_successful_login`)
+     closes a second, subtler race than the counter alone: a login route
+     verifies the submitted password against a snapshot of the user row
+     read before any lock-state change, with no lock held across that
+     verification. Two concurrent requests -- a wrong guess that reaches
+     the lockout threshold, and a correct guess -- can both see the
+     account as unlocked at the moment each checks it. The reset of
+     `failed_attempts`/`locked_until` on a successful login is therefore
+     also a single atomic, conditional
+     `UPDATE ... WHERE locked_until IS NULL OR locked_until <= now ...
+     RETURNING` rather than an unconditional write of the snapshot's
+     values: if a sibling failed-attempt UPDATE that sets `locked_until`
+     commits first, this statement's WHERE clause is re-evaluated against
+     that new value at the database layer and matches no row, so the
+     login is rejected as locked instead of completing on stale
+     information.
 
 Concurrent requests for *different* keys remain unaffected by either
 layer. `apps/api/tests/test_incidents.py` and
 `apps/api/tests/test_auth_hardening.py` include regression tests that
 exercise the database-layer guarantee directly (bypassing the in-process
 lock via separate sessions/dialect stubs), not just the in-process
-fast path.
+fast path, including a test that reproduces the correct-guess-vs-lockout
+race at `failed_attempts == threshold - 1` and confirms the correct guess
+is rejected once the lockout commits first.
 
 ## Known accepted risks
 
