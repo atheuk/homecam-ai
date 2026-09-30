@@ -8,9 +8,11 @@ stored value.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .ai.zones import MAX_ZONE_POINTS, bbox_of_points, normalize_points
 
 
 class DahuaProviderConfigIn(BaseModel):
@@ -128,33 +130,67 @@ class ProviderTestResult(BaseModel):
 
 
 class CameraZoneIn(BaseModel):
-    """Named rectangle in normalized (0..1) image coordinates.
+    """Named region in normalized (0..1) image coordinates.
 
-    Zone geometry is validated here so the pipeline can assume every stored
-    zone is a well-formed box.
+    Either give a rectangle (``x1/y1/x2/y2``) or a drawn polygon
+    (``points``, >= 3 ``[x, y]`` pairs). When ``points`` is given the
+    bounding box is derived from it, so every stored zone still has a
+    well-formed box for the region-based detectors.
     """
 
     name: str = Field(min_length=1, max_length=64)
     kind: str = Field(default="other", max_length=32)
-    x1: float = Field(ge=0.0, le=1.0)
-    y1: float = Field(ge=0.0, le=1.0)
-    x2: float = Field(ge=0.0, le=1.0)
-    y2: float = Field(ge=0.0, le=1.0)
+    x1: float | None = Field(default=None, ge=0.0, le=1.0)
+    y1: float | None = Field(default=None, ge=0.0, le=1.0)
+    x2: float | None = Field(default=None, ge=0.0, le=1.0)
+    y2: float | None = Field(default=None, ge=0.0, le=1.0)
+    points: list[Annotated[list[float], Field(min_length=2, max_length=2)]] | None = Field(
+        default=None, max_length=MAX_ZONE_POINTS
+    )
 
     @model_validator(mode="after")
-    def check_box(self) -> "CameraZoneIn":
-        if self.x1 >= self.x2 or self.y1 >= self.y2:
-            raise ValueError("zone must satisfy x1 < x2 and y1 < y2")
+    def check_geometry(self) -> "CameraZoneIn":
+        _apply_geometry(self)
         return self
 
 
 class CameraZoneUpdate(BaseModel):
+    """Partial update. Sending ``points`` re-derives the bounding box;
+    sending ``points: []`` turns a polygon back into a plain rectangle."""
+
     name: str | None = Field(default=None, min_length=1, max_length=64)
     kind: str | None = Field(default=None, max_length=32)
     x1: float | None = Field(default=None, ge=0.0, le=1.0)
     y1: float | None = Field(default=None, ge=0.0, le=1.0)
     x2: float | None = Field(default=None, ge=0.0, le=1.0)
     y2: float | None = Field(default=None, ge=0.0, le=1.0)
+    points: list[Annotated[list[float], Field(min_length=2, max_length=2)]] | None = Field(
+        default=None, max_length=MAX_ZONE_POINTS
+    )
+
+    @model_validator(mode="after")
+    def check_geometry(self) -> "CameraZoneUpdate":
+        if self.points:
+            _apply_geometry(self)
+        return self
+
+
+def _apply_geometry(model) -> None:
+    """Validate a zone's geometry and fill in its bounding box."""
+    if model.points:
+        try:
+            points = normalize_points([list(point) for point in model.points])
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        bbox = bbox_of_points(points)
+        model.x1, model.y1, model.x2, model.y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
+        model.points = [list(point) for point in points]
+    elif model.points is not None:
+        model.points = None
+    if None in (model.x1, model.y1, model.x2, model.y2):
+        raise ValueError("a zone needs either 'points' or all of x1/y1/x2/y2")
+    if model.x1 >= model.x2 or model.y1 >= model.y2:
+        raise ValueError("zone must satisfy x1 < x2 and y1 < y2")
 
 
 class CameraZoneOut(BaseModel):
@@ -167,5 +203,23 @@ class CameraZoneOut(BaseModel):
     y1: float
     x2: float
     y2: float
+    points: list[list[float]] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class CameraStillOut(BaseModel):
+    """A current still from one camera, for drawing zones on.
+
+    The JPEG is inlined as a ``data:`` URL so the browser renders it from
+    an authenticated fetch instead of an unauthenticated ``<img src>``.
+    """
+
+    camera_id: str
+    image: str
+    content_type: str = "image/jpeg"
+    width: int | None = None
+    height: int | None = None
+    #: "stream" (a frame the ingestion reader already had) or "snapshot".
+    source: str
+    captured_at: datetime

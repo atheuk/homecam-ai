@@ -1,8 +1,9 @@
 """Camera zone CRUD (admin plane).
 
-Zones are user-defined labelled rectangles in normalized image coordinates.
-Validation lives in the Pydantic schema; this module only persists and reads
-them back and converts rows into the pipeline's :class:`~app.ai.zones.Zone`.
+Zones are user-defined labelled regions in normalized image coordinates —
+a rectangle, or a polygon drawn on a still from the camera. Validation
+lives in the Pydantic schema; this module only persists and reads them back
+and converts rows into the pipeline's :class:`~app.ai.zones.Zone`.
 """
 from __future__ import annotations
 
@@ -39,6 +40,7 @@ async def create_zone(session: AsyncSession, camera_id: str, payload) -> CameraZ
         y1=payload.y1,
         x2=payload.x2,
         y2=payload.y2,
+        points=getattr(payload, "points", None) or None,
         created_at=now,
         updated_at=now,
     )
@@ -56,10 +58,14 @@ def _invalidate(camera_id: str) -> None:
 
 
 async def update_zone(session: AsyncSession, zone: CameraZone, payload) -> CameraZone:
+    points = getattr(payload, "points", None)
     for field in ("name", "kind", "x1", "y1", "x2", "y2"):
         value = getattr(payload, field, None)
         if value is not None:
             setattr(zone, field, value)
+    if points is not None:
+        # An explicit empty list turns a polygon back into its rectangle.
+        zone.points = points or None
     if zone.x1 >= zone.x2 or zone.y1 >= zone.y2:
         raise ValueError("zone must satisfy x1 < x2 and y1 < y2")
     zone.updated_at = datetime.now(timezone.utc)

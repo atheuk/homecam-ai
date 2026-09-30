@@ -21,7 +21,7 @@ normalize -> persist -> snapshot -> local detector -> semantics (zones + dwell)
 | Normalize + persist | `app/services/events.py` | Unchanged event contract (SPEC 9). |
 | Snapshot sampling | `app/services/ai_pipeline.py` | Uses each provider's existing `get_snapshot`; no new streaming infra. |
 | Local detection | `app/ai/detector.py` | `person, car, truck, bicycle, motorcycle, dog, cat, package` (SPEC 13). |
-| Zones | `app/ai/zones.py` | Normalized rectangles + overlap math only. |
+| Zones | `app/ai/zones.py` | Normalized rectangles/polygons + overlap math only. |
 | Dwell | `app/ai/dwell.py` | Distinguishes a passing car from a parked one. |
 | Semantics | `app/ai/semantics.py` | Derives type/zone/tags/description. |
 | Best photo | `app/ai/best_photo.py` | One sharp, cropped representative frame. |
@@ -60,14 +60,42 @@ People outrank vehicles and animals when several objects share a frame.
 
 ## Configuring zones
 
-Zones are labelled rectangles in **normalized** image coordinates (`0.0–1.0`,
+Zones are labelled **shapes** in **normalized** image coordinates (`0.0–1.0`,
 origin top-left), so they are resolution independent and work across providers
 with different snapshot sizes. There is no computer-vision zone detection —
 only overlap-with-bounding-box math, with a configurable minimum overlap
 (`ZONE_MIN_OVERLAP`, default `0.3` of the detection box).
 
+A zone is either a plain **rectangle** (`x1/y1/x2/y2`) or a **polygon** of 3–64
+points (`points`, a list of `[x, y]` pairs) drawn on a still from the camera.
+A polygon always also stores its bounding box, which is derived server-side, so
+existing rectangle-only behaviour is unchanged and every zone still has a
+well-formed box.
+
 Admin UI: sign in to the **Admin** panel → *Detection zones*, pick a camera,
-name the zone, choose a kind, and enter `x1/y1/x2/y2`.
+then draw the zone directly on the current picture from that camera: click or
+tap to drop points around the area, undo or clear while drawing, name it, pick
+its kind and save. Existing zones are outlined on the picture and can be
+re-drawn with *Edit shape* or removed with *Delete*. The manual `x1/y1/x2/y2`
+rectangle form is still available underneath, and points can also be typed as
+coordinates for keyboard-only use.
+
+The picture comes from an authenticated admin endpoint that reuses the normal
+frame path — a frame the ingestion stream reader has already decoded if there is
+one, otherwise a single provider snapshot:
+
+```
+GET /api/v1/admin/cameras/{camera_id}/still
+```
+
+It returns the JPEG as a `data:` URL (so camera imagery is never loaded from an
+unauthenticated `<img src>`) plus `width`/`height` when readable and `source`
+(`stream` or `snapshot`). A camera that is known-offline is never contacted, and
+a camera whose capture just failed is left alone for
+`camera_stills.FAILURE_COOLDOWN_SECONDS` (10s), so repeatedly retrying a
+disconnected channel cannot become a request storm. Offline or unreachable
+cameras return `503` with a readable reason, which the editor shows with a
+retry button.
 
 Admin API (authenticated, same auth model as provider configuration):
 
@@ -84,9 +112,21 @@ curl -X POST http://localhost:8000/api/v1/admin/cameras/mock-front-door/zones \
   -d '{"name":"driveway","kind":"driveway","x1":0.0,"y1":0.45,"x2":0.65,"y2":1.0}'
 ```
 
-Semantically meaningful kinds: `driveway`, `parking`, `mailbox`, `entry`,
+Sending `"points": []` on a `PUT` turns a polygon back into its plain rectangle.
+A polygon zone is created by sending `points` instead of `x1/y1/x2/y2`, for
+example `{"name":"mailbox","kind":"mailbox","points":[[0.70,0.30],[0.95,0.34],[0.92,0.68],[0.71,0.63]]}`.
+
+Semantically meaningful kinds: `driveway`, `parking`, `mailbox`, `bin`, `entry`,
 `street`, `garden`, `other`. Any other name is stored and displayed but carries
 no extra meaning.
+
+**Polygon nuance.** Only *overlap matching* (`zones_for_bbox`, which decides
+whether a detection "is in" a zone) uses the exact polygon, via
+Sutherland–Hodgman clipping of the shape against the detection box. The
+stateful mailbox/bin detectors in `app/services/scene_state.py` crop and compare
+*rectangular* image regions, so they keep using the zone's bounding box. Drawing
+a tight polygon therefore makes zone membership more precise without changing
+how those region comparisons work.
 
 ## Best photo
 
