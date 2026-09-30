@@ -110,7 +110,7 @@ describe("dashboard",()=>{
   it("requests only the latest 50 events and labels the metric precisely",async()=>{
     render(<Home/>);
     await screen.findByText("Front Door");
-    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/events?limit=50"));
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/events?limit=50"),expect.objectContaining({signal:expect.any(AbortSignal)}));
     expect(screen.getByText("LATEST EVENTS LOADED")).toBeInTheDocument();
   });
 
@@ -130,6 +130,64 @@ describe("dashboard",()=>{
     mockApi();
     fireEvent.click(screen.getByRole("button",{name:"Retry"}));
     expect(await screen.findByText("Front Door")).toBeInTheDocument();
+  });
+
+  it("renders events and an inline error when only camera status fails",async()=>{
+    mockApi();
+    const ok=global.fetch;
+    global.fetch=vi.fn(async(url:string,init?:RequestInit)=>
+      String(url).endsWith("/api/v1/cameras")?response({detail:"upstream"},502):ok(url,init)) as typeof fetch;
+    render(<Home/>);
+    expect(await screen.findByText("Sarah arrived")).toBeInTheDocument();
+    expect(screen.queryByText("HomeCam is not responding")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Camera status is unavailable.");
+    expect(screen.getByRole("button",{name:"Retry"})).toBeInTheDocument();
+
+    mockApi();
+    fireEvent.click(screen.getByRole("button",{name:"Retry"}));
+    expect(await screen.findByText("Front Door")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows the full-page error only when every source fails",async()=>{
+    global.fetch=vi.fn(async()=>response({detail:"down"},503)) as typeof fetch;
+    render(<Home/>);
+    expect(await screen.findByRole("alert")).toHaveTextContent("HomeCam is not responding");
+  });
+
+  it("treats a hanging camera request as a timeout of that call only",async()=>{
+    vi.useFakeTimers({shouldAdvanceTime:true});
+    try{
+      mockApi();
+      const ok=global.fetch;
+      global.fetch=vi.fn((url:string,init?:RequestInit)=>String(url).endsWith("/api/v1/cameras")
+        ?new Promise<Response>((_,reject)=>init?.signal?.addEventListener("abort",()=>reject(new DOMException("Aborted","AbortError"))))
+        :ok(url,init)) as typeof fetch;
+      render(<Home/>);
+      expect(screen.getByLabelText("Loading dashboard")).toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await screen.findByText("Sarah arrived")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("Camera status is unavailable.");
+      expect(screen.queryByText("HomeCam is not responding")).not.toBeInTheDocument();
+    }finally{
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps already-loaded events when a refresh fails",async()=>{
+    currentSearch="?tab=events";
+    mockApi(cameras,[{...events[0],has_photo:true,photo_url:"/api/v1/events/evt-1/photo",photo_rating:null}]);
+    render(<Home/>);
+    await screen.findByText("Sarah arrived");
+
+    global.fetch=vi.fn(async(url:string)=>String(url).includes("/rating")
+      ?response({})
+      :Promise.reject(new Error("blip"))) as typeof fetch;
+    fireEvent.click(screen.getByLabelText("Rate 4 out of 5"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Events could not be refreshed. Try again.");
+    expect(screen.getByText("Sarah arrived")).toBeInTheDocument();
+    expect(screen.queryByText("HomeCam is not responding")).not.toBeInTheDocument();
   });
 
   it("renders HLS only from the API-vetted live descriptor",async()=>{
