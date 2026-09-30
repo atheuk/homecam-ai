@@ -86,10 +86,13 @@ export default function ZoneEditor({
   // again on its own — only when the user asks — so flipping between
   // disconnected channels cannot turn into a request storm.
   const failures = useRef<Record<string, string>>({});
+  const stillRequestId = useRef(0);
 
   const loadStill = useCallback(
     async (force: boolean) => {
       if (!cameraId || !token) return;
+      const requestId = ++stillRequestId.current;
+      const isCurrent = () => stillRequestId.current === requestId;
       const previousFailure = failures.current[cameraId];
       if (!force && previousFailure) {
         setStill(null);
@@ -103,6 +106,7 @@ export default function ZoneEditor({
         const r = await fetch(`${apiBase}/api/v1/admin/cameras/${cameraId}/still`, {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (!isCurrent()) return;
         if (!r.ok) {
           let detail = "Could not get a current picture from this camera.";
           try {
@@ -111,16 +115,20 @@ export default function ZoneEditor({
           } catch {
             /* keep the generic message */
           }
+          if (!isCurrent()) return;
           setStill(null);
           failures.current[cameraId] = detail;
           setStillError(detail);
           setStillState("error");
           return;
         }
+        const nextStill = (await r.json()) as Still;
+        if (!isCurrent()) return;
         delete failures.current[cameraId];
-        setStill((await r.json()) as Still);
+        setStill(nextStill);
         setStillState("ready");
       } catch {
+        if (!isCurrent()) return;
         const detail = "Could not reach the API to fetch a picture.";
         setStill(null);
         failures.current[cameraId] = detail;
@@ -140,6 +148,9 @@ export default function ZoneEditor({
     setStatus(null);
     setError(null);
     loadStill(false);
+    return () => {
+      stillRequestId.current += 1;
+    };
   }, [cameraId, loadStill]);
 
   function addPoint(x: number, y: number) {

@@ -22,6 +22,7 @@ Point = tuple[float, float]
 # Upper bound on polygon complexity. Drawing is per-click, so this is high
 # enough to never be reached by hand yet keeps stored/clipped geometry small.
 MAX_ZONE_POINTS = 64
+_GEOMETRY_EPSILON = 1e-12
 
 # Canonical zone kinds HomeCam understands semantically. Any other name is
 # still allowed and preserved; it simply carries no extra meaning.
@@ -94,9 +95,71 @@ def normalize_points(raw) -> tuple[Point, ...] | None:
         if not (0.0 <= x <= 1.0) or not (0.0 <= y <= 1.0):
             raise ValueError("zone point coordinates must be between 0 and 1")
         points.append((float(x), float(y)))
+    if any(points[index] == points[(index + 1) % len(points)] for index in range(len(points))):
+        raise ValueError("a zone polygon cannot have duplicate adjacent points")
     if polygon_area(points) <= 0.0:
         raise ValueError("a zone polygon must enclose a non-zero area")
+    _validate_simple_polygon(points)
     return tuple(points)
+
+
+def _validate_simple_polygon(points: list[Point]) -> None:
+    """Reject polygon edges that cross or overlap except at adjacent endpoints."""
+    count = len(points)
+    for first in range(count):
+        a, b = points[first], points[(first + 1) % count]
+        for second in range(first + 1, count):
+            c, d = points[second], points[(second + 1) % count]
+            adjacent = second == first + 1 or (first == 0 and second == count - 1)
+            if not _segments_intersect(a, b, c, d):
+                continue
+            if adjacent:
+                shared = b if second == first + 1 else a
+                other_first = a if second == first + 1 else b
+                other_second = d if second == first + 1 else c
+                if abs(_cross(shared, other_first, other_second)) <= _GEOMETRY_EPSILON:
+                    first_vector = (other_first[0] - shared[0], other_first[1] - shared[1])
+                    second_vector = (other_second[0] - shared[0], other_second[1] - shared[1])
+                    if first_vector[0] * second_vector[0] + first_vector[1] * second_vector[1] > 0:
+                        raise ValueError("a zone polygon cannot have overlapping adjacent edges")
+                continue
+            raise ValueError("a zone polygon cannot self-intersect")
+
+
+def _cross(origin: Point, a: Point, b: Point) -> float:
+    return (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
+
+
+def _segments_intersect(a: Point, b: Point, c: Point, d: Point) -> bool:
+    ab_c = _orientation(_cross(a, b, c))
+    ab_d = _orientation(_cross(a, b, d))
+    cd_a = _orientation(_cross(c, d, a))
+    cd_b = _orientation(_cross(c, d, b))
+    if ab_c * ab_d < 0 and cd_a * cd_b < 0:
+        return True
+    return (
+        (ab_c == 0 and _on_segment(a, b, c))
+        or (ab_d == 0 and _on_segment(a, b, d))
+        or (cd_a == 0 and _on_segment(c, d, a))
+        or (cd_b == 0 and _on_segment(c, d, b))
+    )
+
+
+def _orientation(value: float) -> int:
+    if abs(value) <= _GEOMETRY_EPSILON:
+        return 0
+    return 1 if value > 0 else -1
+
+
+def _on_segment(a: Point, b: Point, point: Point) -> bool:
+    return (
+        min(a[0], b[0]) - _GEOMETRY_EPSILON
+        <= point[0]
+        <= max(a[0], b[0]) + _GEOMETRY_EPSILON
+        and min(a[1], b[1]) - _GEOMETRY_EPSILON
+        <= point[1]
+        <= max(a[1], b[1]) + _GEOMETRY_EPSILON
+    )
 
 
 def bbox_of_points(points) -> BoundingBox:

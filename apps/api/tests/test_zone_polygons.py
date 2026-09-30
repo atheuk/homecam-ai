@@ -5,6 +5,7 @@ polygon-aware admin CRUD, and the authenticated still capture including its
 offline/cooldown behaviour so a disconnected channel is never hammered.
 """
 import pytest
+from types import SimpleNamespace
 from sqlalchemy import delete
 
 from app.ai.detector import BoundingBox
@@ -74,6 +75,9 @@ def test_missing_points_stay_missing():
         [[0.1, 0.1], [0.2], [0.3, 0.3]],  # not an (x, y) pair
         [[0.1, 0.1], ["a", 0.2], [0.3, 0.3]],  # not numeric
         [[0.1, 0.1], [True, 0.2], [0.3, 0.3]],  # booleans are not coordinates
+        [[0, 0], [1, 1], [0, 1], [0.5, 0]],  # nonzero-area self-intersection
+        [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5], [0.5, 0]],  # non-adjacent touch
+        [[0, 0], [1, 0], [0.5, 0], [1, 1], [0, 1]],  # overlapping adjacent edges
         [[0.1, 0.1]] * (MAX_ZONE_POINTS + 1),  # unbounded polygons
         "not-a-list",
     ],
@@ -81,6 +85,20 @@ def test_missing_points_stay_missing():
 def test_bad_polygons_are_rejected(points):
     with pytest.raises(ValueError):
         normalize_points(points)
+
+
+def test_polygon_from_persisted_row_rejects_self_intersection():
+    row = SimpleNamespace(
+        name="bad",
+        kind="mailbox",
+        x1=0.0,
+        y1=0.0,
+        x2=1.0,
+        y2=1.0,
+        points=[[0, 0], [1, 1], [0, 1], [0.5, 0]],
+    )
+    with pytest.raises(ValueError, match="self-intersect"):
+        Zone.from_row(row)
 
 
 def test_bounding_box_encloses_every_point():
@@ -168,6 +186,7 @@ async def test_polygon_zone_can_be_redrawn_and_flattened(client):
         [[0.1, 0.1], [0.5, 0.5]],
         [[0.1, 0.1], [0.5, 0.5], [1.5, 0.5]],
         [[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]],
+        [[0, 0], [1, 1], [0, 1], [0.5, 0]],
     ],
 )
 async def test_invalid_polygons_are_refused(client, points):

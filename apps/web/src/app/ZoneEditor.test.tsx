@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import ZoneEditor, { zoneOutline } from "./ZoneEditor";
 
 const STILL = {
@@ -64,6 +64,83 @@ describe("ZoneEditor", () => {
     renderEditor();
     expect(await screen.findByAltText("Current view from camera cam-1")).toBeInTheDocument();
     expect(screen.getByText(/Live stream frame · 1920×1080/)).toBeInTheDocument();
+  });
+
+  it("keeps the faster selected camera still when an earlier camera request finishes later", async () => {
+    let resolveA!: (response: Response) => void;
+    const delayedA = new Promise<Response>((resolve) => {
+      resolveA = resolve;
+    });
+    global.fetch = vi.fn((url: RequestInfo | URL) =>
+      String(url).includes("cam-A")
+        ? delayedA
+        : Promise.resolve(jsonResponse({ ...STILL, image: "data:image/jpeg;base64,camera-B" })),
+    ) as unknown as typeof fetch;
+
+    const editor = (cameraId: string) => (
+      <ZoneEditor
+        apiBase="http://api.test"
+        token="tok"
+        cameraId={cameraId}
+        zoneKinds={["mailbox"]}
+        kindHints={{}}
+        zones={[]}
+        onSaved={vi.fn()}
+      />
+    );
+    const { rerender } = render(editor("cam-A"));
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    rerender(editor("cam-B"));
+    const imageB = await screen.findByAltText("Current view from camera cam-B");
+    expect(imageB).toHaveAttribute("src", "data:image/jpeg;base64,camera-B");
+
+    await act(async () => {
+      resolveA(jsonResponse({ ...STILL, image: "data:image/jpeg;base64,camera-A" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByAltText("Current view from camera cam-B")).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,camera-B",
+    );
+    expect(screen.queryByText("Could not reach the API to fetch a picture.")).not.toBeInTheDocument();
+  });
+
+  it("does not show an error when an earlier camera request rejects after switching", async () => {
+    let rejectA!: (error: Error) => void;
+    const delayedA = new Promise<Response>((_resolve, reject) => {
+      rejectA = reject;
+    });
+    global.fetch = vi.fn((url: RequestInfo | URL) =>
+      String(url).includes("cam-A")
+        ? delayedA
+        : Promise.resolve(jsonResponse({ ...STILL, image: "data:image/jpeg;base64,camera-B" })),
+    ) as unknown as typeof fetch;
+
+    const editor = (cameraId: string) => (
+      <ZoneEditor
+        apiBase="http://api.test"
+        token="tok"
+        cameraId={cameraId}
+        zoneKinds={["mailbox"]}
+        kindHints={{}}
+        zones={[]}
+        onSaved={vi.fn()}
+      />
+    );
+    const { rerender } = render(editor("cam-A"));
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    rerender(editor("cam-B"));
+    await screen.findByAltText("Current view from camera cam-B");
+
+    await act(async () => {
+      rejectA(new Error("network request aborted"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("Could not reach the API to fetch a picture.")).not.toBeInTheDocument();
+    expect(screen.getByAltText("Current view from camera cam-B")).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,camera-B",
+    );
   });
 
   it("asks for the still with the admin token, not an unauthenticated image URL", async () => {
