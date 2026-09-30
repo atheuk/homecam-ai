@@ -37,6 +37,12 @@ Things that surprise people:
 - **Person identity needs Azure Foundry; detection does not.** Object detection is fully local and offline. Appearance captions, a coarse apparent age band, clothing/carried items, face-visible and automatic re-identification of returning visitors call Azure AI Foundry and need `FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY` in `.env`. Without them these features switch off cleanly (every sighting is a new unknown person; nothing crashes). Gender and ethnicity are deliberately never inferred (see `apps/api/app/ai/appearance.py`), and a person's trust status is only ever set by a human via the API — never inferred, and no Foundry needed.
 - **Don't run local and Azure against the NVR at the same time.** The NVR sustains only ~1–2 concurrent CGI sessions; two HomeCam instances polling it cause snapshot `503`s on both. Pause one (e.g. scale the Azure API to zero) while testing locally.
 
+### Detector configuration (get this wrong loudly, not quietly)
+
+`AI_DETECTOR_BACKEND` accepts exactly **`mock`**, **`opencv`**, **`onnx`**, **`rtdetr`** (a few spellings such as `rt-detr` and `rtdetr-r50` are normalised to `rtdetr`). The model path baked into the image is exactly **`/app/models/rtdetr.onnx`** — there is no `rtdetr-r50.onnx`.
+
+Anything else, or a model path that does not exist, no longer silently downgrades the system to the blind mock detector: it logs at ERROR, marks the detector `degraded`, and makes `GET /api/v1/system/status` return **503** (`/ready` stays 200 on purpose so a readiness probe does not evict a working ingestion pipeline). Set `AI_DETECTOR_STRICT=true` to refuse startup instead. A zero-detection watchdog additionally flags a sustained blackout even when the configuration looks fine. See [`docs/ai-pipeline.md`](docs/ai-pipeline.md#detector-configuration-is-fail-loud).
+
 ## Local development
 
 Backend (Python 3.12):

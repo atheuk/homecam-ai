@@ -66,12 +66,15 @@ def _reset_ai_state():
     dependent."""
     from app.ai.detector import mock_detector
     from app.ai.dwell import dwell_tracker
+    from app.services import detector_watchdog
 
     mock_detector().clear_script()
     dwell_tracker.reset()
+    detector_watchdog.reset()
     yield
     mock_detector().clear_script()
     dwell_tracker.reset()
+    detector_watchdog.reset()
 
 
 @pytest.fixture(autouse=True)

@@ -18,6 +18,24 @@ class Settings(BaseSettings):
     # deterministic and dependency-free; real backends are strictly opt-in.
     ai_detector_backend: str = "mock"
     ai_detector_model_path: str = ""
+    # Refuse to start when the requested detector backend cannot be honoured
+    # (unknown name, missing model file, missing runtime) instead of running
+    # blind on the mock detector. Off by default because a crash-looping
+    # security system protects nobody; when off, the degradation is still
+    # reported loudly (ERROR log, /ready, /api/v1/system/status).
+    ai_detector_strict: bool = False
+    # Zero-detection watchdog (incident 2026-09-30). Frames were ingested at
+    # 100% success for three hours while the detector - silently replaced by
+    # the mock - produced literally nothing, and no signal said so. Keyed on
+    # "frames succeeded AND the detector returned no box at all", never on
+    # "no events", because events are legitimately suppressed for parked
+    # vehicles during quiet periods.
+    detector_watchdog_enabled: bool = True
+    detector_blackout_window_seconds: float = Field(default=2700.0, gt=0.0)
+    # Frames that must have been detected on within the window before
+    # silence counts as evidence; a camera that delivered three frames in an
+    # hour is an acquisition problem, not a detector blackout.
+    detector_blackout_min_frames: int = Field(default=60, ge=1)
     ai_analysis_enabled: bool = True
     embedding_dimensions: int = Field(default=384, ge=8, le=4096)
     best_photo_frames: int = Field(default=3, ge=1, le=10)
