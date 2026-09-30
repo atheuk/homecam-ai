@@ -55,6 +55,26 @@ npm test
 npm run build
 ```
 
+## Building the web image for Azure
+
+The web image **must** be built with the API base URL as a build argument:
+
+```bash
+az acr build --registry <acr> --image web:<tag> \
+  --build-arg NEXT_PUBLIC_API_URL=https://<api-fqdn> apps/web
+```
+
+Next.js inlines `NEXT_PUBLIC_*` variables into the browser JavaScript at **build time**. Setting `NEXT_PUBLIC_API_URL` only as a Container Apps runtime env var (as `infra/modules/web.bicep` does) has no effect on the compiled client bundle. Without the build arg, the bundle falls back to `http://localhost:8000` and every visitor sees "HomeCam could not reach the local API" even though the API is healthy. `apps/web/Dockerfile` now fails the build if the arg is missing. Use `apps/web` as the build context, not the repo root.
+
+To verify a deployment, check the served bundles. None should contain `localhost:8000`, and at least one should contain the API hostname:
+
+```bash
+base=https://<web-fqdn>
+for js in $(curl -s "$base/" | grep -o '/_next/static/[^"]*\.js' | sort -u); do
+  echo "$js: $(curl -s "$base$js" | grep -o -e 'localhost:8000' -e '<api-fqdn>' | sort -u | tr '\n' ' ')"
+done
+```
+
 ## What is included
 
 - FastAPI `/api/v1` routes with OpenAPI, typed settings, structured basic logging, health/readiness, and CORS.
