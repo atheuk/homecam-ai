@@ -524,21 +524,26 @@ is **`/app/models/rtdetr.onnx`**. There is no `rtdetr-r50.onnx` in the image.
 
 ### Zero-detection watchdog
 
-Frames arriving is not the same as detection working. The watchdog counts
-frames the detector actually ran on and the boxes it returned, and raises
+Frames arriving is not the same as detection working. The watchdog keeps a
+**per-camera** window counting frames the detector actually ran on and the
+boxes it returned, and raises
 
 ```
-DETECTOR BLACKOUT: N frames were detected on over Ns and the detector
-returned zero detections in total.
+DETECTOR BLACKOUT on camera <id>: N frames were detected on over Ns and the
+detector returned zero detections in total.
 ```
 
-when a sustained window of successful frames yields *literally no box at
-all*. It is deliberately keyed on raw detections, not on emitted events:
-events are legitimately suppressed for parked vehicles, so "no events" is
-also what a quiet driveway looks like, while a working detector on a real
-scene keeps returning boxes. The blackout is exposed as
-`detector_watchdog.blackout` on the status surfaces and makes
-`GET /api/v1/system/status` return 503.
+when a sustained window of successful frames on that camera yields
+*literally no box at all*. State is per camera on purpose: a single global
+window would be reset by every detection anywhere, so one busy driveway
+camera would indefinitely mask a back-garden camera whose stream had died.
+The surfaces aggregate as **any camera blind**, and `blind_cameras` /
+`detector_watchdog.blackout_cameras` name the affected channels.
+
+It is deliberately keyed on raw detections, not on emitted events: events
+are legitimately suppressed for parked vehicles, so "no events" is also what
+a quiet driveway looks like, while a working detector on a real scene keeps
+returning boxes. A blackout makes `GET /api/v1/system/status` return 503.
 
 ### Status surface
 
@@ -563,9 +568,10 @@ curl -fsS https://<api>/api/v1/system/status | jq
 ```
 
 `status: "blind"` with HTTP 503 means the detector is not the intended one,
-or the watchdog is firing. `/ready` reports the same information but stays
-HTTP 200 by design, so a readiness probe never pulls an otherwise-working
-ingestion pipeline out of service.
+or the watchdog is firing on at least one camera (`blind_cameras` names
+them). `/ready` reports the same information but stays HTTP 200 by design,
+so a readiness probe never pulls an otherwise-working ingestion pipeline out
+of service.
 
 ## Configuration
 
@@ -575,8 +581,8 @@ ingestion pipeline out of service.
 | `AI_DETECTOR_MODEL_PATH` | *(empty)* | ONNX model path for `rtdetr` or `onnx`. For `rtdetr`, empty means `/app/models/rtdetr.onnx`, which `apps/api/Dockerfile` bakes into the image (there is no `rtdetr-r50.onnx`). A path that does not exist is reported by name. |
 | `AI_DETECTOR_STRICT` | `false` | Refuse to start when the requested backend cannot be honoured, instead of running degraded. |
 | `DETECTOR_WATCHDOG_ENABLED` | `true` | Zero-detection watchdog. |
-| `DETECTOR_BLACKOUT_WINDOW_SECONDS` | `2700` | Sustained silence (45 min) before a blackout is declared. |
-| `DETECTOR_BLACKOUT_MIN_FRAMES` | `60` | Frames that must have been detected on in the window before silence counts as evidence. |
+| `DETECTOR_BLACKOUT_WINDOW_SECONDS` | `2700` | Sustained per-camera silence (45 min) before a blackout is declared. |
+| `DETECTOR_BLACKOUT_MIN_FRAMES` | `60` | Frames that camera must have been detected on in the window before silence counts as evidence. |
 | `AI_ANALYSIS_ENABLED` | `true` | Master switch for the enrichment stages. |
 | `EMBEDDING_DIMENSIONS` | `384` | Width of stored embeddings. |
 | `BEST_PHOTO_ENABLED` | `true` | Persist a best photo per detected event. |

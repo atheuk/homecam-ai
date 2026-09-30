@@ -28,9 +28,9 @@ def fast_watchdog(monkeypatch):
     monkeypatch.setattr(settings, "detector_blackout_min_frames", 10)
 
 
-def _feed(frames, detections_each=0, *, start=0.0, step=1.0):
+def _feed(frames, detections_each=0, *, start=0.0, step=1.0, camera_id="cam-1"):
     for index in range(frames):
-        detector_watchdog.record_frame(detections_each, now=start + index * step)
+        detector_watchdog.record_frame(camera_id, detections_each, now=start + index * step)
 
 
 def test_watchdog_fires_when_frames_succeed_but_nothing_is_ever_detected(fast_watchdog, caplog):
@@ -40,6 +40,34 @@ def test_watchdog_fires_when_frames_succeed_but_nothing_is_ever_detected(fast_wa
     assert detector_watchdog.in_blackout() is True
     assert "DETECTOR BLACKOUT" in caplog.text
     assert detector_watchdog.status()["blackout"] is True
+    assert detector_watchdog.blackout_cameras() == ["cam-1"]
+
+
+def test_a_busy_camera_cannot_mask_a_blind_one(fast_watchdog, caplog):
+    """The per-camera regression: channel 2 sees traffic all day while
+    channel 1 has gone blind. A single global window would be reset by every
+    detection on channel 2 and would never fire, hiding channel 1 forever."""
+    with caplog.at_level(logging.ERROR):
+        for index in range(90):
+            moment = float(index)
+            # cam-2 is healthy: a box every other frame.
+            detector_watchdog.record_frame("cam-2", 1 if index % 2 == 0 else 0, now=moment)
+            # cam-1 is blind for the entire window.
+            detector_watchdog.record_frame("cam-1", 0, now=moment)
+
+    assert detector_watchdog.in_blackout() is True
+    assert detector_watchdog.blackout_cameras() == ["cam-1"]
+    assert "DETECTOR BLACKOUT on camera cam-1" in caplog.text
+    assert "cam-2" not in caplog.text
+
+    status = detector_watchdog.status(now=90.0)
+    assert status["blackout"] is True
+    assert status["blackout_cameras"] == ["cam-1"]
+    assert status["cameras_tracked"] == 2
+    per_camera = {entry["camera_id"]: entry for entry in status["cameras"]}
+    assert per_camera["cam-1"]["blackout"] is True
+    assert per_camera["cam-2"]["blackout"] is False
+    assert per_camera["cam-2"]["seconds_since_last_detection"] is not None
 
 
 def test_watchdog_does_not_fire_during_a_quiet_but_working_period(fast_watchdog, caplog):
@@ -50,7 +78,7 @@ def test_watchdog_does_not_fire_during_a_quiet_but_working_period(fast_watchdog,
         for index in range(90):
             # One box every tenth frame: far too quiet to emit events, but
             # unambiguous proof the detector can see.
-            detector_watchdog.record_frame(1 if index % 10 == 0 else 0, now=float(index))
+            detector_watchdog.record_frame("cam-1", 1 if index % 10 == 0 else 0, now=float(index))
 
     assert detector_watchdog.in_blackout() is False
     assert "DETECTOR BLACKOUT" not in caplog.text
@@ -67,12 +95,13 @@ def test_watchdog_clears_when_detections_resume(fast_watchdog, caplog):
     assert detector_watchdog.in_blackout() is True
 
     with caplog.at_level(logging.WARNING):
-        detector_watchdog.record_frame(2, now=1000.0)
+        detector_watchdog.record_frame("cam-1", 2, now=1000.0)
 
     assert detector_watchdog.in_blackout() is False
     assert "BLACKOUT CLEARED" in caplog.text
-    status = detector_watchdog.status(now=1000.0)
-    assert status["seconds_since_last_detection"] == 0.0
+    assert detector_watchdog.blackout_cameras() == []
+    camera = detector_watchdog.camera_status("cam-1", now=1000.0)
+    assert camera["seconds_since_last_detection"] == 0.0
 
 
 def test_watchdog_can_be_disabled(monkeypatch, fast_watchdog):
@@ -118,8 +147,14 @@ async def test_status_endpoint_returns_503_when_the_detector_is_not_the_intended
 
 
 async def test_status_endpoint_returns_503_during_a_blackout(client, fast_watchdog):
-    _feed(90, detections_each=0)
+    _feed(90, detections_each=0, camera_id="cam-1")
+    # A second, healthy camera must not be able to vouch for the blind one.
+    detector_watchdog.record_frame("cam-2", 3, now=95.0)
+
     response = await client.get("/api/v1/system/status")
     assert response.status_code == 503
-    assert response.json()["detector_watchdog"]["blackout"] is True
-    assert "zero detections" in response.json()["reasons"][0]
+    body = response.json()
+    assert body["detector_watchdog"]["blackout"] is True
+    assert body["blind_cameras"] == ["cam-1"]
+    assert "zero detections" in body["reasons"][0]
+    assert "cam-1" in body["reasons"][0]

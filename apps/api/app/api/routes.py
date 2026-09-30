@@ -726,15 +726,16 @@ async def system_status(response: Response):
         reasons.append(detector.reason or "detector degraded to mock")
     if watchdog["blackout"]:
         reasons.append(
-            "zero detections across "
-            f"{watchdog['frames_detected_in_window']} successfully detected frames in "
-            f"{watchdog['window_seconds']}s"
+            "zero detections on "
+            f"{', '.join(watchdog['blackout_cameras'])} across a full "
+            f"{watchdog['window_limit_seconds']:.0f}s window of successfully detected frames"
         )
     return {
         "status": "blind" if blind else "ok",
         "detecting": detector.detecting and not watchdog["blackout"],
         "detector": detector.as_dict(),
         "detector_watchdog": watchdog,
+        "blind_cameras": watchdog["blackout_cameras"],
         "supported_backends": list(SUPPORTED_BACKENDS),
         "reasons": reasons,
         "ingestion": {

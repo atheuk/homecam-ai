@@ -148,7 +148,7 @@ async def poll_once(session_factory=SessionLocal) -> int:
             continue
         # A successfully-detected frame that yielded nothing is the exact
         # signal the 2026-09-30 blackout produced for three hours.
-        detector_watchdog.record_frame(len(detections))
+        detector_watchdog.record_frame(camera_id, len(detections))
 
         # Subject events first: a slow scene check (a Foundry mailbox/bin
         # verification) must never delay the person/animal event from the
