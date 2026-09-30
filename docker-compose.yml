@@ -23,7 +23,7 @@ services:
     env_file: .env
     depends_on: {api: {condition: service_started}}
   web:
-    build: ./apps/web
+    build: {context: ./apps/web, args: {NEXT_PUBLIC_API_URL: http://localhost:8000}}
     ports: ["3000:3000"]
     environment: {NEXT_PUBLIC_API_URL: http://localhost:8000}
     depends_on: [api]
