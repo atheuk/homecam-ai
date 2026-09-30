@@ -148,8 +148,77 @@ class CameraZone(Base):
     x2: Mapped[float] = mapped_column(Float)
     y2: Mapped[float] = mapped_column(Float)
     points: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    # Seconds a person may stay continuously inside this zone before it
+    # counts as loitering. NULL falls back to
+    # ``settings.zone_default_dwell_seconds``; zones a household considers
+    # "fine to stand in" can be given a long threshold instead of being
+    # excluded entirely.
+    dwell_seconds: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ZonePresence(Base):
+    """How long a subject has been continuously present in one zone.
+
+    Deliberately a *database* row rather than in-process state (unlike
+    ``app.ai.dwell``'s frame-level tracker): the API can run as two
+    replicas, and consecutive sightings of the same loiterer may well be
+    handled by different replicas. The primary key is the
+    camera+zone+label tuple, so the row is the single point of
+    serialization for that tuple across every replica.
+    """
+
+    __tablename__ = "zone_presence"
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    zone: Mapped[str] = mapped_column(String(64))
+    label: Mapped[str] = mapped_column(String(32), default="person")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DailyDigest(Base):
+    """One generated day-in-review summary, keyed by its local date.
+
+    The date is the primary key so "generate yesterday's digest" is
+    idempotent across replicas at the database level: the second writer's
+    INSERT fails and it re-reads the winner's row instead of producing a
+    duplicate.
+    """
+
+    __tablename__ = "daily_digests"
+    date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(32), default="template")
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DeterrenceAction(Base):
+    """A requested siren/light/voice action and its human confirmation.
+
+    A row is created in ``pending`` and is only ever executed after an
+    authenticated human explicitly confirms it (see
+    ``app.services.deterrence``). Nothing in HomeCam may transition this
+    to ``executed`` on its own.
+    """
+
+    __tablename__ = "deterrence_actions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    reason: Mapped[str] = mapped_column(String(300), default="")
+    incident_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AIAnalysis(Base):
@@ -362,6 +431,11 @@ class Incident(Base):
     # opt-in/degrade-gracefully pattern as photo captioning: absent unless
     # Foundry is configured, and never authoritative on its own.
     ai_summary: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Structured, incident-kind-specific evidence pointers (currently the
+    # before/after package snapshot pair captured by the scene tracker).
+    # Always a reference to evidence the pipeline already stored - this is
+    # never a second copy of any imagery.
+    evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

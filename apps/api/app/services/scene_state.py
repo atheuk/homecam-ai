@@ -927,6 +927,13 @@ async def _finish_visit(
             "evidence": "package detected in the mailbox zone after the visit, not before",
         }
         return _mailbox_result(scene, record, zone, camera_name, context, verdict)
+    if context["package_before"] and not package_after:
+        # A package that was there before the visit and is gone after it.
+        # Whether that is a theft or the household collecting their own
+        # parcel is *not* something the camera can know, so this only ever
+        # reports the observable fact; escalation is decided later by the
+        # incident router from the arming mode (see docs/ai-features.md).
+        return _package_removed_result(scene, record, zone, camera_name, context)
     if package_during and not package_after:
         data["last_outcome"] = "carried_past"
         return None
@@ -945,6 +952,65 @@ async def _finish_visit(
         scene.pending[record.zone_id] = (task, context)
         return None
     return _mailbox_result(scene, record, zone, camera_name, context, None)
+
+
+def _package_removed_result(
+    scene: CameraScene,
+    record: ZoneRecord,
+    zone: Zone,
+    camera_name: str,
+    context: dict,
+) -> SceneTransition | None:
+    """Emit a ``mailbox_package_removed`` transition with before/after
+    evidence.
+
+    Deliberately neutral language: the event says a package left the zone
+    during a visit, never that someone stole it and never anything about
+    who the visitor was. :mod:`app.services.incidents` decides whether that
+    is alert-worthy based on the arming mode the household set.
+    """
+    if not settings.package_theft_detection_enabled:
+        record.data["last_outcome"] = "removal_disabled"
+        return None
+    data = record.data
+    now = float(context["now"])
+    last = data.get("last_removal_at")
+    if last is not None and now - float(last) < settings.mailbox_dedupe_seconds:
+        data["last_outcome"] = "deduplicated"
+        return None
+    data["last_removal_at"] = now
+    data["last_outcome"] = "package_removed"
+    crops = context["crops"]
+    evidence = {
+        "visit_id": context["visit_id"],
+        "zone": zone.name,
+        "observations": context["observations"],
+        "item_removed": "yes",
+        "source": "local",
+        "evidence": "package detected in the zone before the visit and absent after it",
+        "before": {"package_detected": True, "image": bool(crops.get("before"))},
+        "after": {"package_detected": False, "image": bool(crops.get("after"))},
+    }
+    return SceneTransition(
+        camera_id=scene.camera_id,
+        kind="mailbox",
+        transition="mailbox_package_removed",
+        event_type="package",
+        priority="high",
+        description=f"A package was taken from the {zone.name} at {camera_name}.",
+        tags=["mailbox", "package_removed"],
+        metadata={
+            "mailbox": evidence,
+            "scene": {
+                "kind": "mailbox",
+                "transition": "mailbox_package_removed",
+                "zone": zone.name,
+                "source": "local",
+            },
+        },
+        zone=zone.name,
+        frames=context["frames"] or None,
+    )
 
 
 def _mailbox_result(

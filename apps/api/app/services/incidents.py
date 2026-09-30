@@ -33,6 +33,7 @@ from ..ai import incident_summary
 from ..config import settings
 from ..models.db import Camera, CameraZone, Event, Incident
 from . import audit as audit_service
+from . import priority
 from . import security_modes
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 # an intrusion signal, and are never incident-worthy on their own.
 INTRUSION_EVENT_TYPES = frozenset({"person", "vehicle"})
 CAMERA_HEALTH_KINDS = ("camera_offline", "camera_obstruction", "camera_frozen")
+
+# A package leaving a monitored zone only becomes an *alert* when the
+# household said nobody should be collecting it. See ``_route_package_theft``.
+PACKAGE_REMOVED_TAG = "package_removed"
+PACKAGE_THEFT_MODES = frozenset({"away", "night"})
 
 _SEVERITY_BY_EVENT_TYPE = {"person": "high", "vehicle": "medium"}
 _CAMERA_HEALTH_SEVERITY = "high"
@@ -162,12 +168,24 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
     see ``events.py``'s ``create_and_broadcast_event``. When omitted, the
     current mode is looked up fresh (used by direct/legacy callers with no
     such gap)."""
-    if row.type not in INTRUSION_EVENT_TYPES:
-        return None
     if mode is None:
         mode = await security_modes.get_mode(session)
+
+    if _is_package_removal(row):
+        return await _route_package_theft(session, row, mode=mode)
+
+    if row.type not in INTRUSION_EVENT_TYPES:
+        return None
     zone_kind = await _zone_kind(session, row.camera_id, row.zone)
     if not security_modes.is_alert_armed(mode, zone_kind):
+        return None
+    # Smart notification priority keeps the incident feed actionable: a
+    # low-confidence, off-hours-irrelevant detection still lands in the
+    # event feed, it just does not open an incident. Deliberately applied
+    # only to intrusion events - camera-health and package-theft incidents
+    # are never noise-suppressed.
+    if not _priority_allows(row):
+        logger.debug("incident suppressed by notification priority for %s", row.id)
         return None
 
     now = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
@@ -229,6 +247,87 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
 
 def _severity_rank(severity: str) -> int:
     return {"low": 0, "medium": 1, "high": 2, "critical": 3}.get(severity, 0)
+
+
+def _is_package_removal(row: Event) -> bool:
+    return settings.package_theft_detection_enabled and PACKAGE_REMOVED_TAG in (row.tags or [])
+
+
+def _priority_allows(row: Event) -> bool:
+    metadata = row.event_metadata or {}
+    return priority.meets_minimum(metadata.get("notification_priority"))
+
+
+async def _route_package_theft(session: AsyncSession, row: Event, *, mode: str) -> Incident | None:
+    """Escalate a package removal to an incident while armed away/night.
+
+    Only the *timing* decides: a package leaving the porch while somebody
+    is home is almost always the household collecting it, which is why
+    ``home``/``disarmed`` never escalate. The event itself is always
+    recorded regardless - this only controls the alert.
+
+    Evidence is the before/after crop pair the scene tracker already
+    captured (``event_metadata['mailbox']``); nothing new is stored.
+    """
+    if mode not in PACKAGE_THEFT_MODES:
+        return None
+    now = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
+    camera_name = await _camera_name(session, row.camera_id)
+    where = f"the {row.zone} zone" if row.zone else "an unzoned area"
+    mailbox = (row.event_metadata or {}).get("mailbox") or {}
+
+    async with _lock_for(row.camera_id, row.zone, "package_theft"):
+        await _acquire_route_lock(session, row.camera_id, row.zone, "package_theft")
+        existing = await _open_incident_for(session, row.camera_id, row.zone, "package_theft", now)
+        if existing is not None:
+            existing.event_ids = [*existing.event_ids, row.id]
+            existing.event_count += 1
+            existing.last_seen_at = now
+            existing.updated_at = now
+            await session.commit()
+            await session.refresh(existing)
+            incident, created = existing, False
+        else:
+            incident = Incident(
+                id=_new_id(),
+                kind="package_theft",
+                status="open",
+                severity="high",
+                camera_id=row.camera_id,
+                zone=row.zone,
+                mode_at_creation=mode,
+                event_ids=[row.id],
+                event_count=1,
+                first_seen_at=now,
+                last_seen_at=now,
+                summary=(
+                    f"A package was taken from {where} on {camera_name} while {mode}. "
+                    "Before/after evidence is attached."
+                ),
+                evidence={
+                    "before": mailbox.get("before"),
+                    "after": mailbox.get("after"),
+                    "visit_id": mailbox.get("visit_id"),
+                    "event_id": row.id,
+                },
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(incident)
+            await session.commit()
+            await session.refresh(incident)
+            created = True
+
+    await audit_service.record(
+        session,
+        "incident.created" if created else "incident.updated",
+        target_type="incident",
+        target_id=incident.id,
+        details={"kind": incident.kind, "camera_id": incident.camera_id, "event_id": row.id},
+    )
+    await _maybe_attach_ai_summary(session, incident)
+    await _broadcast(incident, "incident.created" if created else "incident.updated")
+    return incident
 
 
 async def _maybe_attach_ai_summary(session: AsyncSession, incident: Incident) -> None:
@@ -482,6 +581,7 @@ def to_dict(incident: Incident) -> dict:
         "last_escalated_at": incident.last_escalated_at.isoformat() if incident.last_escalated_at else None,
         "summary": incident.summary,
         "ai_summary": incident.ai_summary,
+        "evidence": incident.evidence,
         "created_at": incident.created_at.isoformat(),
         "updated_at": incident.updated_at.isoformat(),
     }

@@ -40,11 +40,16 @@ class Zone:
     bbox: BoundingBox
     #: Exact drawn outline, or ``None`` for a plain rectangle zone.
     points: tuple[Point, ...] | None = None
+    #: Loitering threshold in seconds, or ``None`` to use the configured
+    #: default. Carried here so the pipeline never has to re-read the row.
+    dwell_seconds: float | None = None
 
     def as_dict(self) -> dict:
         data = {"name": self.name, "kind": self.kind, **self.bbox.as_dict()}
         if self.points is not None:
             data["points"] = [list(point) for point in self.points]
+        if self.dwell_seconds is not None:
+            data["dwell_seconds"] = self.dwell_seconds
         return data
 
     @classmethod
@@ -55,6 +60,7 @@ class Zone:
             kind=row.kind,
             bbox=BoundingBox(row.x1, row.y1, row.x2, row.y2),
             points=points,
+            dwell_seconds=getattr(row, "dwell_seconds", None),
         )
 
     def overlap(self, detection_bbox: BoundingBox) -> float:

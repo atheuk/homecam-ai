@@ -42,8 +42,10 @@ from ..ai.audio import analyze_pcm
 from ..ai.vision import get_image_embedder
 from ..services import activities as activity_service
 from ..services import cameras as camera_service
+from ..services import digest as digest_service
 from ..services import events as event_service
 from ..services import persons as person_service
+from ..services import search as search_service
 from ..services.stream_frames import stream_hub
 from ..services.provider_registry import (
     active_mock_providers,
@@ -353,6 +355,68 @@ async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dic
         payload["has_photo"] = row.id in photo_ids
         payload["photo_url"] = f"/api/v1/events/{row.id}/photo" if row.id in photo_ids else None
     return payloads
+
+
+@router.get("/search")
+async def search(
+    q: str,
+    camera_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 20,
+    session: AsyncSession = Depends(get_db),
+):
+    """Natural-language event search ("blue van in the driveway last night").
+
+    Public for the same reason ``/events`` is: it only ever returns events
+    the dashboard already shows. Queries asking *who* someone is are
+    refused or stripped first - see :mod:`app.ai.query_moderation`.
+    """
+    if not settings.search_enabled:
+        raise HTTPException(status_code=503, detail="Search is disabled")
+    moderation, hits = await search_service.search_events(
+        session, q, camera_id=camera_id, since=since, until=until, limit=limit
+    )
+    if moderation.refused:
+        return {
+            "query": q,
+            "refused": True,
+            "notice": moderation.message,
+            "blocked_categories": list(moderation.categories),
+            "results": [],
+        }
+    payloads = await _decorate_events(session, [hit.row for hit in hits])
+    for payload, hit in zip(payloads, hits):
+        payload["score"] = round(hit.score, 4)
+        payload["semantic_score"] = round(hit.semantic_score, 4)
+        payload["keyword_score"] = round(hit.keyword_score, 4)
+    return {
+        "query": moderation.query,
+        "refused": False,
+        "notice": moderation.message,
+        "blocked_categories": list(moderation.categories),
+        "results": payloads,
+    }
+
+
+@router.get("/digest")
+async def digest(
+    date: str | None = None,
+    refresh: bool = False,
+    session: AsyncSession = Depends(get_db),
+):
+    """The day-in-review digest. Defaults to today (UTC)."""
+    if not settings.digest_enabled:
+        raise HTTPException(status_code=503, detail="Digest is disabled")
+    if date:
+        try:
+            day = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from None
+    else:
+        day = datetime.now(timezone.utc).date()
+    result = await digest_service.generate(session, day, refresh=refresh)
+    return result.as_dict()
 
 
 @router.get("/events/{event_id}/photo")

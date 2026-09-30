@@ -20,6 +20,7 @@ from . import activities as activity_service
 from . import ai_pipeline
 from . import incidents as incident_service
 from . import security_modes
+from . import signals as signal_service
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ async def create_and_broadcast_event(
     # the point-in-time human arming decision needs to be frozen.
     mode_at_detection = await security_modes.get_mode(session)
     enriched = event
+    signal_result = None
     try:
         enriched = await ai_pipeline.enrich_event(session, row, event, trigger_frame, frames)
         await activity_service.correlate_event(session, row)
@@ -111,7 +113,26 @@ async def create_and_broadcast_event(
         # The rollback expires the already-committed row; reload it here so
         # callers never trigger an implicit (sync) load outside the greenlet.
         await session.refresh(row)
+    try:
+        # Loitering / unusual-activity / notification-priority run after the
+        # AI pipeline has settled row.type and row.zone, but strictly before
+        # the broadcast below, so SSE clients and the incident router see the
+        # same tags and priority the REST API will later return.
+        signal_result = await signal_service.apply_signals(session, row, mode=mode_at_detection)
+        await session.commit()
+        await session.refresh(row)
+    except Exception:  # noqa: BLE001 - signals must never break ingestion
+        logger.exception("signal evaluation failed for %s", row.id)
+        await session.rollback()
+        await session.refresh(row)
     enriched = {**enriched, "activity_id": row.activity_id}
+    if signal_result is not None:
+        enriched = {
+            **enriched,
+            "tags": list(row.tags or []),
+            "notification_priority": signal_result.priority,
+            "metadata": dict(row.event_metadata or {}),
+        }
     await event_bus.publish(enriched)
     try:
         # Incident routing happens after the event is fully enriched/final
@@ -141,6 +162,14 @@ def to_dict(row: Event) -> dict:
         "camera_id": row.camera_id,
         "type": row.type,
         "priority": row.priority,
+        # Smart notification priority (low/normal/high/critical) computed by
+        # ``app.services.priority`` from type, zone, arming mode and signals.
+        # Distinct from ``priority`` above, which is the source's own level.
+        "notification_priority": metadata.get("notification_priority"),
+        "priority_reasons": list(metadata.get("priority_reasons") or []),
+        # Loitering dwell / activity-baseline details behind the
+        # ``loitering`` and ``unusual_activity`` tags.
+        "signals": metadata.get("signals"),
         "source": row.source,
         "start_time": row.start_time.isoformat(),
         "description": row.description,
