@@ -12,6 +12,9 @@ list/get responses are safe to expose to the frontend as-is.
 """
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from ..auth.dependencies import get_current_user
 from ..db import get_db
 from ..models.db import ProviderConfig, User
 from ..schemas_admin import (
+    CameraStillOut,
     CameraZoneIn,
     CameraZoneOut,
     CameraZoneUpdate,
@@ -33,6 +37,7 @@ from ..schemas_admin import (
     ProviderTestResult,
 )
 from ..services import provider_configs as service
+from ..services import camera_stills as still_service
 from ..services import zones as zone_service
 
 router = APIRouter(prefix="/api/v1/admin/providers", tags=["admin"])
@@ -164,6 +169,35 @@ async def _get_zone_or_404(session: AsyncSession, zone_id: str):
     if zone is None:
         raise HTTPException(404, "Zone not found")
     return zone
+
+
+@zones_router.get("/{camera_id}/still", response_model=CameraStillOut)
+async def camera_still(
+    camera_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """One current picture from a camera, for drawing zones on.
+
+    Authenticated (unlike the public snapshot route) and returned as a
+    ``data:`` URL so the browser never has to load camera imagery from an
+    unauthenticated ``<img src>``.
+    """
+    try:
+        still = await still_service.capture_still(session, camera_id)
+    except still_service.CameraStillNotFound as exc:
+        raise HTTPException(404, "Camera not found") from exc
+    except still_service.CameraStillUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    encoded = base64.b64encode(still.image).decode("ascii")
+    return CameraStillOut(
+        camera_id=camera_id,
+        image=f"data:image/jpeg;base64,{encoded}",
+        width=still.width,
+        height=still.height,
+        source=still.source,
+        captured_at=datetime.now(timezone.utc),
+    )
 
 
 @zones_router.get("/{camera_id}/zones", response_model=list[CameraZoneOut])

@@ -129,10 +129,13 @@ class PersonSighting(Base):
 
 
 class CameraZone(Base):
-    """User-defined named rectangle in normalized image coordinates.
+    """User-defined named region in normalized image coordinates.
 
-    Zones carry no vision logic of their own: they are labels plus a box,
-    and the pipeline only computes bbox overlap against them.
+    Zones carry no vision logic of their own: they are labels plus a shape.
+    ``x1/y1/x2/y2`` is always the zone's bounding box; ``points`` optionally
+    holds the exact drawn polygon (``[[x, y], ...]``, >= 3 normalized
+    points). Overlap matching uses the polygon when present, while the
+    region-based mailbox/bin detectors keep cropping the bounding box.
     """
 
     __tablename__ = "camera_zones"
@@ -144,6 +147,7 @@ class CameraZone(Base):
     y1: Mapped[float] = mapped_column(Float)
     x2: Mapped[float] = mapped_column(Float)
     y2: Mapped[float] = mapped_column(Float)
+    points: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

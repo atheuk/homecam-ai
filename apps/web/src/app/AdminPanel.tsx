@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState, type FormEvent } from "react";
+import ZoneEditor from "./ZoneEditor";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -33,6 +34,7 @@ type CameraZone = {
   y1: number;
   x2: number;
   y2: number;
+  points?: number[][] | null;
 };
 
 /** Zone kinds the detection pipeline understands semantically
@@ -684,23 +686,44 @@ export default function AdminPanel() {
       <section className="panel admin-panel">
         <h3>Detection zones</h3>
         <p className="muted">
-          Zones are labelled rectangles in normalized image coordinates (0–1, origin top-left). The AI pipeline uses
+          Zones are labelled regions in normalized image coordinates (0–1, origin top-left). The AI pipeline uses
           them to turn raw detections into meaningful events: a person in a <code>driveway</code> zone, a car parked in
           a <code>parking</code> zone, or activity at the <code>mailbox</code>. A <code>mailbox</code> zone enables
           mail-delivery detection and a <code>bin</code> zone enables bin put-out/emptied detection; both are off until
           you add one. See docs/ai-pipeline.md.
         </p>
+        <label>
+          Camera
+          <select
+            value={zoneCameraId}
+            onChange={(e) => setZoneCameraId(e.target.value)}
+            aria-label="Zone camera"
+          >
+            {cameras.map((camera) => (
+              <option key={camera.id} value={camera.id}>
+                {camera.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <h4>Draw a zone</h4>
+        <p className="muted">
+          Click or tap the picture to drop points around the area, then name it and pick its kind. Shapes are stored
+          as fractions of the image, so they stay correct at any resolution.
+        </p>
+        {token && zoneCameraId && (
+          <ZoneEditor
+            apiBase={API}
+            token={token}
+            cameraId={zoneCameraId}
+            zoneKinds={ZONE_KINDS}
+            kindHints={ZONE_KIND_HINTS}
+            zones={zones}
+            onSaved={() => loadZones(zoneCameraId, token)}
+          />
+        )}
+        <h4>Or type a rectangle</h4>
         <form onSubmit={saveZone} className="admin-form">
-          <label>
-            Camera
-            <select value={zoneCameraId} onChange={(e) => setZoneCameraId(e.target.value)}>
-              {cameras.map((camera) => (
-                <option key={camera.id} value={camera.id}>
-                  {camera.name}
-                </option>
-              ))}
-            </select>
-          </label>
           <label>
             Zone name
             <input value={zoneName} onChange={(e) => setZoneName(e.target.value)} required />
