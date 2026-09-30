@@ -127,10 +127,18 @@ function LoadingDashboard(){
   </div>;
 }
 
-async function json<T>(url:string):Promise<T>{
-  const response=await fetch(url);
-  if(!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json() as Promise<T>;
+const REQUEST_TIMEOUT_MS=15_000;
+
+async function json<T>(url:string,timeoutMs=REQUEST_TIMEOUT_MS):Promise<T>{
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const response=await fetch(url,{signal:controller.signal});
+    if(!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json() as T;
+  }finally{
+    clearTimeout(timer);
+  }
 }
 
 function tabFrom(value:string|null):Tab{
@@ -154,33 +162,33 @@ export default function Dashboard(){
   const load=useCallback(async()=>{
     setLoading(true);
     setError("");
-    try{
-      const [cameraData,eventData,personData]=await Promise.all([
-        json<Camera[]>(`${API}/api/v1/cameras`),
-        json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`),
-        json<{persons?:Person[]}>(`${API}/api/v1/persons`),
-      ]);
-      setCameras(cameraData);
-      setEvents(eventData.slice(0,EVENT_LIMIT));
-      setPersons(personData.persons||[]);
-    }catch{
-      setError("HomeCam could not reach the local API. Check the service and try again.");
-    }finally{
-      setLoading(false);
-    }
+    // Each source loads independently: the slow NVR-backed camera call must not
+    // take down events and people when it times out or fails.
+    const [cameraResult,eventResult,personResult]=await Promise.allSettled([
+      json<Camera[]>(`${API}/api/v1/cameras`),
+      json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`),
+      json<{persons?:Person[]}>(`${API}/api/v1/persons`),
+    ]);
+    const degraded:string[]=[];
+    if(cameraResult.status==="fulfilled") setCameras(cameraResult.value);
+    else degraded.push("Camera status is unavailable.");
+    if(eventResult.status==="fulfilled") setEvents(eventResult.value.slice(0,EVENT_LIMIT));
+    else degraded.push("Recent events are unavailable.");
+    if(personResult.status==="fulfilled") setPersons(personResult.value.persons||[]);
+    else degraded.push("People are unavailable.");
+    if(degraded.length===3) setError("HomeCam could not reach the local API. Check the service and try again.");
+    else if(degraded.length) setError(degraded.join(" "));
+    setLoading(false);
   },[]);
 
   const refreshEvents=useCallback(async()=>{
-    try{
-      const [eventData,personData]=await Promise.all([
-        json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`),
-        json<{persons?:Person[]}>(`${API}/api/v1/persons`),
-      ]);
-      setEvents(eventData.slice(0,EVENT_LIMIT));
-      setPersons(personData.persons||[]);
-    }catch{
-      setError("Events could not be refreshed. Try again.");
-    }
+    const [eventResult,personResult]=await Promise.allSettled([
+      json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`),
+      json<{persons?:Person[]}>(`${API}/api/v1/persons`),
+    ]);
+    if(eventResult.status==="fulfilled") setEvents(eventResult.value.slice(0,EVENT_LIMIT));
+    if(personResult.status==="fulfilled") setPersons(personResult.value.persons||[]);
+    if(eventResult.status==="rejected"||personResult.status==="rejected") setError("Events could not be refreshed. Try again.");
   },[]);
 
   useEffect(()=>{load();},[load]);
