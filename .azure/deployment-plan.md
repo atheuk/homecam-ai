@@ -45,8 +45,9 @@ preserve existing behavior; the zone editor exposes an optional alert toggle.
 - [x] Implement and test clip capture, retention, authenticated playback, UI,
       configuration, documentation and migration.
 - [x] Review security, multi-replica behavior and failure handling locally.
-- [ ] Obtain green PR CI, including Linux Docker image builds and migration validation.
-- [ ] Open PR; **do not merge** until coordinator authorizes.
+- [x] Obtain green PR CI, including Linux Docker image builds (all backend,
+      frontend, edge and Docker checks passed in both push and PR workflows).
+- [x] Open draft PR; **do not merge** until coordinator authorizes.
 - [ ] Obtain coordinator's explicit go-ahead and confirm subscription/location,
       edge connectivity, storage headroom and existing image/revision baseline.
 - [ ] Update this plan to `Ready for Validation`; run `azure-validate` and resolve
@@ -62,8 +63,10 @@ Local results (2026-10-01): API 786 passed/3 skipped; Dahua edge 33 passed;
 Eufy edge 21 passed; web 195 passed, lint/typecheck/production build green;
 Python Ruff green; isolated SQLite `alembic upgrade head` reached
 `0015_incident_clips`. A targeted review identified two capture/hold races,
-both corrected before final regression testing. Linux CI and Docker image
-builds are pending PR creation. Do not mark this release `Validated` using
+both corrected before final regression testing. PR CI passed on the release
+commit, including Linux Docker image builds; a real private HLS playback
+check still requires the development edge environment. Do not mark this
+release `Validated` using
 earlier release results; invoke `azure-validate` once deployment is authorized.
 The release must preserve the API's `tailscale` sidecar and existing secret
 references, run the migration job with the new API image before switching the
