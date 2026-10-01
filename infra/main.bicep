@@ -9,7 +9,6 @@ param deployerObjectId string
 param isPlaceholder bool = true
 param containerImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 param apiImage string = ''
-param workerImage string = ''
 param webImage string = ''
 @secure()
 param administratorLoginPassword string
@@ -27,7 +26,6 @@ var rgName = 'rg-homecam-ai'
 var caeName = 'cae-homecam-ai-dev-82ac'
 var acrName = 'crhomecamaidev82ac'
 var apiName = 'ca-api-homecam-ai-dev-82ac'
-var workerName = 'ca-worker-homecam-ai-dev-82ac'
 var webName = 'ca-web-homecam-ai-dev-82ac'
 var mediaName = 'ca-media-homecam-ai-dev-82ac'
 var pgName = 'psql-homecam-ai-dev-82ac'
@@ -139,21 +137,6 @@ module api './modules/api.bicep' = {
     foundryVisionDeployment: foundry.outputs.visionDeploymentName
   }
 }
-module worker './modules/worker.bicep' = {
-  name: 'worker'
-  scope: rg
-  params: {
-    name: workerName
-    location: location
-    tags: tags
-    environmentId: environment.outputs.id
-    managedIdentityId: identity.outputs.id
-    acrId: acr.outputs.id
-    keyVaultName: kvName
-    containerImage: empty(workerImage) ? (empty(apiImage) ? containerImage : apiImage) : workerImage
-    isPlaceholder: isPlaceholder
-  }
-}
 module web './modules/web.bicep' = {
   name: 'web'
   scope: rg
@@ -178,7 +161,7 @@ module media './modules/media.bicep' = {
     tags: tags
     environmentId: environment.outputs.id
     managedIdentityId: identity.outputs.id
-    containerImage: 'bluenviron/mediamtx:latest'
+    containerImage: 'bluenviron/mediamtx:1.21.1'
   }
 }
 module migration './modules/db-migrate-job.bicep' = {
