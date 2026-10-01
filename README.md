@@ -191,9 +191,11 @@ or above the configured override.
 | `NOTIFICATIONS_ENABLED` | `true` | Master switch; channels are still individually opt-in. |
 | `WEB_APP_BASE_URL` | empty | Public URL of the web app. Without it an alert carries no link. |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | empty | Web push keys. Web push stays unavailable until both are set. |
-| `VAPID_SUBJECT` | `mailto:admin@homecam.local` | Contact passed to the push service. |
-| `NOTIFICATION_TIMEOUT_SECONDS` | `10` | Per-send HTTP timeout. |
-| `NOTIFICATION_MAX_PER_HOUR` | `20` | Default per-channel hourly cap. |
+| `VAPID_SUBJECT` | `mailto:homecam@localhost` | Contact passed to the push service. |
+| `NOTIFICATION_TIMEOUT_SECONDS` | `6` | Per-send HTTP timeout. |
+
+The per-channel hourly cap is not an environment variable: it is stored per
+channel (default `20`) and editable from the admin UI.
 
 Generate a VAPID key pair (never commit or log the private key):
 
