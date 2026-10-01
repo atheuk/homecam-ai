@@ -9,7 +9,7 @@ explicit human "keep this" that outranks the retention policy).
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0013_arming_schedules_and_retention"
+revision = "0013_arming_and_retention"
 down_revision = "0012_ingestion_leases"
 
 
