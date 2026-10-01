@@ -381,6 +381,15 @@ replicas stand by. A standby takes over once the lease is older than the TTL,
 or immediately after a clean shutdown releases it. Gaining or losing a lease
 drops the cached scene, so the new holder resumes from the database. A
 replica that loses a lease also stops its stream reader for that camera.
+Expiry is judged only by the database clock (`clock_timestamp()` on Postgres,
+`julianday('now')` on SQLite), so clock skew between replicas cannot produce
+two holders. Every acquisition increments the lease `epoch`, a fencing token. A
+frame can outlive its lease (a slow detector or Foundry check), so each
+scene-state save and each scene-event insert first runs a fencing `UPDATE` in
+the same transaction. It matches only while this replica still holds that
+epoch unexpired, and it locks the lease row until the write commits.
+Otherwise the write and its events are discarded and the stale cache dropped.
+Subject events from a frame whose lease has lapsed are dropped too.
 
 **Bins** — add a zone of kind `bin` around the curb spot (off until you do).
 Every `BIN_CHECK_INTERVAL_SECONDS`, when no person/vehicle occludes it, the

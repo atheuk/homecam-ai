@@ -206,12 +206,15 @@ class IngestionLease(Base):
     in-memory scene caches. The lease is taken and renewed with a
     conditional UPDATE/INSERT and expires after a TTL, letting a standby
     replica take over - see :mod:`app.services.ingestion_lease`.
-    ``expires_at`` is epoch seconds.
+    ``expires_at`` is epoch seconds by the *database* clock. ``epoch`` is a
+    fencing token incremented on every acquisition: scene writes only commit
+    while their epoch still holds the lease.
     """
 
     __tablename__ = "ingestion_leases"
     camera_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     holder: Mapped[str] = mapped_column(String(128))
+    epoch: Mapped[int] = mapped_column(Integer, default=1)
     expires_at: Mapped[float] = mapped_column(Float)
     acquired_at: Mapped[float] = mapped_column(Float)
 

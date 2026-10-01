@@ -74,7 +74,9 @@ from ..ai.scene_verifier import get_scene_verifier
 from ..ai.zones import Zone, intersection_area, overlap_ratio, primary_zone
 from ..config import settings
 from ..models.db import Event, SceneState, VehicleTrack
+from . import ingestion_lease
 from . import zones as zone_service
+from .ingestion_lease import LeaseLost, LeaseToken
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +180,9 @@ class CameraScene:
     # Foundry checks in flight per zone: (task, context). They run off the
     # frame path; a later frame picks up the answer. Memory only.
     pending: dict[str, tuple[asyncio.Task, dict]] = field(default_factory=dict)
+    # Ingestion lease this state was loaded under. Every save is fenced on it
+    # so a replica that lost the camera cannot overwrite the new holder.
+    lease: LeaseToken | None = None
 
 
 _scenes: dict[str, CameraScene] = {}
@@ -287,6 +292,13 @@ async def _read(session: AsyncSession, camera_id: str) -> CameraScene:
 
 
 async def _save(session: AsyncSession, scene: CameraScene) -> None:
+    if scene.lease is not None and not await ingestion_lease.fence(session, scene.lease):
+        # Another replica took the camera while this frame was processing:
+        # discard the write and the stale cache (the next frame reloads).
+        await session.rollback()
+        forget(scene.camera_id)
+        logger.info("scene state for %s discarded: ingestion lease epoch %d lost", scene.camera_id, scene.lease.epoch)
+        raise LeaseLost(scene.camera_id)
     now = datetime.now(timezone.utc)
     for track_id in scene.deleted_tracks:
         row = await session.get(VehicleTrack, track_id)
@@ -376,11 +388,17 @@ async def process_frame(
     frame: bytes | None,
     detections: list[Detection],
     now: float | None = None,
+    lease: LeaseToken | None = None,
 ) -> list[SceneTransition]:
-    """Advance every state machine for one camera by one real frame."""
+    """Advance every state machine for one camera by one real frame.
+
+    With ``lease`` the save is fenced on it: if the lease was lost
+    meanwhile, nothing is written and no transitions are returned."""
     now = time.time() if now is None else now
     try:
-        return await _process(session, camera_id, camera_name, frame, detections, now)
+        return await _process(session, camera_id, camera_name, frame, detections, now, lease)
+    except LeaseLost:
+        return []
     except Exception:  # noqa: BLE001 - corrupt state must not fail every frame
         logger.exception("scene state for %s is unusable; resetting it", camera_id)
         await session.rollback()
@@ -421,8 +439,10 @@ async def _process(
     frame: bytes | None,
     detections: list[Detection],
     now: float,
+    lease: LeaseToken | None = None,
 ) -> list[SceneTransition]:
     scene = await _load(session, camera_id)
+    scene.lease = lease
     outage = scene.last_frame_at is None or now - scene.last_frame_at > settings.scene_outage_seconds
     if outage:
         scene.observed_since = now
@@ -453,7 +473,9 @@ async def _process(
 
 
 async def note_event(session: AsyncSession, transition: SceneTransition, event_id: str) -> None:
-    """Remember which event reported a track (so parking can annotate it)."""
+    """Remember which event reported a track (so parking can annotate it).
+
+    Fenced like every save: raises :class:`LeaseLost` if the lease is gone."""
     if transition.track_id is None:
         return
     scene = _scenes.get(transition.camera_id)

@@ -54,7 +54,7 @@ async def _clean():
 
 
 def _replica_emitting(monkeypatch, transitions) -> None:
-    async def fake_process_frame(session, camera_id, camera_name, image, detections):
+    async def fake_process_frame(session, camera_id, camera_name, image, detections, **kwargs):
         return list(transitions)
 
     async def fake_note_event(session, transition, event_id):

@@ -115,28 +115,37 @@ async def _acquire_frame(camera_id: str, provider) -> tuple[bytes, list[bytes] |
     return image, None, "snapshot"
 
 
-async def _lead(session_factory, camera_id: str) -> bool:
-    """Whether this replica ingests ``camera_id`` right now.
+_UNLEASED = object()
+
+
+async def _lead(session_factory, camera_id: str):
+    """The lease token under which this replica ingests ``camera_id`` now,
+    ``_UNLEASED`` when leasing is disabled, or ``None`` to stand by.
 
     Only the ingestion lease holder samples a camera and advances its scene
-    state. Gaining or losing the lease drops the cached scene so it is
-    reloaded from the database, which the previous holder kept current.
+    state. Gaining or losing the lease (or re-gaining it under a new epoch)
+    drops the cached scene so it is reloaded from the database, which the
+    previous holder kept current. The token fences every scene write.
     """
     if not settings.ingestion_lease_enabled:
-        return True
+        return _UNLEASED
     keeper = ingestion_lease.keeper
     try:
         async with session_factory() as session:
             status = await keeper.ensure(session, camera_id)
     except Exception as exc:  # noqa: BLE001 - keep going on a lease we still hold
         logger.warning("ingestion lease check failed for %s: %s", camera_id, exc)
-        return keeper.held(camera_id)
+        return keeper.token(camera_id)
     if status.changed:
         scene_state.forget(camera_id)
         _last_stream_seq.pop(camera_id, None)
         if not status.held:
             stream_hub.release(camera_id)
-    return status.held
+    return status.token
+
+
+def _still_leading(camera_id: str) -> bool:
+    return not settings.ingestion_lease_enabled or ingestion_lease.keeper.held(camera_id)
 
 
 async def poll_once(session_factory=SessionLocal) -> int:
@@ -151,8 +160,10 @@ async def poll_once(session_factory=SessionLocal) -> int:
         camera_id = camera.get("id")
         if not camera_id:
             continue
-        if not await _lead(session_factory, camera_id):
+        lease = await _lead(session_factory, camera_id)
+        if lease is None:
             continue
+        token = None if lease is _UNLEASED else lease
         camera_name = str(camera.get("name") or camera_id)
         # Camera-health (offline transition) must be evaluated for *every*
         # discovered camera, online or not - this is why it runs before the
@@ -193,15 +204,19 @@ async def poll_once(session_factory=SessionLocal) -> int:
         # Subject events first: a slow scene check (a Foundry mailbox/bin
         # verification) must never delay the person/animal event from the
         # same frame.
-        created += await _emit_subject_events(
-            session_factory, provider, camera_id, camera_name, image, detections,
-            stream_frames, frame_source,
-        )
+        # A slow frame can outlive the lease: the new holder reports from
+        # here on, so drop this replica's subject events.
+        if _still_leading(camera_id):
+            created += await _emit_subject_events(
+                session_factory, provider, camera_id, camera_name, image, detections,
+                stream_frames, frame_source,
+            )
         # Every real frame advances the persistent scene state, including
         # frames with nothing in them: that is how a vehicle departs or a
         # mailbox visit ends. Its transitions are events of their own.
         created += await _emit_scene_transitions(
-            session_factory, camera_id, camera_name, image, detections, stream_frames, frame_source
+            session_factory, camera_id, camera_name, image, detections, stream_frames, frame_source,
+            lease=token,
         )
     try:
         # Once per poll tick (not per camera): sweep every open incident for
@@ -291,12 +306,13 @@ async def _emit_scene_transitions(
     detections: list[Detection],
     stream_frames: list[bytes] | None,
     frame_source: str,
+    lease: ingestion_lease.LeaseToken | None = None,
 ) -> int:
     created = 0
     try:
         async with session_factory() as session:
             transitions = await scene_state.process_frame(
-                session, camera_id, camera_name, image, detections
+                session, camera_id, camera_name, image, detections, lease=lease
             )
     except Exception:  # noqa: BLE001 - scene state must not break ingestion
         logger.exception("scene state update failed for %s", camera_id)
@@ -319,6 +335,15 @@ async def _emit_scene_transitions(
         }
         try:
             async with session_factory() as session:
+                # Fenced: the lease row stays locked until the event commits,
+                # and a transition from a lease lost meanwhile is dropped.
+                if lease is not None and not await ingestion_lease.fence(session, lease):
+                    await session.rollback()
+                    logger.info(
+                        "scene transition %s: %s dropped, ingestion lease epoch %d lost",
+                        camera_id, transition.transition, lease.epoch,
+                    )
+                    break
                 if transition.dedup_key:
                     # The claim is only flushed here. It commits in the same
                     # transaction as the event row (persist_event's commit),
@@ -345,7 +370,10 @@ async def _emit_scene_transitions(
                     frames=frames,
                     evidence_images=transition.evidence_images,
                 )
-                await scene_state.note_event(session, transition, row.id)
+                try:
+                    await scene_state.note_event(session, transition, row.id)
+                except ingestion_lease.LeaseLost:
+                    pass  # the event is committed; only the track link is lost
         except Exception:  # noqa: BLE001
             logger.exception("scene event failed for %s", camera_id)
             continue

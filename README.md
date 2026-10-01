@@ -111,7 +111,7 @@ A `mailbox` zone reports `mailbox_delivery`, `mailbox_retrieval`, `mailbox_opene
 | `MAILBOX_DEDUPE_SECONDS` | `900` | One delivery/retrieval per zone per window (also the cross-replica claim). |
 | `MAILBOX_BOOST_SECONDS` / `MAILBOX_BOOST_INTERVAL_SECONDS` | `60` / `1.0` | Faster stream sampling while someone is at the mailbox (stream cameras only). |
 
-With several API replicas, each camera is ingested by exactly one replica at a time. That replica holds a lease row in `ingestion_leases` (migration `0012`); the others stand by and take over once the lease is stale. This keeps replicas from overwriting each other's vehicle, bin and mailbox scene state.
+With several API replicas, each camera is ingested by exactly one replica at a time. That replica holds a lease row in `ingestion_leases` (migration `0012`); the others stand by and take over once the lease is stale. This keeps replicas from overwriting each other's vehicle, bin and mailbox scene state. Expiry uses the database clock, and every scene write is fenced on the lease epoch, so a replica that lost the lease mid-frame cannot write stale state.
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
