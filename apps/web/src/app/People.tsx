@@ -72,7 +72,8 @@ export type EventScene={
 const SCENE_LABELS:Record<string,string>={
   first_seen:"Vehicle seen",arrived:"Arrived",returned:"Returned",moved:"Moved",
   departed:"Left",interaction:"Someone at vehicle",
-  mailbox_delivery:"Mail delivered",bin_placed_out:"Bin put out",bin_emptied:"Bin emptied",
+  mailbox_delivery:"Mail delivered",mailbox_retrieval:"Mail taken out",mailbox_opened:"Mailbox opened",
+  mailbox_visit:"Mailbox visit",bin_placed_out:"Bin put out",bin_emptied:"Bin emptied",
 };
 
 /** Short, human labels for a scene transition (plus "Parked" once stable). */
@@ -80,8 +81,11 @@ export function sceneBadges(event:Pick<EventItem,"scene"|"tags">):string[]{
   const scene=event.scene;
   if(!scene) return [];
   const labels:string[]=[];
-  if(scene.kind==="mailbox"&&scene.item_type&&scene.item_type!=="unknown"){
-    labels.push(scene.item_type==="parcel"?"Parcel delivered":"Mail delivered");
+  const parcel=scene.item_type==="parcel";
+  if(scene.transition==="mailbox_delivery"&&scene.item_type&&scene.item_type!=="unknown"){
+    labels.push(parcel?"Parcel delivered":"Mail delivered");
+  }else if(scene.transition==="mailbox_retrieval"&&scene.item_type&&scene.item_type!=="unknown"){
+    labels.push(parcel?"Parcel taken out":"Mail taken out");
   }else{
     const label=SCENE_LABELS[scene.transition];
     if(label) labels.push(label);
@@ -95,7 +99,7 @@ export function sceneCategory(event:Pick<EventItem,"scene"|"tags">):"vehicle"|"m
   const kind=event.scene?.kind;
   if(kind==="vehicle"||kind==="mailbox"||kind==="bin") return kind;
   const tags=event.tags||[];
-  if(tags.includes("mailbox_delivery")) return "mailbox";
+  if(tags.includes("mailbox")||tags.some(tag=>tag.startsWith("mailbox_"))) return "mailbox";
   if(tags.includes("bin_placed_out")||tags.includes("bin_emptied")) return "bin";
   return null;
 }

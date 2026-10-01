@@ -47,6 +47,7 @@ CAMERA_HEALTH_KINDS = ("camera_offline", "camera_obstruction", "camera_frozen")
 # A package leaving a monitored zone only becomes an *alert* when the
 # household said nobody should be collecting it. See ``_route_package_theft``.
 PACKAGE_REMOVED_TAG = "package_removed"
+MAILBOX_RETRIEVAL_TAG = "mailbox_retrieval"
 PACKAGE_THEFT_MODES = frozenset({"away", "night"})
 
 _SEVERITY_BY_EVENT_TYPE = {"person": "high", "vehicle": "medium"}
@@ -173,6 +174,17 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
 
     if _is_package_removal(row):
         return await _route_package_theft(session, row, mode=mode)
+    if MAILBOX_RETRIEVAL_TAG in (row.tags or []):
+        # Something taken out of the mailbox with no package evidence (mail,
+        # per the verifier): an alert only while nobody should be at it.
+        return await _route_package_theft(
+            session,
+            row,
+            mode=mode,
+            kind="mailbox_retrieval",
+            severity="medium",
+            what="Something was taken out of",
+        )
 
     if row.type not in INTRUSION_EVENT_TYPES:
         return None
@@ -258,8 +270,17 @@ def _priority_allows(row: Event) -> bool:
     return priority.meets_minimum(metadata.get("notification_priority"))
 
 
-async def _route_package_theft(session: AsyncSession, row: Event, *, mode: str) -> Incident | None:
-    """Escalate a package removal to an incident while armed away/night.
+async def _route_package_theft(
+    session: AsyncSession,
+    row: Event,
+    *,
+    mode: str,
+    kind: str = "package_theft",
+    severity: str = "high",
+    what: str = "A package was taken from",
+) -> Incident | None:
+    """Escalate a package removal (or, with ``kind="mailbox_retrieval"``,
+    any item taken out of a mailbox) to an incident while armed away/night.
 
     Only the *timing* decides: a package leaving the porch while somebody
     is home is almost always the household collecting it, which is why
@@ -276,9 +297,9 @@ async def _route_package_theft(session: AsyncSession, row: Event, *, mode: str) 
     where = f"the {row.zone} zone" if row.zone else "an unzoned area"
     mailbox = (row.event_metadata or {}).get("mailbox") or {}
 
-    async with _lock_for(row.camera_id, row.zone, "package_theft"):
-        await _acquire_route_lock(session, row.camera_id, row.zone, "package_theft")
-        existing = await _open_incident_for(session, row.camera_id, row.zone, "package_theft", now)
+    async with _lock_for(row.camera_id, row.zone, kind):
+        await _acquire_route_lock(session, row.camera_id, row.zone, kind)
+        existing = await _open_incident_for(session, row.camera_id, row.zone, kind, now)
         if existing is not None:
             existing.event_ids = [*existing.event_ids, row.id]
             existing.event_count += 1
@@ -290,9 +311,9 @@ async def _route_package_theft(session: AsyncSession, row: Event, *, mode: str) 
         else:
             incident = Incident(
                 id=_new_id(),
-                kind="package_theft",
+                kind=kind,
                 status="open",
-                severity="high",
+                severity=severity,
                 camera_id=row.camera_id,
                 zone=row.zone,
                 mode_at_creation=mode,
@@ -301,7 +322,7 @@ async def _route_package_theft(session: AsyncSession, row: Event, *, mode: str) 
                 first_seen_at=now,
                 last_seen_at=now,
                 summary=(
-                    f"A package was taken from {where} on {camera_name} while {mode}. "
+                    f"{what} {where} on {camera_name} while {mode}. "
                     "Before/after evidence is attached."
                 ),
                 evidence={

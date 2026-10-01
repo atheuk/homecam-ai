@@ -22,13 +22,29 @@ Vehicles
     colour signature is "returned".
 
 Mailbox (zones of kind ``mailbox``)
-    A person overlapping the mailbox for >= ``mailbox_min_observations``
-    samples is a visit (one sample is a walk-by). When they leave, the
-    before / during / after evidence decides: a package the local detector
-    sees in the zone after but not before is a deposit; a package seen only
-    while the person was there was carried past. Otherwise the Foundry
-    vision deployment is asked a closed question about the before/during/
-    after crops. Only "yes" emits, once per ``mailbox_dedupe_seconds``.
+    Two signals, combined per visit:
+
+    * Opened/closed, independent of people: the zone is compared with a
+      rolling, brightness-normalized reference of the idle mailbox (updated
+      only while unoccluded, nobody near and unchanged). A difference above
+      ``mailbox_open_threshold`` for ``mailbox_open_min_frames`` samples (one
+      while a person is near) means opened; back below 70% means closed. A
+      change the whole frame shares (IR switch) re-bases instead.
+    * Proximity: a person covering ``mailbox_min_zone_overlap`` of the zone
+      grown by ``mailbox_proximity_margin`` starts a visit (and boosts the
+      camera's stream sampling). One sample counts when the mailbox opened
+      or a package appeared/disappeared; otherwise the visit needs
+      ``mailbox_min_observations`` samples or it is a walk-by.
+
+    When the visit ends, the before / during / after evidence classifies it:
+    package appeared -> ``mailbox_delivery``; package gone ->
+    ``mailbox_retrieval`` (tagged ``package_removed``); otherwise the
+    Foundry verifier's ``action`` (deposited / retrieved / opened_only /
+    none), falling back locally to ``mailbox_opened`` (appearance changed)
+    or ``mailbox_visit`` (outcome unknown). Every counted visit emits
+    exactly one event, deduplicated per transition locally and across
+    replicas by a DB claim. An opening with nobody seen near is a
+    standalone ``mailbox_opened``. Identity is never inferred.
 
 Bins (zones of kind ``bin``)
     The zone is compared with a brightness-normalized baseline. A change
@@ -58,7 +74,9 @@ from ..ai.scene_verifier import get_scene_verifier
 from ..ai.zones import Zone, intersection_area, overlap_ratio, primary_zone
 from ..config import settings
 from ..models.db import Event, SceneState, VehicleTrack
+from . import ingestion_lease
 from . import zones as zone_service
+from .ingestion_lease import LeaseLost, LeaseToken
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +180,9 @@ class CameraScene:
     # Foundry checks in flight per zone: (task, context). They run off the
     # frame path; a later frame picks up the answer. Memory only.
     pending: dict[str, tuple[asyncio.Task, dict]] = field(default_factory=dict)
+    # Ingestion lease this state was loaded under. Every save is fenced on it
+    # so a replica that lost the camera cannot overwrite the new holder.
+    lease: LeaseToken | None = None
 
 
 _scenes: dict[str, CameraScene] = {}
@@ -176,6 +197,17 @@ def _iso(value: float | None) -> str | None:
 def reset_memory() -> None:
     """Drop in-memory state (tests simulate a restart with this)."""
     _scenes.clear()
+    _mailbox_stats.clear()
+
+
+def forget(camera_id: str) -> None:
+    """Drop one camera's cached scene so the next frame reloads it from the
+    database. Called whenever this replica gains or loses the camera's
+    ingestion lease: another replica may have advanced the state meanwhile."""
+    scene = _scenes.pop(camera_id, None)
+    if scene is not None:
+        for task, _ in scene.pending.values():
+            task.cancel()
 
 
 def _overlap(track_box: BoundingBox, box: BoundingBox) -> float:
@@ -228,6 +260,12 @@ async def _load(session: AsyncSession, camera_id: str) -> CameraScene:
     scene = _scenes.get(camera_id)
     if scene is not None:
         return scene
+    scene = await _read(session, camera_id)
+    _scenes[camera_id] = scene
+    return scene
+
+
+async def _read(session: AsyncSession, camera_id: str) -> CameraScene:
     scene = CameraScene(camera_id=camera_id)
     rows = (
         await session.execute(select(VehicleTrack).where(VehicleTrack.camera_id == camera_id))
@@ -250,11 +288,17 @@ async def _load(session: AsyncSession, camera_id: str) -> CameraScene:
                 state=row.state,
                 data=dict(row.data or {}),
             )
-    _scenes[camera_id] = scene
     return scene
 
 
 async def _save(session: AsyncSession, scene: CameraScene) -> None:
+    if scene.lease is not None and not await ingestion_lease.fence(session, scene.lease):
+        # Another replica took the camera while this frame was processing:
+        # discard the write and the stale cache (the next frame reloads).
+        await session.rollback()
+        forget(scene.camera_id)
+        logger.info("scene state for %s discarded: ingestion lease epoch %d lost", scene.camera_id, scene.lease.epoch)
+        raise LeaseLost(scene.camera_id)
     now = datetime.now(timezone.utc)
     for track_id in scene.deleted_tracks:
         row = await session.get(VehicleTrack, track_id)
@@ -344,11 +388,17 @@ async def process_frame(
     frame: bytes | None,
     detections: list[Detection],
     now: float | None = None,
+    lease: LeaseToken | None = None,
 ) -> list[SceneTransition]:
-    """Advance every state machine for one camera by one real frame."""
+    """Advance every state machine for one camera by one real frame.
+
+    With ``lease`` the save is fenced on it: if the lease was lost
+    meanwhile, nothing is written and no transitions are returned."""
     now = time.time() if now is None else now
     try:
-        return await _process(session, camera_id, camera_name, frame, detections, now)
+        return await _process(session, camera_id, camera_name, frame, detections, now, lease)
+    except LeaseLost:
+        return []
     except Exception:  # noqa: BLE001 - corrupt state must not fail every frame
         logger.exception("scene state for %s is unusable; resetting it", camera_id)
         await session.rollback()
@@ -389,8 +439,10 @@ async def _process(
     frame: bytes | None,
     detections: list[Detection],
     now: float,
+    lease: LeaseToken | None = None,
 ) -> list[SceneTransition]:
     scene = await _load(session, camera_id)
+    scene.lease = lease
     outage = scene.last_frame_at is None or now - scene.last_frame_at > settings.scene_outage_seconds
     if outage:
         scene.observed_since = now
@@ -406,8 +458,11 @@ async def _process(
     for zone_id, zone in zones:
         kind = zone.kind.casefold()
         if kind == "mailbox" and settings.mailbox_delivery_enabled:
-            result = await _mailbox_step(scene, zone_id, zone, camera_name, frame, detections, image, now, outage)
-        elif kind == "bin" and settings.bin_detection_enabled:
+            transitions += await _mailbox_step(
+                scene, zone_id, zone, camera_name, frame, detections, image, now, outage
+            )
+            continue
+        if kind == "bin" and settings.bin_detection_enabled:
             result = await _bin_step(scene, zone_id, zone, camera_name, frame, detections, image, now, outage)
         else:
             continue
@@ -418,7 +473,9 @@ async def _process(
 
 
 async def note_event(session: AsyncSession, transition: SceneTransition, event_id: str) -> None:
-    """Remember which event reported a track (so parking can annotate it)."""
+    """Remember which event reported a track (so parking can annotate it).
+
+    Fenced like every save: raises :class:`LeaseLost` if the lease is gone."""
     if transition.track_id is None:
         return
     scene = _scenes.get(transition.camera_id)
@@ -431,8 +488,13 @@ async def note_event(session: AsyncSession, transition: SceneTransition, event_i
 
 
 async def snapshot(session: AsyncSession, camera_id: str) -> dict:
-    """Current state for the admin/verification endpoint."""
-    scene = await _load(session, camera_id)
+    """Current state for the admin/verification endpoint.
+
+    A replica that does not ingest this camera has no cached scene (it is
+    dropped when the lease is lost) and reads the database afresh without
+    caching, so it never later resumes from a stale copy.
+    """
+    scene = _scenes.get(camera_id) or await _read(session, camera_id)
     return {
         "camera_id": camera_id,
         "observed_since": _iso(scene.observed_since),
@@ -444,7 +506,7 @@ async def snapshot(session: AsyncSession, camera_id: str) -> dict:
         ],
         "zones": [
             {"zone_id": record.zone_id, "kind": record.kind, "state": record.state,
-             "data": {k: v for k, v in record.data.items() if k not in {"baseline", "pending_sig"}}}
+             "data": {k: v for k, v in record.data.items() if k not in {"baseline", "pending_sig", "ref_sig", "global_ref"}}}
             for record in scene.zones.values()
         ],
     }
@@ -805,6 +867,213 @@ def _verifier_allowed(record: ZoneRecord, now: float) -> bool:
 
 # --- mailbox -------------------------------------------------------------------
 
+# Region the opened/closed detector compares: the zone plus a little edge
+# texture, so a flat mailbox face does not amplify sensor noise.
+_LID_REGION_MARGIN = 0.02
+# Contrast floor (grey levels) for the lid signature, see region_signature.
+_LID_MIN_STD = 6.0
+# Weight of the newest idle frame in the rolling closed-mailbox reference.
+_LID_REFERENCE_RATE = 0.1
+# An "open" state nobody is near for this long is the new normal (a door
+# left open, a sticker, a moved camera): it becomes the reference.
+_LID_REBASE_SECONDS = 1800.0
+_LID_CLOSE_RATIO = 0.7
+# Whole-frame change gate: the frame is cut into a grid, tiles touching the
+# mailbox are ignored, and when most of the remaining tiles changed as much
+# as the mailbox did, it is lighting/IR - not the lid.
+_LID_GRID = 4
+_LID_GLOBAL_FRACTION = 0.5
+
+
+def _context_tiles(zone_box: BoundingBox) -> list[BoundingBox]:
+    margin = _expand(zone_box, 0.05)
+    step = 1.0 / _LID_GRID
+    tiles = []
+    for row in range(_LID_GRID):
+        for col in range(_LID_GRID):
+            tile = BoundingBox(col * step, row * step, (col + 1) * step, (row + 1) * step)
+            if tile.x2 <= margin.x1 or tile.x1 >= margin.x2 or tile.y2 <= margin.y1 or tile.y1 >= margin.y2:
+                tiles.append(tile)
+    return tiles
+
+
+def _context_signatures(picture, zone_box: BoundingBox) -> list[list[float]]:
+    return [signals.region_signature(picture, tile, min_std=_LID_MIN_STD) for tile in _context_tiles(zone_box)]
+
+
+def _whole_frame_changed(now_sigs: list[list[float]], ref_sigs: list[list[float]], threshold: float) -> bool:
+    if not ref_sigs or len(ref_sigs) != len(now_sigs):
+        return False
+    diffs = [signals.region_difference(a, b) for a, b in zip(now_sigs, ref_sigs)]
+    valid = [d for d in diffs if d is not None]
+    if not valid:
+        return False
+    return sum(d >= threshold for d in valid) >= _LID_GLOBAL_FRACTION * len(valid)
+
+MAILBOX_TRANSITIONS = ("mailbox_delivery", "mailbox_retrieval", "mailbox_opened", "mailbox_visit")
+_ACTION_TRANSITION = {
+    "deposited": "mailbox_delivery",
+    "retrieved": "mailbox_retrieval",
+    "opened_only": "mailbox_opened",
+    "none": "mailbox_visit",
+}
+_MAILBOX_PRIORITY = {
+    "mailbox_delivery": "normal",
+    "mailbox_retrieval": "normal",
+    "mailbox_opened": "normal",
+    "mailbox_visit": "low",
+}
+MAILBOX_STAT_KEYS = (
+    "mailbox_visits",
+    "mailbox_walk_by",
+    "mailbox_events",
+    "mailbox_opened",
+    "mailbox_deduped",
+)
+# Per-camera mailbox counters for the periodic ingestion stats line.
+_mailbox_stats: dict[str, dict[str, int]] = {}
+
+
+def _count(camera_id: str, key: str) -> None:
+    stats = _mailbox_stats.setdefault(camera_id, dict.fromkeys(MAILBOX_STAT_KEYS, 0))
+    stats[key] = stats.get(key, 0) + 1
+
+
+def drain_mailbox_stats(camera_id: str) -> dict[str, int]:
+    """Mailbox counters since the last call (empty for cameras without a
+    mailbox zone). Read and reset by the ingestion stats line."""
+    stats = _mailbox_stats.pop(camera_id, None)
+    return dict(stats) if stats else {}
+
+
+def _boost_sampling(camera_id: str) -> None:
+    """Ask the relayed stream for faster samples while someone is at the
+    mailbox. Snapshot-only cameras are never boosted (NVR budget)."""
+    if not settings.stream_frames_enabled or settings.mailbox_boost_seconds <= 0:
+        return
+    from .stream_frames import stream_hub
+
+    try:
+        stream_hub.boost(camera_id, settings.mailbox_boost_seconds)
+    except Exception:  # noqa: BLE001 - boosting is best effort
+        logger.debug("mailbox sampling boost failed for %s", camera_id, exc_info=True)
+
+
+def _occluded(zone: Zone, detections: list[Detection]) -> bool:
+    return any(
+        (d.label == "person" or d.label in VEHICLE_CLASSES) and _zone_cover(d.bbox, zone.bbox) >= _OCCLUDES_ZONE
+        for d in detections
+    )
+
+
+def _lid_update(
+    scene: CameraScene,
+    record: ZoneRecord,
+    zone: Zone,
+    detections: list[Detection],
+    image: _LazyImage,
+    frame: bytes | None,
+    now: float,
+    near: bool,
+) -> tuple[str | None, float | None]:
+    """Advance the mailbox opened/closed detector by one frame.
+
+    Returns ``(change, diff)``: ``change`` is ``"opened"``, ``"closed"`` or
+    ``None``; ``diff`` the brightness-normalized difference from the closed
+    reference (``None`` when the zone could not be checked).
+
+    The reference is a rolling average of the zone while it is unoccluded,
+    nobody is near and it matches the reference - so slow light changes are
+    absorbed and an open lid/door is not. A change the whole frame shares
+    (IR switching on, a sudden exposure jump) re-bases instead of firing.
+    """
+    s = settings
+    data = record.data
+    if _occluded(zone, detections):
+        return None, None
+    picture = image.get()
+    if picture is None:
+        return None, None
+    region = _expand(zone.bbox, _LID_REGION_MARGIN)
+    signature = signals.region_signature(picture, region, min_std=_LID_MIN_STD)
+    if not signature:
+        return None, None
+    crops = scene.crops.setdefault(record.zone_id, {})
+    evidence_region = _expand(zone.bbox, 0.08)
+    scene.dirty_zones.add(record.zone_id)
+    reference = data.get("ref_sig")
+    if not reference or len(reference) != len(signature):
+        data.update(
+            ref_sig=signature,
+            global_ref=_context_signatures(picture, zone.bbox),
+            lid="closed",
+            open_pending=0,
+            lid_changed_at=now,
+        )
+        if not near:
+            crops["before"] = signals.crop_jpeg(picture, evidence_region) or crops.get("before")
+        return None, 0.0
+
+    diff = signals.region_difference(signature, reference)
+    data["last_diff"] = round(diff, 3)
+    threshold = s.mailbox_open_threshold
+
+    def rebase() -> None:
+        data.update(
+            ref_sig=signature,
+            global_ref=_context_signatures(picture, zone.bbox),
+            lid="closed",
+            open_pending=0,
+            lid_changed_at=now,
+        )
+
+    if data.get("lid") == "open":
+        if diff < threshold * _LID_CLOSE_RATIO:
+            data.update(lid="closed", lid_changed_at=now, open_pending=0)
+            return "closed", diff
+        changed_at = float(data.get("lid_changed_at") or now)
+        if not near and record.state != "visit" and now - changed_at > _LID_REBASE_SECONDS:
+            logger.info(
+                "mailbox %s/%s: open for %.0fs with nobody near; adopting it as the reference",
+                scene.camera_id, zone.name, now - changed_at,
+            )
+            rebase()
+        return None, diff
+
+    if diff >= threshold:
+        if _whole_frame_changed(_context_signatures(picture, zone.bbox), data.get("global_ref") or [], threshold):
+            logger.info(
+                "mailbox %s/%s: whole-frame change (lighting/IR), re-basing (diff=%.2f)",
+                scene.camera_id, zone.name, diff,
+            )
+            rebase()
+            return None, diff
+        pending = int(data.get("open_pending", 0)) + 1
+        data["open_pending"] = pending
+        crops["opened"] = signals.crop_jpeg(picture, evidence_region) or crops.get("opened")
+        crops["opened_frame"] = frame
+        # With a person at the mailbox one changed frame is enough: at the
+        # production cadence a visit is often only one or two samples.
+        if pending >= s.mailbox_open_min_frames or near or record.state == "visit":
+            data.update(lid="open", lid_changed_at=now, open_pending=0)
+            return "opened", diff
+        return None, diff
+
+    data["open_pending"] = 0
+    if not near and record.state != "visit":
+        rate = _LID_REFERENCE_RATE
+        data["ref_sig"] = [(1.0 - rate) * r + rate * v for r, v in zip(reference, signature)]
+        global_now = _context_signatures(picture, zone.bbox)
+        global_ref = data.get("global_ref") or []
+        data["global_ref"] = (
+            [[(1.0 - rate) * r + rate * v for r, v in zip(ref, cur)] for ref, cur in zip(global_ref, global_now)]
+            if len(global_ref) == len(global_now)
+            and all(len(ref) == len(cur) for ref, cur in zip(global_ref, global_now))
+            else global_now
+        )
+        crops["before"] = signals.crop_jpeg(picture, evidence_region) or crops.get("before")
+    return None, diff
+
 
 async def _mailbox_step(
     scene: CameraScene,
@@ -816,24 +1085,29 @@ async def _mailbox_step(
     image: _LazyImage,
     now: float,
     outage: bool,
-) -> SceneTransition | None:
+) -> list[SceneTransition]:
     s = settings
     record = _record(scene, zone_id, "mailbox", "idle")
     crops = scene.crops.setdefault(zone_id, {})
     data = record.data
+    _mailbox_stats.setdefault(scene.camera_id, dict.fromkeys(MAILBOX_STAT_KEYS, 0))
+    results: list[SceneTransition] = []
+
     finished, answer, context = _take_answer(scene, zone_id)
     if finished:
         scene.dirty_zones.add(zone_id)
-        verdict = None
-        if answer is not None:
-            verdict = {**answer, "source": "foundry"}
-            if answer.get("person_interacted") == "no":
-                verdict["item_deposited"] = "no"
-        return _mailbox_result(scene, record, zone, camera_name, context, verdict)
+        verdict = {**answer, "source": "foundry"} if answer is not None else None
+        result = _mailbox_result(scene, record, zone, camera_name, context, verdict)
+        if result is not None:
+            results.append(result)
+
+    proximity = _expand(zone.bbox, s.mailbox_proximity_margin)
     cover = max(
-        (_zone_cover(d.bbox, zone.bbox) for d in detections if d.label == "person"), default=0.0
+        (_zone_cover(d.bbox, proximity) for d in detections if d.label == "person"), default=0.0
     )
-    interacting = cover >= s.mailbox_min_zone_overlap
+    near = cover >= s.mailbox_min_zone_overlap
+    if near:
+        _boost_sampling(scene.camera_id)
     package_here = any(
         d.label == "package" and overlap_ratio(d.bbox, zone.bbox) >= 0.3 for d in detections
     )
@@ -843,34 +1117,49 @@ async def _mailbox_step(
         # What happened while we could not see is unknown: drop the visit.
         record.state = "idle"
         data["last_outcome"] = "abandoned_outage"
-        crops.clear()
+        for key in ("during", "during_frame", "after"):
+            crops.pop(key, None)
         scene.dirty_zones.add(zone_id)
+        logger.info("mailbox %s/%s: visit abandoned (camera outage)", scene.camera_id, zone.name)
+
+    lid_change, diff = (None, None)
+    if s.mailbox_open_detection_enabled:
+        lid_change, diff = _lid_update(scene, record, zone, detections, image, frame, now, near)
 
     if record.state != "visit":
-        if interacting:
+        if near:
             record.state = "visit"
             data.update(
                 visit_id="mb-" + uuid.uuid4().hex[:12],
                 visit_started=now,
+                visit_ended_at=None,
                 observations=1,
                 misses=0,
                 max_cover=cover,
+                max_diff=diff or 0.0,
+                visit_lid_changed=lid_change == "opened",
                 package_before=bool(data.get("package_present")),
                 package_during=package_here,
             )
             crops["during"] = signals.crop_jpeg(image.get(), region)
             crops["during_frame"] = frame
             scene.dirty_zones.add(zone_id)
-        else:
-            if data.get("package_present") != package_here:
-                data["package_present"] = package_here
-                scene.dirty_zones.add(zone_id)
-            before = signals.crop_jpeg(image.get(), region)
-            if before:
-                crops["before"] = before
-        return None
+            _count(scene.camera_id, "mailbox_visits")
+            return results
+        if data.get("package_present") != package_here:
+            data["package_present"] = package_here
+            scene.dirty_zones.add(zone_id)
+        if lid_change == "opened":
+            result = _standalone_open(scene, record, zone, camera_name, crops, frame, diff, now)
+            if result is not None:
+                results.append(result)
+        return results
 
-    if interacting:
+    if lid_change is not None:
+        data["visit_lid_changed"] = True
+    if diff is not None and diff > float(data.get("max_diff") or 0.0):
+        data["max_diff"] = diff
+    if near:
         data["observations"] = int(data.get("observations", 0)) + 1
         data["misses"] = 0
         data["package_during"] = bool(data.get("package_during")) or package_here
@@ -882,16 +1171,43 @@ async def _mailbox_step(
         if now - float(data.get("visit_started", now)) > _MAILBOX_MAX_VISIT_SECONDS:
             record.state = "idle"
             data["last_outcome"] = "abandoned_too_long"
-        return None
+            logger.info(
+                "mailbox %s/%s: visit %s abandoned after %.0fs",
+                scene.camera_id, zone.name, data.get("visit_id"), now - float(data["visit_started"]),
+            )
+        return results
 
     data["misses"] = int(data.get("misses", 0)) + 1
     scene.dirty_zones.add(zone_id)
     if data["misses"] < s.mailbox_end_after_misses:
-        return None
+        return results
     crops["after"] = signals.crop_jpeg(image.get(), region)
     record.state = "idle"
     data["package_present"] = package_here
-    return await _finish_visit(scene, record, zone, camera_name, package_here, crops, frame, now)
+    data["visit_ended_at"] = now
+    result = await _finish_visit(scene, record, zone, camera_name, package_here, crops, frame, now)
+    if result is not None:
+        results.append(result)
+    return results
+
+
+def _log_visit(scene: CameraScene, zone: Zone, data: dict, outcome: str, **extra) -> None:
+    details = " ".join(f"{key}={value}" for key, value in extra.items())
+    logger.info(
+        "mailbox %s/%s: visit %s observations=%s cover=%.2f diff=%.2f package_before=%s "
+        "package_after=%s lid_changed=%s outcome=%s%s",
+        scene.camera_id,
+        zone.name,
+        data.get("visit_id"),
+        data.get("observations"),
+        float(data.get("max_cover") or 0.0),
+        float(data.get("max_diff") or 0.0),
+        bool(data.get("package_before")),
+        bool(data.get("package_present")),
+        bool(data.get("visit_lid_changed")),
+        outcome,
+        f" {details}" if details else "",
+    )
 
 
 async def _finish_visit(
@@ -906,47 +1222,57 @@ async def _finish_visit(
 ) -> SceneTransition | None:
     s = settings
     data = record.data
-    visit_id = data.get("visit_id")
     observations = int(data.get("observations", 0))
-    if observations < s.mailbox_min_observations:
+    package_before = bool(data.get("package_before"))
+    state_change = bool(data.get("visit_lid_changed"))
+    changed = state_change or package_before != package_after
+    if observations < s.mailbox_min_observations and not changed:
         data["last_outcome"] = "walk_by"
-        return None
-    last = data.get("last_delivery_at")
-    if last is not None and now - float(last) < s.mailbox_dedupe_seconds:
-        data["last_outcome"] = "deduplicated"
+        _count(scene.camera_id, "mailbox_walk_by")
+        _log_visit(scene, zone, data, "walk_by")
         return None
 
     context = {
-        "visit_id": visit_id,
+        "visit_id": data.get("visit_id"),
         "observations": observations,
-        "package_before": bool(data.get("package_before")),
+        "max_cover": round(float(data.get("max_cover") or 0.0), 3),
+        "diff_score": round(float(data.get("max_diff") or 0.0), 3),
+        "state_change": state_change,
+        "package_before": package_before,
         "package_after": package_after,
         "now": now,
-        "crops": {key: crops.get(key) for key in ("before", "after")},
+        "crops": {key: crops.get(key) for key in ("before", "during", "opened", "after")},
         "frames": [f for f in (crops.get("during_frame"), frame) if f],
     }
-    package_during = bool(data.get("package_during"))
-    if package_after and not context["package_before"]:
+    if package_after and not package_before:
         verdict = {
-            "item_deposited": "yes",
+            "action": "deposited",
             "item_type": "parcel",
             "confidence": 0.7,
             "source": "local",
             "evidence": "package detected in the mailbox zone after the visit, not before",
         }
         return _mailbox_result(scene, record, zone, camera_name, context, verdict)
-    if context["package_before"] and not package_after:
-        # A package that was there before the visit and is gone after it.
-        # Whether that is a theft or the household collecting their own
-        # parcel is *not* something the camera can know, so this only ever
-        # reports the observable fact; escalation is decided later by the
-        # incident router from the arming mode (see docs/ai-features.md).
-        return _package_removed_result(scene, record, zone, camera_name, context)
-    if package_during and not package_after:
-        data["last_outcome"] = "carried_past"
-        return None
+    if package_before and not package_after:
+        # Whether a package leaving is a theft or the household collecting
+        # their own parcel is *not* something the camera can know, so this
+        # only reports the observable fact; escalation is decided later by
+        # the incident router from the arming mode (docs/ai-features.md).
+        verdict = {
+            "action": "retrieved",
+            "item_type": "parcel",
+            "confidence": 0.7,
+            "source": "local",
+            "evidence": "package detected in the zone before the visit and absent after it",
+            "package_removed": True,
+        }
+        return _mailbox_result(scene, record, zone, camera_name, context, verdict)
     verifier = get_scene_verifier()
-    images = [(label, crops[key]) for label, key in (("BEFORE", "before"), ("DURING", "during"), ("AFTER", "after")) if crops.get(key)]
+    images = [
+        (label, crops[key])
+        for label, key in (("BEFORE", "before"), ("DURING", "during"), ("AFTER", "after"))
+        if crops.get(key)
+    ]
     if (
         verifier is not None
         and crops.get("after")
@@ -956,76 +1282,35 @@ async def _finish_visit(
     ):
         data["verifier_last_at"] = now
         data["last_outcome"] = "verifying"
+        _log_visit(scene, zone, data, "verifying")
         task = asyncio.create_task(_verify(verifier.verify_mailbox(images), scene.camera_id, "mailbox"))
         scene.pending[record.zone_id] = (task, context)
         return None
     return _mailbox_result(scene, record, zone, camera_name, context, None)
 
 
-def _package_removed_result(
-    scene: CameraScene,
-    record: ZoneRecord,
-    zone: Zone,
-    camera_name: str,
-    context: dict,
-) -> SceneTransition | None:
-    """Emit a ``mailbox_package_removed`` transition with before/after
-    evidence.
-
-    Deliberately neutral language: the event says a package left the zone
-    during a visit, never that someone stole it and never anything about
-    who the visitor was. :mod:`app.services.incidents` decides whether that
-    is alert-worthy based on the arming mode the household set.
-    """
-    if not settings.package_theft_detection_enabled:
-        record.data["last_outcome"] = "removal_disabled"
-        return None
-    data = record.data
-    now = float(context["now"])
-    last = data.get("last_removal_at")
-    if last is not None and now - float(last) < settings.mailbox_dedupe_seconds:
-        data["last_outcome"] = "deduplicated"
-        return None
-    data["last_removal_at"] = now
-    data["last_outcome"] = "package_removed"
-    crops = context["crops"]
-    evidence_images = {label: crops[label] for label in ("before", "after") if crops.get(label)}
-    evidence = {
-        "visit_id": context["visit_id"],
-        "zone": zone.name,
-        "observations": context["observations"],
-        "item_removed": "yes",
-        "source": "local",
-        "evidence": "package detected in the zone before the visit and absent after it",
-        # image_url is filled in once the crops are stored as EventEvidence
-        # rows (app.services.events), so it points at a retrievable image.
-        "before": {"package_detected": True, "image": "before" in evidence_images},
-        "after": {"package_detected": False, "image": "after" in evidence_images},
-    }
-    return SceneTransition(
-        camera_id=scene.camera_id,
-        kind="mailbox",
-        transition="mailbox_package_removed",
-        event_type="package",
-        priority="high",
-        description=f"A package was taken from the {zone.name} at {camera_name}.",
-        tags=["mailbox", "package_removed"],
-        metadata={
-            "mailbox": evidence,
-            "scene": {
-                "kind": "mailbox",
-                "transition": "mailbox_package_removed",
-                "zone": zone.name,
-                "source": "local",
-            },
-        },
-        zone=zone.name,
-        frames=context["frames"] or None,
-        evidence_images=evidence_images or None,
-        dedup_key=f"package_removed:{scene.camera_id}:{record.zone_id}",
-        dedup_window_seconds=float(settings.mailbox_dedupe_seconds),
-        observed_at=now,
-    )
+def _classify(context: dict, verdict: dict | None) -> tuple[str, dict]:
+    """``(action, verdict)`` for a visit; the local fallback when the
+    verifier is unavailable or gave nothing usable."""
+    state_change = bool(context.get("state_change"))
+    fallback = "opened_only" if state_change else "none"
+    if verdict is None:
+        return fallback, {
+            "action": fallback,
+            "item_type": "unknown",
+            "source": "local",
+            "evidence": "mailbox appearance changed during the visit" if state_change else None,
+        }
+    action = verdict.get("action")
+    if action not in _ACTION_TRANSITION:
+        action = "deposited" if verdict.get("item_deposited") == "yes" else None
+    if verdict.get("source") == "foundry" and verdict.get("person_interacted") == "no" and action in (
+        "deposited", "retrieved"
+    ):
+        action = None
+    if action in (None, "none"):
+        action = fallback
+    return action, verdict
 
 
 def _mailbox_result(
@@ -1036,62 +1321,157 @@ def _mailbox_result(
     context: dict,
     verdict: dict | None,
 ) -> SceneTransition | None:
-    s = settings
+    """The one event for a visit that passed the interaction test."""
     data = record.data
     now = float(context["now"])
-    if verdict is None or verdict.get("item_deposited") != "yes":
-        data["last_outcome"] = "no_deposit" if verdict else "unverified"
-        data["last_verdict"] = verdict
-        return None
-    last = data.get("last_delivery_at")
-    if last is not None and now - float(last) < s.mailbox_dedupe_seconds:
+    action, verdict = _classify(context, verdict)
+    transition = _ACTION_TRANSITION[action]
+    data["last_verdict"] = {k: v for k, v in verdict.items() if k != "package_removed"}
+    window = (
+        settings.mailbox_dedupe_seconds
+        if transition in ("mailbox_delivery", "mailbox_retrieval")
+        else settings.mailbox_open_cooldown_seconds
+    )
+    last_emitted = data.setdefault("last_emitted", {})
+    last = last_emitted.get(transition)
+    if last is not None and now - float(last) < window:
         data["last_outcome"] = "deduplicated"
+        _count(scene.camera_id, "mailbox_deduped")
+        _log_visit(scene, zone, data, f"{transition}_deduplicated")
         return None
+    last_emitted[transition] = now
+    data["last_outcome"] = transition
+    if transition == "mailbox_delivery":
+        data["last_delivery_at"] = now
+        data["last_delivery_visit"] = context["visit_id"]
 
-    visit_id = context["visit_id"]
-    data["last_delivery_at"] = now
-    data["last_outcome"] = "delivery"
-    data["last_delivery_visit"] = visit_id
+    removed = bool(verdict.get("package_removed")) and settings.package_theft_detection_enabled
     item = verdict.get("item_type") or "unknown"
-    tags = ["mailbox", "mailbox_delivery"]
+    tags = ["mailbox", transition]
     if item in ("parcel", "mail"):
         tags.append(item)
+    if removed:
+        tags.append("package_removed")
+    priority = "high" if removed else _MAILBOX_PRIORITY[transition]
     noun = {"parcel": "A parcel", "mail": "Mail"}.get(item, "An item")
+    where = f"the {zone.name} at {camera_name}"
+    description = {
+        "mailbox_delivery": f"{noun} was put in {where}.",
+        "mailbox_retrieval": (
+            f"A package was taken from {where}." if removed else f"{noun} was taken out of {where}."
+        ),
+        "mailbox_opened": f"{where[0].upper()}{where[1:]} was opened or checked; no item change was seen.",
+        "mailbox_visit": f"Someone was at {where}; what they did is unclear.",
+    }[transition]
     crops = context["crops"]
+    labels = ("before", "during", "after")
+    evidence_images = {label: crops[label] for label in labels if crops.get(label)}
+    if transition == "mailbox_opened" and crops.get("opened"):
+        evidence_images["opened"] = crops["opened"]
+    source = verdict.get("source")
     evidence = {
-        "visit_id": visit_id,
+        "visit_id": context["visit_id"],
         "zone": zone.name,
         "observations": context["observations"],
-        "item_deposited": "yes",
+        "max_cover": context.get("max_cover"),
+        "diff_score": context.get("diff_score"),
+        "state_change": bool(context.get("state_change")),
+        "action": action,
+        "item_deposited": "yes" if action == "deposited" else verdict.get("item_deposited", "no"),
+        "item_removed": "yes" if action == "retrieved" else "no",
         "item_type": item,
         "confidence": verdict.get("confidence"),
-        "source": verdict.get("source"),
+        "source": source,
         "evidence": verdict.get("evidence"),
-        "before": {"package_detected": context["package_before"], "image": bool(crops.get("before"))},
-        "after": {"package_detected": context["package_after"], "image": bool(crops.get("after"))},
+        # image_url is filled in once the crops are stored as EventEvidence
+        # rows (app.services.events), so it points at a retrievable image.
+        "before": {"package_detected": context["package_before"], "image": "before" in evidence_images},
+        "after": {"package_detected": context["package_after"], "image": "after" in evidence_images},
     }
-    frames = context["frames"]
+    if "during" in evidence_images:
+        evidence["during"] = {"image": True}
+    if "opened" in evidence_images:
+        evidence["opened"] = {"image": True}
+    _count(scene.camera_id, "mailbox_events")
+    _log_visit(scene, zone, data, transition, action=action, source=source)
     return SceneTransition(
         camera_id=scene.camera_id,
         kind="mailbox",
-        transition="mailbox_delivery",
+        transition=transition,
         event_type="package",
-        description=f"{noun} was put in the {zone.name} at {camera_name}.",
+        priority=priority,
+        description=description,
         tags=tags,
         metadata={
             "mailbox": evidence,
             "scene": {
                 "kind": "mailbox",
-                "transition": "mailbox_delivery",
+                "transition": transition,
                 "zone": zone.name,
                 "item_type": item,
+                "action": action,
                 "confidence": verdict.get("confidence"),
-                "source": verdict.get("source"),
+                "source": source,
             },
         },
         zone=zone.name,
-        frames=frames or None,
+        frames=context["frames"] or None,
+        evidence_images=evidence_images or None,
+        dedup_key=f"{transition}:{scene.camera_id}:{record.zone_id}",
+        dedup_window_seconds=float(window),
+        observed_at=now,
     )
+
+
+def _standalone_open(
+    scene: CameraScene,
+    record: ZoneRecord,
+    zone: Zone,
+    camera_name: str,
+    crops: dict,
+    frame: bytes | None,
+    diff: float | None,
+    now: float,
+) -> SceneTransition | None:
+    """The mailbox opened with nobody detected at it (missed between
+    samples, out of frame, or a lid blown open)."""
+    data = record.data
+    _count(scene.camera_id, "mailbox_opened")
+    ended = data.get("visit_ended_at")
+    if ended is not None and now - float(ended) < settings.mailbox_open_cooldown_seconds:
+        # Belongs to the visit that just ended, which already reported.
+        logger.info(
+            "mailbox %s/%s: opened (diff=%.2f) right after visit %s; not reported again",
+            scene.camera_id, zone.name, diff or 0.0, data.get("visit_id"),
+        )
+        return None
+    data.update(
+        visit_id="mb-" + uuid.uuid4().hex[:12],
+        observations=0,
+        max_cover=0.0,
+        max_diff=diff or 0.0,
+        visit_lid_changed=True,
+        package_before=bool(data.get("package_present")),
+    )
+    context = {
+        "visit_id": data["visit_id"],
+        "observations": 0,
+        "max_cover": 0.0,
+        "diff_score": round(diff or 0.0, 3),
+        "state_change": True,
+        "package_before": bool(data.get("package_present")),
+        "package_after": bool(data.get("package_present")),
+        "now": now,
+        "crops": {"before": crops.get("before"), "opened": crops.get("opened")},
+        "frames": [f for f in (crops.get("opened_frame"), frame) if f][:1],
+    }
+    verdict = {
+        "action": "opened_only",
+        "item_type": "unknown",
+        "source": "local",
+        "evidence": "mailbox appearance changed from its closed reference with nobody detected nearby",
+    }
+    return _mailbox_result(scene, record, zone, camera_name, context, verdict)
 
 
 # --- bins ------------------------------------------------------------------------

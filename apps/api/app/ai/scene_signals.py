@@ -113,11 +113,13 @@ def blend_signature(old: list[float], new: list[float], weight: float = 0.2) -> 
     return [(1 - weight) * a + weight * b for a, b in zip(old, new)]
 
 
-def region_signature(image, box: BoundingBox) -> list[float]:
+def region_signature(image, box: BoundingBox, min_std: float = 0.0) -> list[float]:
     """Brightness-normalized greyscale thumbnail of a fixed region.
 
     Zero mean / unit variance, so a global lighting change (sun behind a
     cloud) barely moves it while an object appearing or leaving does.
+    ``min_std`` floors the divisor (in grey levels) so a nearly flat region
+    does not amplify sensor/JPEG noise into a large "difference".
     """
     if image is None:
         return []
@@ -128,7 +130,7 @@ def region_signature(image, box: BoundingBox) -> list[float]:
         values = np.asarray(crop, dtype=np.float32).reshape(-1)
     except Exception:  # noqa: BLE001
         return []
-    std = float(values.std())
+    std = max(float(values.std()), min_std)
     if std < 1e-3:
         return [0.0] * values.size
     return [float(v) for v in (values - values.mean()) / std]

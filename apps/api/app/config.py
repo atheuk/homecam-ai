@@ -188,16 +188,40 @@ class Settings(BaseSettings):
     # No frame from a camera for this long is an outage: absence timers and
     # zone comparisons restart instead of treating the gap as evidence.
     scene_outage_seconds: float = Field(default=60.0, gt=0.0)
-    # Mailbox delivery (zones of kind "mailbox"; nothing happens without one).
+    # Mailbox activity (zones of kind "mailbox"; nothing happens without one):
+    # deliveries, retrievals, the mailbox being opened, and other visits.
     mailbox_delivery_enabled: bool = True
-    # Samples a person must overlap the mailbox for; a walk-by is one.
-    mailbox_min_observations: int = Field(default=2, ge=1, le=20)
-    # Share of the mailbox rectangle a person box must cover.
-    mailbox_min_zone_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
+    # Samples a person must be near the mailbox for a visit with no visible
+    # change (no lid/door change, no package change) to count. A visit with
+    # such a change always counts from a single sample: at the production
+    # 5-23s cadence a real 3-6s mail drop is often seen in only one frame.
+    mailbox_min_observations: int = Field(default=1, ge=1, le=20)
+    # Share of the proximity region (the mailbox zone grown by
+    # mailbox_proximity_margin on every side) a person box must cover.
+    mailbox_min_zone_overlap: float = Field(default=0.2, gt=0.0, le=1.0)
+    # Margin (normalized frame units) around the mailbox zone that still
+    # counts as "at the mailbox": someone reaching in from the side.
+    mailbox_proximity_margin: float = Field(default=0.1, ge=0.0, le=0.5)
     # Samples without the person before a visit is over.
     mailbox_end_after_misses: int = Field(default=2, ge=1, le=20)
-    # One delivery event per this window, however many visits.
+    # One delivery / retrieval event per this window, however many visits.
     mailbox_dedupe_seconds: float = Field(default=900.0, ge=0.0)
+    # Mailbox opened detection, independent of people: the zone is compared
+    # with a rolling brightness-normalized reference of the closed mailbox.
+    mailbox_open_detection_enabled: bool = True
+    # Normalized region difference counted as "open" (returning below 70%
+    # of it is "closed" again).
+    mailbox_open_threshold: float = Field(default=0.4, gt=0.0)
+    # Consecutive unoccluded samples above the threshold before an opening
+    # with nobody detected nearby is reported (1 during a person's visit).
+    mailbox_open_min_frames: int = Field(default=2, ge=1, le=20)
+    # At most one mailbox_opened and one mailbox_visit event per this window.
+    mailbox_open_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    # While a person is near a mailbox, sample that camera's relayed stream
+    # every mailbox_boost_interval_seconds for mailbox_boost_seconds.
+    # Snapshot-only cameras are never boosted (NVR session budget).
+    mailbox_boost_seconds: float = Field(default=60.0, ge=0.0)
+    mailbox_boost_interval_seconds: float = Field(default=1.0, gt=0.0)
     # Bins placed out / emptied (zones of kind "bin"; nothing without one).
     bin_detection_enabled: bool = True
     # Seconds between region comparisons (a bin does not move quickly).
@@ -318,6 +342,15 @@ class Settings(BaseSettings):
     # means the candidate set has to stay bounded.
     search_candidate_limit: int = Field(default=500, ge=1, le=5000)
     search_default_limit: int = Field(default=20, ge=1, le=200)
+
+    # Per-camera ingestion leader lease. With several API replicas only the
+    # lease holder samples a camera and advances its scene state; the others
+    # stand by and take over once the lease is TTL seconds stale.
+    ingestion_lease_enabled: bool = True
+    ingestion_lease_ttl_seconds: float = Field(default=30.0, gt=0.0)
+    # Stable name for this replica in the lease table. Empty means
+    # "<hostname>-<pid>-<random>", which is unique per process.
+    ingestion_replica_id: str = ""
 
     # Loitering: a person continuously present in one zone for longer than
     # that zone's dwell threshold. Per-zone ``dwell_seconds`` overrides this

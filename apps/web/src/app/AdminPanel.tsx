@@ -45,7 +45,7 @@ const ZONE_KINDS = ["driveway", "parking", "mailbox", "bin", "entry", "street", 
 // What the stateful detectors do with the two zone kinds that enable them.
 const ZONE_KIND_HINTS: Record<string, string> = {
   mailbox:
-    "Mailbox delivery: draw the box tightly around the mailbox/letterbox. A person must stay at it for a few samples; walk-bys and parcels carried past are ignored.",
+    "Mailbox: draw the box tightly around the mailbox/letterbox, including the lid or flap. Reports the mailbox being opened (even with nobody in view), mail or parcels put in or taken out, and other visits. People walking past are ignored.",
   bin:
     "Bins: draw the box around the curb spot where bins are put out. Reports a bin put out, and emptied only with evidence (collection vehicle or bin moved) — a bin simply disappearing, or a camera outage, is not \"emptied\".",
 };
@@ -689,7 +689,7 @@ export default function AdminPanel() {
           Zones are labelled regions in normalized image coordinates (0–1, origin top-left). The AI pipeline uses
           them to turn raw detections into meaningful events: a person in a <code>driveway</code> zone, a car parked in
           a <code>parking</code> zone, or activity at the <code>mailbox</code>. A <code>mailbox</code> zone enables
-          mail-delivery detection and a <code>bin</code> zone enables bin put-out/emptied detection; both are off until
+          mailbox opened/delivery/retrieval detection and a <code>bin</code> zone enables bin put-out/emptied detection; both are off until
           you add one. See docs/ai-pipeline.md.
         </p>
         <label>

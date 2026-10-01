@@ -95,6 +95,30 @@ done
 
 Run the smoke test against a running API with `python scripts/smoke.py`.
 
+### Mailbox detection settings
+
+A `mailbox` zone reports `mailbox_delivery`, `mailbox_retrieval`, `mailbox_opened` (lid change, even with nobody in view) and low-priority `mailbox_visit` events. The main settings are below; the full list is in `docs/ai-pipeline.md`.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `MAILBOX_MIN_OBSERVATIONS` | `1` | Near frames for a visit with no lid/package change (was `2`). |
+| `MAILBOX_MIN_ZONE_OVERLAP` | `0.2` | Person cover of the expanded zone that counts as "near" (was `0.3`). |
+| `MAILBOX_PROXIMITY_MARGIN` | `0.1` | Zone expansion (normalised) so reaching in from the side counts. |
+| `MAILBOX_OPEN_DETECTION_ENABLED` | `true` | Detect the mailbox opening from a reference crop. |
+| `MAILBOX_OPEN_THRESHOLD` | `0.4` | Normalised crop difference that means open; tune from `diff=` in the logs. |
+| `MAILBOX_OPEN_MIN_FRAMES` | `2` | Frames an opening must persist when nobody is near. |
+| `MAILBOX_OPEN_COOLDOWN_SECONDS` | `300` | One opened/visit event per zone per window. |
+| `MAILBOX_DEDUPE_SECONDS` | `900` | One delivery/retrieval per zone per window (also the cross-replica claim). |
+| `MAILBOX_BOOST_SECONDS` / `MAILBOX_BOOST_INTERVAL_SECONDS` | `60` / `1.0` | Faster stream sampling while someone is at the mailbox (stream cameras only). |
+
+With several API replicas, each camera is ingested by exactly one replica at a time. That replica holds a lease row in `ingestion_leases` (migration `0012`); the others stand by and take over once the lease is stale. This keeps replicas from overwriting each other's vehicle, bin and mailbox scene state. Expiry uses the database clock, and every scene write is fenced on the lease epoch, so a replica that lost the lease mid-frame cannot write stale state.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `INGESTION_LEASE_ENABLED` | `true` | Only the lease holder ingests a camera. |
+| `INGESTION_LEASE_TTL_SECONDS` | `30` | Failover time after the holder stops renewing (renewed every TTL/2). A clean shutdown hands over at once. |
+| `INGESTION_REPLICA_ID` | `<host>-<pid>-<random>` | Name of this replica in the lease table. |
+
 Generate an event:
 ```bash
 curl -X POST http://localhost:8000/api/v1/mock/events -H "Content-Type: application/json" -d "{\"camera_id\":\"mock-eufy-doorbell\",\"type\":\"doorbell\"}"

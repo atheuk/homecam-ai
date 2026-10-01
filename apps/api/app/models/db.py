@@ -185,8 +185,8 @@ class SceneDedupClaim(Base):
 
     Both API replicas run ingestion against the same cameras, so an
     in-process "last emitted at" timestamp lets each replica emit its own
-    copy of the same package removal. One row per dedup key (for example
-    ``package_removed:<camera>:<zone>``) is claimed with a conditional
+    copy of the same mailbox event. One row per dedup key (for example
+    ``mailbox_retrieval:<camera>:<zone>``) is claimed with a conditional
     UPDATE/INSERT, which the database serializes - see
     :mod:`app.services.scene_dedup`. ``last_at`` is epoch seconds so the
     window comparison is plain arithmetic on SQLite and Postgres alike.
@@ -196,6 +196,27 @@ class SceneDedupClaim(Base):
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
     last_at: Mapped[float] = mapped_column(Float)
     event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class IngestionLease(Base):
+    """Which replica currently ingests a camera.
+
+    Only the holder samples the camera and advances its scene state
+    (vehicles, bins, mailbox), so two replicas never interleave stale
+    in-memory scene caches. The lease is taken and renewed with a
+    conditional UPDATE/INSERT and expires after a TTL, letting a standby
+    replica take over - see :mod:`app.services.ingestion_lease`.
+    ``expires_at`` is epoch seconds by the *database* clock. ``epoch`` is a
+    fencing token incremented on every acquisition: scene writes only commit
+    while their epoch still holds the lease.
+    """
+
+    __tablename__ = "ingestion_leases"
+    camera_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(128))
+    epoch: Mapped[int] = mapped_column(Integer, default=1)
+    expires_at: Mapped[float] = mapped_column(Float)
+    acquired_at: Mapped[float] = mapped_column(Float)
 
 
 class EventEvidence(Base):

@@ -25,6 +25,11 @@ const events:EventItem[]=[
   {id:"mail",camera_id:"front",type:"package",description:"Mail was put in the Mailbox",
     start_time:"2026-09-27T18:00:00Z",tags:["mailbox","mailbox_delivery","mail"],
     scene:{kind:"mailbox",transition:"mailbox_delivery",zone:"Mailbox",item_type:"mail"}},
+  {id:"mail-out",camera_id:"front",type:"package",description:"Mail was taken out of the Mailbox",
+    start_time:"2026-09-27T17:00:00Z",tags:["mailbox","mailbox_retrieval","mail"],
+    scene:{kind:"mailbox",transition:"mailbox_retrieval",zone:"Mailbox",item_type:"mail"}},
+  {id:"mail-open",camera_id:"front",type:"package",description:"The Mailbox was opened",
+    start_time:"2026-09-27T16:00:00Z",tags:["mailbox","mailbox_opened"]},
 ];
 
 function renderPanel(newEventIds=new Set<string>()){
@@ -38,6 +43,7 @@ describe("events panel",()=>{
     expect(screen.getByText("Arrived")).toBeInTheDocument();
     expect(screen.getByText("Parked")).toBeInTheDocument();
     expect(screen.getByText("Mail delivered")).toBeInTheDocument();
+    expect(screen.getByText("Mail taken out")).toBeInTheDocument();
     expect(screen.queryByText(/vehicle_parked/)).not.toBeInTheDocument();
   });
 
@@ -45,6 +51,8 @@ describe("events panel",()=>{
     renderPanel();
     fireEvent.change(screen.getByLabelText("Activity"),{target:{value:"mailbox"}});
     expect(screen.getByText("Mail was put in the Mailbox")).toBeInTheDocument();
+    expect(screen.getByText("Mail was taken out of the Mailbox")).toBeInTheDocument();
+    expect(screen.getByText("The Mailbox was opened")).toBeInTheDocument();
     expect(screen.queryByText("A car arrived in the Driveway")).not.toBeInTheDocument();
     expect(screen.queryByText("Sarah arrived")).not.toBeInTheDocument();
   });

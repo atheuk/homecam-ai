@@ -120,12 +120,17 @@ written in the same transaction as the `event_evidence` rows. If storing the
 evidence fails, the event is kept without URLs, so it never advertises evidence
 that returns 404.
 
-Both API replicas run ingestion with their own in-process scene caches, so both
-can observe the same removal. Before a removal event is emitted, the replica
-must win a database claim on `package_removed:<camera>:<zone>` in
-`scene_dedup_claims` (`app/services/scene_dedup.py`). The claim is a
+Each camera is ingested by one replica at a time: the holder of its
+`ingestion_leases` row (see `docs/ai-pipeline.md`, "One ingester per camera").
+The dedup claim below is a second safeguard for the handover window. Before a
+mailbox event (removal, delivery,
+retrieval, opening or visit) is emitted, the replica must win a database
+claim on `<transition>:<camera>:<zone>` (for example
+`mailbox_retrieval:<camera>:<zone>`) in `scene_dedup_claims`
+(`app/services/scene_dedup.py`). The claim is a
 conditional `UPDATE` that only succeeds once the previous claim is older than
-`mailbox_dedupe_seconds`, falling back to a primary-key `INSERT`. Exactly one
+the transition's window (`mailbox_dedupe_seconds` for deliveries/retrievals,
+`mailbox_open_cooldown_seconds` for openings/visits), falling back to a primary-key `INSERT`. Exactly one
 replica emits the event, so the grouped incident's `event_count` is not
 inflated by duplicates. The claim is flushed but not committed on its own: it
 commits in the same transaction as the event row. If the claimant errors or
@@ -137,6 +142,40 @@ collecting your own parcel is not a theft.
 
 Repeat removals on the same camera group into the existing open incident rather
 than opening a second one.
+
+### Mailbox opened, delivery, retrieval and visits
+
+A `mailbox` zone reports four outcomes, one event per qualifying visit (see
+[ai-pipeline.md](ai-pipeline.md#scene-state-vehicles-mailbox-deliveries-bins)
+for the detector): `mailbox_delivery` (item put in), `mailbox_retrieval`
+(item taken out), `mailbox_opened` (opened or checked with no item change,
+detected from the lid even with nobody in view) and `mailbox_visit` (someone
+was at the mailbox, outcome unknown). The Foundry scene verifier answers
+`action: deposited|retrieved|opened_only|none` from before/during/after
+crops; a deterministic local fallback is used without Foundry. Identity is
+never inferred.
+
+Routing through priority and incidents:
+
+| Outcome | Priority | Incident |
+| --- | --- | --- |
+| Delivery | normal (floor) | never |
+| Retrieval (mail, verifier) | normal; high while away/night | `mailbox_retrieval`, severity medium, while away/night |
+| Retrieval of a locally seen parcel | high/critical (`package_removed`) | `package_theft` while away/night |
+| Opened | normal | never |
+| Visit | low | never |
+
+Each visit logs an INFO line (zone, observations, cover, diff score,
+outcome) and the periodic ingestion stats line carries mailbox counters, so
+"nothing detected" can be diagnosed from production logs.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `mailbox_min_observations` | `1` | Near frames needed for a visit without a lid/package change. |
+| `mailbox_min_zone_overlap` / `mailbox_proximity_margin` | `0.2` / `0.1` | Person cover over the expanded zone. |
+| `mailbox_open_detection_enabled` / `mailbox_open_threshold` | `true` / `0.4` | Lid change detection / difference threshold. |
+| `mailbox_open_min_frames` / `mailbox_open_cooldown_seconds` | `2` / `300` | Persistence with nobody near / repeat suppression. |
+| `mailbox_boost_seconds` / `mailbox_boost_interval_seconds` | `60` / `1.0` | Faster stream sampling while someone is near (stream cameras only). |
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

@@ -93,7 +93,7 @@ def _replica_emitting(monkeypatch, transition: SceneTransition):
     """Make ``process_frame`` report ``transition``, as a replica's own
     in-process scene cache would after seeing the removal."""
 
-    async def fake_process_frame(session, camera_id, camera_name, image, detections):
+    async def fake_process_frame(session, camera_id, camera_name, image, detections, **kwargs):
         return [transition]
 
     async def fake_note_event(session, transition, event_id):

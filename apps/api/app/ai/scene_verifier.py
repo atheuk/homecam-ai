@@ -7,7 +7,9 @@ story. This module only ever asks *closed* questions about a specific,
 already-localized candidate:
 
 * mailbox: here is the mailbox before, during and after one person's visit.
-  Was an item deposited?  ``yes`` / ``no`` / ``unknown``.
+  Was an item deposited?  ``yes`` / ``no`` / ``unknown``. And which action
+  was it: ``deposited`` / ``retrieved`` / ``opened_only`` / ``none``
+  (``unknown`` otherwise).
 * bin: here is the bin region before and now. Is a wheeled bin present in
   each?  Was it tipped/emptied/moved?  ``yes`` / ``no`` / ``unknown``.
 
@@ -31,15 +33,20 @@ logger = logging.getLogger(__name__)
 
 ANSWERS = ("yes", "no", "unknown")
 ITEM_TYPES = ("parcel", "mail", "unknown")
+MAILBOX_ACTIONS = ("deposited", "retrieved", "opened_only", "none", "unknown")
 
 MAILBOX_PROMPT = (
-    "You check a home security camera for mailbox deliveries. You get crops of "
+    "You check a home security camera for mailbox activity. You get crops of "
     "ONE mailbox region: BEFORE a person's visit, DURING it, and AFTER the person "
     "left. Answer only from what is visible in these images. Do not describe the "
     "person, never guess identity, gender, age or ethnicity. A person walking past, "
-    "or carrying a parcel past without leaving it, is NOT a deposit. Reply with JSON "
+    "or carrying a parcel past without leaving it, is NOT a deposit. action is "
+    '"deposited" if an item was put in or left at the mailbox, "retrieved" if an '
+    'item was taken out, "opened_only" if the mailbox was opened or checked with '
+    'no visible item change, "none" if the mailbox was not touched. Reply with JSON '
     'only: {"person_interacted": "yes|no|unknown", "item_deposited": '
-    '"yes|no|unknown", "item_type": "parcel|mail|unknown", "confidence": 0.0-1.0, '
+    '"yes|no|unknown", "action": "deposited|retrieved|opened_only|none|unknown", '
+    '"item_type": "parcel|mail|unknown", "confidence": 0.0-1.0, '
     '"evidence": "<=20 words about the mailbox/item only"}. Use "unknown" whenever '
     "the images do not show it clearly."
 )
@@ -79,6 +86,7 @@ def parse_mailbox_reply(reply: str | None) -> dict | None:
     return {
         "person_interacted": _answer(parsed.get("person_interacted")),
         "item_deposited": _answer(parsed.get("item_deposited")),
+        "action": _answer(str(parsed.get("action") or "").replace(" ", "_").replace("-", "_"), MAILBOX_ACTIONS),
         "item_type": _answer(parsed.get("item_type"), ITEM_TYPES),
         "confidence": _clean_confidence(parsed.get("confidence")),
         "evidence": _evidence(parsed.get("evidence")),
