@@ -26,6 +26,15 @@ export type AnimalIdentity={
   breed?:string|null;
   confidence?:number|null;
   description?:string|null;
+  common_name?:string|null;scientific_name?:string|null;taxonomic_group?:string|null;
+};
+export type VehicleIdentity={
+  make?:string;model?:string;colour?:string;body_type?:string;year_generation?:string;trim?:string;
+  make_confidence?:number;model_confidence?:number;colour_confidence?:number;
+  body_type_confidence?:number;year_generation_confidence?:number;trim_confidence?:number;
+};
+export type SuspiciousAssessment={
+  score:number;level:string;reasons:string[];evidence_event_ids:string[];appearance_confidence?:number|null;
 };
 
 /** Observable description of a person: what a witness could describe.
@@ -33,8 +42,7 @@ export type AnimalIdentity={
  * Deliberately carries no ethnicity or gender. Those are protected
  * attributes the model would be guessing at, and pairing a guess about
  * someone's race with a trust flag is profiling, not home security.
- * Age band is coarse and approximate, and included only because "a child
- * is at the door" is genuinely different from "an adult is at the door". */
+ * Legacy age fields are neither requested nor displayed. */
 export type Appearance={
   person_present:boolean;
   age_band?:"child"|"teenager"|"adult"|"older adult"|null;
@@ -51,9 +59,10 @@ export type Trust="unknown"|"trusted"|"watch";
 
 export type EventItem={
   id:string;camera_id:string;type:string;description:string;start_time:string;
-  has_photo?:boolean;photo_url?:string|null;photo_caption?:string|null;photo_rating?:number|null;
-  photo_boxes?:DetectionBox[]|null;animal?:AnimalIdentity|null;
+  has_photo?:boolean;photo_url?:string|null;full_photo_url?:string|null;photo_caption?:string|null;photo_rating?:number|null;
+  photo_boxes?:DetectionBox[]|null;full_photo_boxes?:DetectionBox[]|null;animal?:AnimalIdentity|null;
   appearance?:Appearance|null;
+  vehicle?:VehicleIdentity|null;suspicious?:SuspiciousAssessment|null;
   // ``null`` means nobody checked, which is neither confirmation nor doubt.
   photo_verified?:boolean|null;
   person_id?:string|null;person_name?:string|null;person_display_name?:string|null;
@@ -72,7 +81,8 @@ export type EventScene={
 const SCENE_LABELS:Record<string,string>={
   first_seen:"Vehicle seen",arrived:"Arrived",returned:"Returned",moved:"Moved",
   departed:"Left",interaction:"Someone at vehicle",
-  mailbox_delivery:"Mail delivered",bin_placed_out:"Bin put out",bin_emptied:"Bin emptied",
+  mailbox_delivery:"Mail delivered",mailbox_retrieval:"Mail taken out",mailbox_opened:"Mailbox opened",
+  mailbox_visit:"Mailbox visit",bin_placed_out:"Bin put out",bin_emptied:"Bin emptied",
 };
 
 /** Short, human labels for a scene transition (plus "Parked" once stable). */
@@ -80,8 +90,11 @@ export function sceneBadges(event:Pick<EventItem,"scene"|"tags">):string[]{
   const scene=event.scene;
   if(!scene) return [];
   const labels:string[]=[];
-  if(scene.kind==="mailbox"&&scene.item_type&&scene.item_type!=="unknown"){
-    labels.push(scene.item_type==="parcel"?"Parcel delivered":"Mail delivered");
+  const parcel=scene.item_type==="parcel";
+  if(scene.transition==="mailbox_delivery"&&scene.item_type&&scene.item_type!=="unknown"){
+    labels.push(parcel?"Parcel delivered":"Mail delivered");
+  }else if(scene.transition==="mailbox_retrieval"&&scene.item_type&&scene.item_type!=="unknown"){
+    labels.push(parcel?"Parcel taken out":"Mail taken out");
   }else{
     const label=SCENE_LABELS[scene.transition];
     if(label) labels.push(label);
@@ -95,7 +108,7 @@ export function sceneCategory(event:Pick<EventItem,"scene"|"tags">):"vehicle"|"m
   const kind=event.scene?.kind;
   if(kind==="vehicle"||kind==="mailbox"||kind==="bin") return kind;
   const tags=event.tags||[];
-  if(tags.includes("mailbox_delivery")) return "mailbox";
+  if(tags.includes("mailbox")||tags.some(tag=>tag.startsWith("mailbox_"))) return "mailbox";
   if(tags.includes("bin_placed_out")||tags.includes("bin_emptied")) return "bin";
   return null;
 }
@@ -167,23 +180,14 @@ function PersonAssign({event,persons,onAssigned}:{event:EventItem;persons:Person
 
 /** Plain-language summary of an animal sighting, breed first when known. */
 export function describeAnimal(animal:AnimalIdentity){
+  if(animal.common_name) return animal.common_name;
   if(animal.breed) return animal.breed;
   return animal.species==="other"?"Unrecognized animal":animal.species.charAt(0).toUpperCase()+animal.species.slice(1);
 }
 
-/** Human-readable chips for what was actually observable about a person.
- *
- * Only facts a witness could state: roughly how old someone looked, their
- * build, what they wore and what they carried. No ethnicity or gender - see
- * the ``Appearance`` type for why. */
+/** Human-readable clothing and carried-item observations, not demographics. */
 export function appearanceChips(appearance:Appearance){
   const chips:{key:string;label:string}[]=[];
-  if(appearance.age_band){
-    const band=appearance.age_band.charAt(0).toUpperCase()+appearance.age_band.slice(1);
-    // Age from a photo is a guess, and the label has to say so.
-    const hedge=appearance.age_confidence!=null&&appearance.age_confidence<0.6?" (unsure)":"";
-    chips.push({key:"age",label:`Looks ${band.toLowerCase()}${hedge}`});
-  }
   if(appearance.build) chips.push({key:"build",label:appearance.build});
   if(appearance.clothing) chips.push({key:"clothing",label:appearance.clothing});
   if(appearance.carrying) chips.push({key:"carrying",label:`Carrying ${appearance.carrying}`});
@@ -221,13 +225,17 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
   const subject=identified||(animal?describeAnimal(animal):null);
   const chips=event.appearance?appearanceChips(event.appearance):[];
   const badges=sceneBadges(event);
-  return <article className="event-card">
+  return <article className="event-card" id={`event-${event.id}`}>
     <div className="event-photo">
       {event.has_photo&&event.photo_url
         ? <ZoomablePhoto src={mediaUrl(event.photo_url)!}
+            fullSrc={event.full_photo_url ? mediaUrl(event.full_photo_url) : null}
+            loginUrl={mediaUrl("/api/v1/auth/login")}
+            requiresAuth
             alt={event.photo_caption||`${event.type} detected`}
             caption={event.photo_caption}
             boxes={event.photo_boxes}
+            fullBoxes={event.full_photo_boxes}
             subject={subject}
             title={event.person_display_name||event.description}/>
         : <span className="muted">No photo captured</span>}
@@ -254,10 +262,28 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
       </ul>}
       {animal&&<p className="animal">
         <strong>{describeAnimal(animal)}</strong>
-        {animal.breed
+        {animal.scientific_name&&<span className="badge">{animal.scientific_name}</span>}
+        {animal.common_name
+          ? <span className="badge">{animal.taxonomic_group} · {Math.round((animal.confidence||0)*100)}% sure</span>
+          : animal.breed
           ? <span className="badge">{animal.species}{animal.confidence?` · ${Math.round(animal.confidence*100)}% sure`:""}</span>
-          : <span className="badge">Breed not identifiable</span>}
+          : <span className="badge">Species not identifiable</span>}
       </p>}
+      {event.vehicle&&<p className="vehicle" aria-label="Vehicle identification">
+        {(["colour","make","model","year_generation","body_type","trim"] as const).map(key=>
+          event.vehicle?.[key]&&event.vehicle[key]!=="unknown"&&<span key={key} className="badge">
+            {event.vehicle[key]}{event.vehicle[`${key}_confidence` as keyof VehicleIdentity]!=null
+              ? ` · ${Math.round(Number(event.vehicle[`${key}_confidence` as keyof VehicleIdentity])*100)}%`:""}
+          </span>
+        )}
+      </p>}
+      {event.suspicious&&<div className="suspicious" aria-label="Suspicious behaviour assessment">
+        <strong>{event.suspicious.level} · score {event.suspicious.score}</strong>
+        <ul>{event.suspicious.reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
+        {event.suspicious.evidence_event_ids.length>0&&<p>
+          Evidence: {event.suspicious.evidence_event_ids.map(id=><a key={id} href={`#event-${id}`}>{id} </a>)}
+        </p>}
+      </div>}
       {identified&&<p className="identity">
         <strong>{identified}</strong>
         <TrustBadge trust={event.person_trust}/>
@@ -299,7 +325,10 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
   return <li className="person-row">
     <div className="person-avatar">
       {person.photo_url
-        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!} alt={person.display_name} title={person.display_name}/>
+        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!}
+            loginUrl={mediaUrl("/api/v1/auth/login")}
+            requiresAuth
+            alt={person.display_name} title={person.display_name}/>
         : <span className="muted">?</span>}
     </div>
     <div className="person-info">

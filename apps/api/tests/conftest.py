@@ -87,15 +87,17 @@ async def _reset_scene_state():
 
     from app.ai.scene_verifier import reset_scene_verifier, set_scene_verifier
     from app.db import SessionLocal
-    from app.models.db import SceneState, VehicleTrack
-    from app.services import scene_state
+    from app.models.db import IngestionLease, SceneState, VehicleTrack
+    from app.services import ingestion_lease, scene_state
 
     async def _clear():
         scene_state.reset_memory()
+        ingestion_lease.keeper.reset()
         try:
             async with SessionLocal() as session:
                 await session.execute(delete(VehicleTrack))
                 await session.execute(delete(SceneState))
+                await session.execute(delete(IngestionLease))
                 await session.commit()
         except OperationalError:
             pass  # tables not created yet (no client fixture used so far)

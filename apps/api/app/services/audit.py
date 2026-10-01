@@ -8,12 +8,30 @@ recording — callers should log-and-continue, not audit-then-act.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.db import AuditLog
+
+# Ordering guard. ``audit_logs`` has no sequence column, so entries written in
+# the same clock tick (three rapid mode changes on a fast host) sort
+# arbitrarily and "most recent first" stops being true. Timestamps issued by
+# this process are therefore forced to be strictly increasing. Two replicas
+# writing inside the same microsecond is a genuine tie with no real ordering,
+# so this deliberately only guarantees monotonicity per process.
+_last_timestamp: datetime | None = None
+_TICK = timedelta(microseconds=1)
+
+
+def _next_timestamp() -> datetime:
+    global _last_timestamp
+    now = datetime.now(timezone.utc)
+    if _last_timestamp is not None and now <= _last_timestamp:
+        now = _last_timestamp + _TICK
+    _last_timestamp = now
+    return now
 
 
 async def record(
@@ -34,7 +52,7 @@ async def record(
         target_type=target_type,
         target_id=target_id,
         details=details or {},
-        created_at=datetime.now(timezone.utc),
+        created_at=_next_timestamp(),
     )
     session.add(entry)
     await session.commit()

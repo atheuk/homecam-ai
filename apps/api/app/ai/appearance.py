@@ -34,10 +34,8 @@ Attributes deliberately NOT inferred
   far more specifically by clothing and carried items, which is what a
   witness statement would record.
 
-Apparent age band *is* captured, coarsely and explicitly as an estimate,
-because "a child is at the front door" and "an adult is at the front door"
-are genuinely different events for a homeowner to act on. It is reported
-with its own confidence and is always allowed to be ``None``.
+Legacy age fields remain nullable in stored data for compatibility, but new
+vision requests neither ask for nor use age estimates.
 
 Failure policy (SPEC 43): every call is wrapped by the caller and a failure
 degrades to no appearance data rather than losing the event.
@@ -47,6 +45,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -110,9 +109,6 @@ APPEARANCE_SYSTEM_PROMPT = (
     "Reply with JSON only, no prose and no code fences, with exactly these "
     "keys:\n"
     '  "person_present": true or false - is a person clearly visible?\n'
-    '  "age_band": one of "child", "teenager", "adult", "older adult", or '
-    "null if you cannot tell from the image.\n"
-    '  "age_confidence": 0.0-1.0, how sure you are of the age band.\n'
     '  "build": short phrase for apparent height/build, or null.\n'
     '  "clothing": colours and garments visible, or null.\n'
     '  "carrying": anything held or carried, or null.\n'
@@ -120,7 +116,7 @@ APPEARANCE_SYSTEM_PROMPT = (
     "recognise them?\n"
     '  "description": one plain sentence, under 20 words, for the event '
     "list.\n"
-    "Rules: never state or guess the person's ethnicity, race, nationality, "
+    "Rules: never state or guess the person's age, ethnicity, race, nationality, "
     "gender or identity, and never include those in the description. Never "
     "guess intent. Use null rather than guessing any field. If no person is "
     'visible set "person_present" to false and every other field to null.'
@@ -133,7 +129,7 @@ class Appearance:
 
     person_present: bool
     age_band: str | None = None
-    age_confidence: float | None = 0.0
+    age_confidence: float | None = None
     build: str | None = None
     clothing: str | None = None
     carrying: str | None = None
@@ -177,6 +173,18 @@ def _clean_text(value: object, limit: int = 120) -> str | None:
     if not text or text.casefold() in _NULL_VALUES:
         return None
     return text[:limit]
+
+
+def _safe_description(value: object) -> str | None:
+    text = _clean_text(value, limit=300)
+    if text is None:
+        return None
+    # Model instructions are not a guarantee; omit an answer containing a
+    # demographic or identity claim rather than persisting the claim.
+    if re.search(r"\b(child|kid|teenager|adult|elderly|senior|young|old|"
+                 r"male|female|man|woman|ethnicity|race|aged|years? old)\b", text, re.I):
+        return None
+    return text
 
 
 def normalize_age_band(value: object) -> str | None:
@@ -255,18 +263,13 @@ def parse_appearance_reply(reply: str | None) -> Appearance | None:
     if not present:
         return Appearance(person_present=False)
 
-    age_band = normalize_age_band(parsed.get("age_band"))
-    # Confidence describes the age band, so it is meaningless without one.
-    age_confidence = _clean_confidence(parsed.get("age_confidence")) if age_band else None
     return Appearance(
         person_present=True,
-        age_band=age_band,
-        age_confidence=age_confidence,
         build=_clean_text(parsed.get("build"), limit=80),
         clothing=_clean_text(parsed.get("clothing"), limit=160),
         carrying=_clean_text(parsed.get("carrying"), limit=120),
         face_visible=_coerce_bool(parsed.get("face_visible")),
-        description=_clean_text(parsed.get("description"), limit=300),
+        description=_safe_description(parsed.get("description")),
     )
 
 

@@ -133,14 +133,15 @@ class DahuaEdgeProvider:
             return {}
         return {"Authorization": f"Bearer {self.settings.token}"}
 
-    async def _request(self, operation: str, path: str) -> httpx.Response:
+    async def _request(self, operation: str, path: str, retries: int | None = None) -> httpx.Response:
         if not self.settings.base_url:
             raise ProviderUnavailableError(
                 "Dahua edge mode is enabled but no edge connector base URL is configured"
             )
         url = f"{self.settings.base_url.rstrip('/')}{path}"
         last_error: Exception | None = None
-        for attempt in range(self.settings.retries + 1):
+        attempts = self.settings.retries if retries is None else retries
+        for attempt in range(attempts + 1):
             try:
                 client_options: dict = {
                     "timeout": self.settings.timeout_seconds,
@@ -167,11 +168,11 @@ class DahuaEdgeProvider:
                 return response
             except ProviderRequestError as exc:
                 last_error = exc
-                if not exc.retryable or attempt >= self.settings.retries:
+                if not exc.retryable or attempt >= attempts:
                     break
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
-                if attempt >= self.settings.retries:
+                if attempt >= attempts:
                     break
             await asyncio.sleep(0.1 * (attempt + 1))
         message = str(last_error) if last_error else "unknown edge connector error"
@@ -339,6 +340,14 @@ class DahuaEdgeProvider:
         self._mark_online(camera_id)
         return response.content
 
+    async def get_evidence_snapshot(self, camera_id: str) -> bytes:
+        info = await self._channel(camera_id)
+        response = await self._request("evidence snapshot", f"/channels/{info['channel']}/snapshot?full=true", retries=0)
+        if not response.content:
+            raise CameraOfflineError(camera_id)
+        self._mark_online(camera_id)
+        return response.content
+
     async def get_live_stream(self, camera_id: str) -> str:
         """Return a browser-safe stream descriptor URL.
 
@@ -414,4 +423,3 @@ class DahuaEdgeProvider:
             "camera_count": camera_count,
             "online_camera_count": online_count,
         }
-

@@ -1,6 +1,6 @@
-import {describe,it,expect} from "vitest";
-import {render,screen,fireEvent} from "@testing-library/react";
-import {DetectionBoxes,boxLabel,type DetectionBox} from "./DetectionBoxes";
+import {describe,it,expect,vi} from "vitest";
+import {render,screen,fireEvent,waitFor} from "@testing-library/react";
+import {DetectionBoxes,boxLabel,expandedBox,type DetectionBox} from "./DetectionBoxes";
 import {ZoomablePhoto} from "./Lightbox";
 
 const PERSON:DetectionBox={label:"person",confidence:0.93,box:{x1:0.25,y1:0.1,x2:0.75,y2:0.9}};
@@ -25,10 +25,19 @@ describe("DetectionBoxes",()=>{
     const [box]=boxes();
     // Percentages, not pixels: the same markup must stay correct at
     // thumbnail size and at 8x zoom.
-    expect(box.style.left).toBe("25%");
-    expect(box.style.top).toBe("10%");
-    expect(box.style.width).toBe("50%");
-    expect(box.style.height).toBe("80%");
+    expect(parseFloat(box.style.left)).toBeCloseTo(21.5);
+    expect(parseFloat(box.style.top)).toBeCloseTo(4.4);
+    expect(parseFloat(box.style.width)).toBeCloseTo(57);
+    expect(parseFloat(box.style.height)).toBeCloseTo(91.2);
+  });
+
+  it("grows small boxes at least a few pixels and clamps at the image edge",()=>{
+    expect(expandedBox({x1:0,y1:0,x2:0.01,y2:0.01})).toEqual({
+      x1:0,y1:0,x2:0.014,y2:0.014,
+    });
+    expect(expandedBox({x1:0.98,y1:0.98,x2:1,y2:1})).toEqual({
+      x1:0.976,y1:0.976,x2:1,y2:1,
+    });
   });
 
   it("draws one border per detection",()=>{
@@ -87,6 +96,35 @@ describe("borders on a zoomable photo",()=>{
     // the subject while zooming and panning.
     expect(document.querySelector(".lightbox-figure img")).not.toBeNull();
     expect(screen.getAllByText("Sarah 93%").length).toBeGreaterThan(0);
+  });
+
+  it("opens the authenticated original frame with full-frame borders, not crop coordinates",async()=>{
+    vi.stubGlobal("fetch",vi.fn(async (url:string)=>{
+      if(url==="/login") return new Response(JSON.stringify({access_token:"test-token"}),{status:200});
+      return new Response(new Blob(["full-frame"],{type:"image/jpeg"}),{status:200});
+    }));
+    const create=vi.fn(()=>"blob:full-photo");
+    const revoke=vi.fn();
+    vi.stubGlobal("URL",class extends URL {
+      static createObjectURL=create;
+      static revokeObjectURL=revoke;
+    });
+    render(<ZoomablePhoto src="/crop" fullSrc="/full" loginUrl="/login" alt="Person"
+      boxes={[PERSON]} fullBoxes={[{...PERSON,box:{x1:0.1,y1:0.2,x2:0.2,y2:0.3}}]}/>);
+    fireEvent.click(screen.getByRole("button",{name:/full screen/}));
+    expect((document.querySelector(".lightbox-figure img") as HTMLImageElement).getAttribute("src")).toBe("/crop");
+    fireEvent.change(screen.getByRole("textbox",{name:"Photo account email"}),{target:{value:"owner@example.com"}});
+    fireEvent.change(screen.getByLabelText("Photo account password"),{target:{value:"password"}});
+    fireEvent.click(screen.getByRole("button",{name:"View full resolution"}));
+    await waitFor(()=>expect((document.querySelector(".lightbox-figure img") as HTMLImageElement).getAttribute("src")).toBe("blob:full-photo"));
+    expect(global.fetch).toHaveBeenNthCalledWith(2,"/full",expect.objectContaining({
+      headers:{Authorization:"Bearer test-token"},cache:"no-store",
+    }));
+    expect(create).toHaveBeenCalled();
+    expect((document.querySelector(".lightbox-figure .detection-box") as HTMLElement).style.left).toBe("9.3%");
+    fireEvent.click(screen.getByRole("button",{name:"Close full screen"}));
+    expect(revoke).toHaveBeenCalledWith("blob:full-photo");
+    vi.unstubAllGlobals();
   });
 
   it("counter-scales the borders so zooming does not bury the subject",()=>{

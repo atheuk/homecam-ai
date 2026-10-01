@@ -583,7 +583,9 @@ class OnnxDetector:
             class_id = int(np.argmax(scores))
             confidence = float(scores[class_id])
             label = COCO_CLASS_NAMES.get(class_id)
-            if label is None or confidence < self._confidence_threshold:
+            from ..config import settings
+            threshold = min(self._confidence_threshold, settings.animal_bird_confidence_threshold) if label == "bird" else self._confidence_threshold
+            if label is None or confidence < threshold:
                 continue
             cx, cy, w, h = (float(v) / self._input_size for v in row[:4])
             x1, y1 = max(cx - w / 2, 0.0), max(cy - h / 2, 0.0)
@@ -687,10 +689,12 @@ class RtDetrDetector:
         for query in range(scores.shape[0]):
             class_id = int(np.argmax(scores[query]))
             confidence = float(scores[query][class_id])
-            if confidence < self._confidence_threshold:
-                continue
             label = COCO_CLASS_NAMES.get(class_id)
             if label is None:
+                continue
+            from ..config import settings
+            threshold = min(self._confidence_threshold, settings.animal_bird_confidence_threshold) if label == "bird" else self._confidence_threshold
+            if confidence < threshold:
                 continue
             cx, cy, w, h = (float(v) for v in boxes[query])
             x1, y1 = max(cx - w / 2, 0.0), max(cy - h / 2, 0.0)

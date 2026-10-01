@@ -26,6 +26,7 @@ export DAHUA_PASSWORD="$(read_option dahua_password)"
 export DAHUA_CHANNELS="$(read_option dahua_channels)"
 export HOME_CAM_EDGE_TOKEN="$(read_option home_cam_edge_token)"
 export DAHUA_TIMEOUT_SECONDS="$(read_option dahua_timeout_seconds)"
+export DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS="$(read_option dahua_evidence_snapshot_timeout_seconds)"
 
 if [ -z "$DAHUA_HOST" ] || [ -z "$DAHUA_USERNAME" ] || [ -z "$DAHUA_PASSWORD" ] || [ -z "$HOME_CAM_EDGE_TOKEN" ]; then
   echo "dahua_host, dahua_username, dahua_password, and home_cam_edge_token are required" >&2

@@ -288,7 +288,55 @@ EMPTY_MAILBOX = _frame((MAILBOX_BOX, (60, 60, 60)))
 YES = {"person_interacted": "yes", "item_deposited": "yes", "item_type": "mail", "confidence": 0.8, "evidence": "envelope in slot"}
 
 
-async def test_a_walk_by_is_not_a_delivery(scene):
+LID = BoundingBox(0.10, 0.22, 0.30, 0.40)
+OPENED = _frame((MAILBOX_BOX, (60, 60, 60)), (LID, (190, 190, 170)))
+FAR_PERSON = BoundingBox(0.60, 0.20, 0.75, 0.95)
+WITH_FAR_PERSON = _frame((MAILBOX_BOX, (60, 60, 60)), (FAR_PERSON, RED))
+
+
+def _relit(frame: bytes, factor: float) -> bytes:
+    from PIL import Image, ImageEnhance
+
+    image = ImageEnhance.Brightness(Image.open(io.BytesIO(frame))).enhance(factor)
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=92)
+    return buffer.getvalue()
+
+
+def _ir_frame() -> bytes:
+    """Night/IR: the whole picture's texture changes, mailbox included."""
+    from PIL import Image, ImageDraw
+
+    width, height = 640, 360
+    image = Image.new("RGB", (width, height), (140, 140, 140))
+    draw = ImageDraw.Draw(image)
+    for y in range(0, height, 12):
+        draw.line((0, y, width, y), fill=(170, 170, 170))
+    draw.rectangle((0.1 * width, 0.3 * height, 0.3 * width, 0.6 * height), fill=(200, 200, 200))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=92)
+    return buffer.getvalue()
+
+
+def _stats() -> dict[str, int]:
+    return scene_state.drain_mailbox_stats(CAMERA)
+
+
+async def test_a_walk_by_away_from_the_mailbox_does_not_trigger(scene):
+    await _zone("mailbox", MAILBOX)
+    verifier = FakeVerifier(mailbox=YES)
+    set_scene_verifier(verifier)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(3, [person(FAR_PERSON)], WITH_FAR_PERSON)
+    out += await scene.run(3, [], EMPTY_MAILBOX)
+    assert out == []
+    assert verifier.calls == []
+    stats = _stats()
+    assert stats["mailbox_visits"] == 0 and stats["mailbox_events"] == 0
+
+
+async def test_a_brief_pass_with_nothing_changed_is_a_walk_by_when_two_frames_are_required(scene, monkeypatch):
+    monkeypatch.setattr(settings, "mailbox_min_observations", 2)
     await _zone("mailbox", MAILBOX)
     verifier = FakeVerifier(mailbox=YES)
     set_scene_verifier(verifier)
@@ -299,17 +347,160 @@ async def test_a_walk_by_is_not_a_delivery(scene):
     assert verifier.calls == []
     [zone] = (await scene.state())["zones"]
     assert zone["data"]["last_outcome"] == "walk_by"
+    assert _stats()["mailbox_walk_by"] == 1
 
 
-async def test_a_parcel_carried_past_is_not_a_delivery(scene):
+async def test_a_single_frame_at_the_mailbox_is_one_low_priority_visit(scene):
+    await _zone("mailbox", MAILBOX, "Mailbox")
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(1, [person()], WITH_PERSON)
+    out += await scene.run(3, [], EMPTY_MAILBOX)
+    [visit] = out
+    assert visit.transition == "mailbox_visit"
+    assert visit.priority == "low"
+    assert visit.tags == ["mailbox", "mailbox_visit"]
+    assert visit.dedup_key.startswith("mailbox_visit:")
+    assert "unclear" in visit.description
+    assert visit.metadata["mailbox"]["observations"] == 1
+    assert visit.metadata["mailbox"]["action"] == "none"
+
+
+async def test_a_single_frame_drop_with_the_lid_opening_is_a_delivery(scene, monkeypatch):
+    # Production cadence (5-23s) sees a 3-6s mail drop in at most one frame.
+    monkeypatch.setattr(settings, "mailbox_min_observations", 2)
     await _zone("mailbox", MAILBOX)
     verifier = FakeVerifier(mailbox=YES)
     set_scene_verifier(verifier)
     await scene.run(3, [], EMPTY_MAILBOX)
-    out = await scene.run(3, [person(), PARCEL], WITH_PERSON)
+    out = await scene.run(1, [person()], WITH_PERSON)
+    out += await scene.run(2, [], OPENED)  # the flap was left open
+    out += await scene.run(1, [], OPENED)  # Foundry answer picked up
+    out += await scene.run(3, [], EMPTY_MAILBOX)
+    [delivery] = out
+    assert delivery.transition == "mailbox_delivery"
+    assert verifier.calls == [("mailbox", ["BEFORE", "DURING", "AFTER"])]
+    assert delivery.metadata["mailbox"]["state_change"] is True
+    assert delivery.metadata["mailbox"]["diff_score"] >= settings.mailbox_open_threshold
+
+
+async def test_a_single_frame_drop_with_a_visible_parcel_is_a_local_delivery(scene, monkeypatch):
+    monkeypatch.setattr(settings, "mailbox_min_observations", 2)
+    await _zone("mailbox", MAILBOX)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(1, [person()], WITH_PERSON)
+    out += await scene.run(3, [PARCEL], EMPTY_MAILBOX)
+    [delivery] = out
+    assert delivery.transition == "mailbox_delivery"
+    assert delivery.priority == "normal"
+    assert delivery.metadata["mailbox"]["source"] == "local"
+
+
+async def test_a_lid_change_without_a_verifier_is_reported_as_opened(scene, monkeypatch):
+    monkeypatch.setattr(settings, "mailbox_min_observations", 2)
+    await _zone("mailbox", MAILBOX)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(1, [person()], WITH_PERSON)
+    out += await scene.run(2, [], OPENED)
+    out += await scene.run(3, [], EMPTY_MAILBOX)
+    [opened] = out
+    assert opened.transition == "mailbox_opened"
+    assert opened.metadata["mailbox"]["action"] == "opened_only"
+    assert opened.metadata["mailbox"]["state_change"] is True
+
+
+async def test_a_parcel_taken_from_the_mailbox_is_a_retrieval(scene):
+    await _zone("mailbox", MAILBOX, "Mailbox")
+    await scene.run(3, [PARCEL], EMPTY_MAILBOX)
+    out = await scene.run(1, [person()], WITH_PERSON)
+    out += await scene.run(3, [], EMPTY_MAILBOX)
+    [retrieval] = out
+    assert retrieval.transition == "mailbox_retrieval"
+    assert retrieval.tags == ["mailbox", "mailbox_retrieval", "parcel", "package_removed"]
+    assert retrieval.priority == "high"
+    evidence = retrieval.metadata["mailbox"]
+    assert evidence["before"]["package_detected"] is True
+    assert evidence["after"]["package_detected"] is False
+    assert evidence["item_removed"] == "yes"
+    assert retrieval.description == "A package was taken from the Mailbox at Driveway."
+
+
+async def test_foundry_reports_mail_taken_out(scene):
+    await _zone("mailbox", MAILBOX)
+    set_scene_verifier(FakeVerifier(mailbox={**YES, "item_deposited": "no", "action": "retrieved"}))
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(2, [person()], WITH_PERSON)
+    out += await scene.run(4, [], EMPTY_MAILBOX)
+    [retrieval] = out
+    assert retrieval.transition == "mailbox_retrieval"
+    assert retrieval.tags == ["mailbox", "mailbox_retrieval", "mail"]
+    assert retrieval.priority == "normal"
+    assert retrieval.metadata["mailbox"]["source"] == "foundry"
+    assert "Mail was taken out of" in retrieval.description
+
+
+async def test_the_mailbox_opening_with_nobody_there_is_one_opened_event(scene):
+    await _zone("mailbox", MAILBOX, "Mailbox")
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(4, [], OPENED)
+    [opened] = out
+    assert opened.transition == "mailbox_opened"
+    assert opened.priority == "normal"
+    assert set(opened.evidence_images) >= {"before", "opened"}
+    assert opened.metadata["mailbox"]["observations"] == 0
+    assert opened.metadata["mailbox"]["opened"] == {"image": True}
+    assert opened.description.startswith("The Mailbox at Driveway was opened")
+    [zone] = (await scene.state())["zones"]
+    assert zone["data"]["lid"] == "open"
+
+    # Closing, and opening again within the cooldown: still one event.
+    out = await scene.run(2, [], EMPTY_MAILBOX)
+    [zone] = (await scene.state())["zones"]
+    assert zone["data"]["lid"] == "closed"
+    out += await scene.run(3, [], OPENED)
+    assert out == []
+    stats = _stats()
+    assert stats["mailbox_opened"] == 2 and stats["mailbox_deduped"] == 1 and stats["mailbox_events"] == 1
+
+
+async def test_one_changed_frame_with_nobody_there_is_not_an_opening(scene):
+    await _zone("mailbox", MAILBOX)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(1, [], OPENED)
     out += await scene.run(3, [], EMPTY_MAILBOX)
     assert out == []
-    assert verifier.calls == []
+
+
+async def test_lighting_and_ir_changes_are_not_openings(scene):
+    await _zone("mailbox", MAILBOX)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(3, [], _relit(EMPTY_MAILBOX, 1.3))
+    out += await scene.run(3, [], _relit(EMPTY_MAILBOX, 0.5))
+    out += await scene.run(3, [], _ir_frame())
+    assert out == []
+    [zone] = (await scene.state())["zones"]
+    assert zone["data"]["lid"] == "closed"
+    # Back to daylight (re-bases again) - and a real opening is still caught.
+    assert await scene.run(3, [], EMPTY_MAILBOX) == []
+    assert _kinds(await scene.run(2, [], _relit(OPENED, 0.8))) == ["mailbox_opened"]
+
+
+async def test_open_detection_can_be_disabled(scene, monkeypatch):
+    monkeypatch.setattr(settings, "mailbox_open_detection_enabled", False)
+    await _zone("mailbox", MAILBOX)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    assert await scene.run(4, [], OPENED) == []
+
+
+async def test_a_parcel_carried_past_is_a_visit_not_a_delivery(scene):
+    await _zone("mailbox", MAILBOX)
+    verifier = FakeVerifier(mailbox={**YES, "item_deposited": "no", "action": "none"})
+    set_scene_verifier(verifier)
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(3, [person(), PARCEL], WITH_PERSON)
+    out += await scene.run(4, [], EMPTY_MAILBOX)
+    [visit] = out
+    assert visit.transition == "mailbox_visit"
+    assert visit.priority == "low"
 
 
 async def test_a_locally_seen_parcel_left_at_the_mailbox_is_one_delivery(scene):
@@ -326,26 +517,37 @@ async def test_a_locally_seen_parcel_left_at_the_mailbox_is_one_delivery(scene):
     assert evidence["before"]["package_detected"] is False
     assert evidence["after"]["package_detected"] is True
 
-    # The parcel sitting there afterwards, and another visit within the
-    # dedupe window, do not produce more deliveries.
+    # The parcel sitting there afterwards produces nothing; another visit
+    # that leaves it in place is a visit, not another delivery.
     out = await scene.run(3, [PARCEL], EMPTY_MAILBOX)
-    out += await scene.run(3, [person()], WITH_PERSON)
-    out += await scene.run(3, [], EMPTY_MAILBOX)
     assert out == []
-
-
-async def test_foundry_confirms_mail_the_detector_cannot_see(scene):
-    await _zone("mailbox", MAILBOX)
-    verifier = FakeVerifier(mailbox=YES)
-    set_scene_verifier(verifier)
-    await scene.run(3, [], EMPTY_MAILBOX)
     out = await scene.run(3, [person()], WITH_PERSON)
-    out += await scene.run(3, [], EMPTY_MAILBOX)
-    [delivery] = out
-    assert verifier.calls == [("mailbox", ["BEFORE", "DURING", "AFTER"])]
-    assert delivery.tags == ["mailbox", "mailbox_delivery", "mail"]
-    assert delivery.metadata["scene"]["source"] == "foundry"
-    assert delivery.metadata["mailbox"]["evidence"] == "envelope in slot"
+    out += await scene.run(3, [PARCEL], EMPTY_MAILBOX)
+    assert _kinds(out) == ["mailbox_visit"]
+
+
+async def test_a_second_delivery_within_the_dedupe_window_is_suppressed(scene, monkeypatch):
+    monkeypatch.setattr(settings, "scene_verifier_min_interval_seconds", 0)
+    await _zone("mailbox", MAILBOX)
+    set_scene_verifier(FakeVerifier(mailbox=YES))
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(2, [person()], WITH_PERSON)
+    out += await scene.run(4, [], EMPTY_MAILBOX)
+    assert _kinds(out) == ["mailbox_delivery"]
+    out = await scene.run(2, [person()], WITH_PERSON)
+    out += await scene.run(4, [], EMPTY_MAILBOX)
+    assert out == []
+    [zone] = (await scene.state())["zones"]
+    assert zone["data"]["last_outcome"] == "deduplicated"
+
+
+async def test_foundry_found_the_mailbox_opened_only(scene):
+    await _zone("mailbox", MAILBOX)
+    set_scene_verifier(FakeVerifier(mailbox={**YES, "item_deposited": "no", "action": "opened_only"}))
+    await scene.run(3, [], EMPTY_MAILBOX)
+    out = await scene.run(2, [person()], WITH_PERSON)
+    out += await scene.run(4, [], EMPTY_MAILBOX)
+    assert _kinds(out) == ["mailbox_opened"]
 
 
 @pytest.mark.parametrize(
@@ -354,16 +556,17 @@ async def test_foundry_confirms_mail_the_detector_cannot_see(scene):
         {**YES, "item_deposited": "no"},
         {**YES, "item_deposited": "unknown"},
         {**YES, "person_interacted": "no"},
+        {**YES, "action": "none"},
         None,
     ],
 )
-async def test_no_or_unknown_from_foundry_is_not_a_delivery(scene, answer):
+async def test_no_or_unknown_from_foundry_is_a_visit_not_a_delivery(scene, answer):
     await _zone("mailbox", MAILBOX)
     set_scene_verifier(FakeVerifier(mailbox=answer))
     await scene.run(3, [], EMPTY_MAILBOX)
     out = await scene.run(3, [person()], WITH_PERSON)
-    out += await scene.run(3, [], EMPTY_MAILBOX)
-    assert out == []
+    out += await scene.run(4, [], EMPTY_MAILBOX)
+    assert _kinds(out) == ["mailbox_visit"]
 
 
 async def test_mailbox_detection_is_off_without_a_mailbox_zone(scene):
@@ -495,11 +698,15 @@ def test_mailbox_reply_is_normalized_to_closed_answers():
     assert reply == {
         "person_interacted": "yes",
         "item_deposited": "yes",
+        "action": "unknown",
         "item_type": "unknown",
         "confidence": 0.9,
         "evidence": "envelope pushed in",
     }
     assert parse_mailbox_reply("I think so") is None
+    assert parse_mailbox_reply('{"action": "Opened only"}')["action"] == "opened_only"
+    assert parse_mailbox_reply('{"action": "RETRIEVED"}')["action"] == "retrieved"
+    assert parse_mailbox_reply('{"action": "stole it"}')["action"] == "unknown"
     assert parse_mailbox_reply('{"item_deposited": "probably"}')["item_deposited"] == "unknown"
 
 
