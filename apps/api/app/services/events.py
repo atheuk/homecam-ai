@@ -102,6 +102,23 @@ def _with_evidence_urls(event_id: str, metadata: dict, images: dict[str, bytes])
     return metadata
 
 
+async def _recover(session: AsyncSession, row: Event, event_id: str) -> None:
+    """Roll a failed enrichment stage back and leave ``row`` usable.
+
+    ``rollback()`` expires every attribute on ``row``, so without an
+    explicit reload the next *plain* attribute access - even ``row.id`` -
+    lazy-loads from a sync context and raises ``MissingGreenlet``. That
+    turned one failed stage into a failure of everything downstream,
+    including the caller's own logging: a failed incident routing took the
+    scene-transition caller down with it.
+    """
+    await session.rollback()
+    try:
+        await session.refresh(row)
+    except Exception:  # noqa: BLE001 - recovery must never raise
+        logger.exception("could not reload event %s after a failed stage", event_id)
+
+
 async def create_and_broadcast_event(
     session: AsyncSession,
     event: dict,
@@ -130,13 +147,13 @@ async def create_and_broadcast_event(
     ``Incident.evidence``.
     """
     row = await persist_event(session, event)
+    event_id = row.id
     if evidence_images:
         try:
             await _attach_evidence(session, row, evidence_images)
         except Exception:  # noqa: BLE001 - evidence must never break ingestion
             logger.exception("evidence storage failed for %s", event["id"])
-            await session.rollback()
-            await session.refresh(row)
+            await _recover(session, row, event_id)
         event = {**event, "metadata": dict(row.event_metadata or {})}
     # Snapshot the arming mode immediately, before the (potentially slow,
     # AI-backed) enrichment awaits below. Incident routing runs after
@@ -157,11 +174,10 @@ async def create_and_broadcast_event(
         await session.commit()
         await session.refresh(row)
     except Exception:  # noqa: BLE001 - analysis must never break ingestion
-        logger.exception("event analysis failed for %s", row.id)
-        await session.rollback()
+        logger.exception("event analysis failed for %s", event_id)
         # The rollback expires the already-committed row; reload it here so
         # callers never trigger an implicit (sync) load outside the greenlet.
-        await session.refresh(row)
+        await _recover(session, row, event_id)
     try:
         # Loitering / unusual-activity / notification-priority run after the
         # AI pipeline has settled row.type and row.zone, but strictly before
@@ -171,9 +187,8 @@ async def create_and_broadcast_event(
         await session.commit()
         await session.refresh(row)
     except Exception:  # noqa: BLE001 - signals must never break ingestion
-        logger.exception("signal evaluation failed for %s", row.id)
-        await session.rollback()
-        await session.refresh(row)
+        logger.exception("signal evaluation failed for %s", event_id)
+        await _recover(session, row, event_id)
     if row.type == "person" and (row.event_metadata or {}).get("suspicious", {}).get("level"):
         claim_key = f"suspicious-person:{row.camera_id}:{row.person_id or row.id}"
         try:
@@ -194,9 +209,8 @@ async def create_and_broadcast_event(
                 await session.commit()
                 await session.refresh(row)
         except Exception:  # noqa: BLE001 - alert dedup cannot discard an event
-            logger.exception("suspicious alert claim failed for %s", row.id)
-            await session.rollback()
-            await session.refresh(row)
+            logger.exception("suspicious alert claim failed for %s", event_id)
+            await _recover(session, row, event_id)
     enriched = {**enriched, "activity_id": row.activity_id}
     if signal_result is not None:
         enriched = {
@@ -215,8 +229,11 @@ async def create_and_broadcast_event(
         # whatever is active now (see comment above).
         await incident_service.route_event(session, row, mode=mode_at_detection)
     except Exception:  # noqa: BLE001 - incident routing must never break ingestion
-        logger.exception("incident routing failed for %s", row.id)
-        await session.rollback()
+        logger.exception("incident routing failed for %s", event_id)
+        # Callers keep using ``row`` after this returns (scene ingestion
+        # links the event to its track and logs ``row.id``), so the row has
+        # to survive the rollback as a usable object, not an expired one.
+        await _recover(session, row, event_id)
     return row
 
 

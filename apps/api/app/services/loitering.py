@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..models.db import CameraZone, ZonePresence
+from . import zones as zone_service
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +73,8 @@ async def _acquire_presence_lock(session: AsyncSession, key: str) -> None:
 
 async def dwell_threshold(session: AsyncSession, camera_id: str, zone: str) -> float:
     """The zone's configured dwell threshold, or the global default."""
-    result = await session.execute(
-        select(CameraZone.dwell_seconds).where(
-            CameraZone.camera_id == camera_id, CameraZone.name == zone
-        )
-    )
-    value = result.scalar_one_or_none()
-    if value is None or value <= 0:
+    value = await zone_service.zone_attribute(session, camera_id, zone, CameraZone.dwell_seconds)
+    if not isinstance(value, (int, float)) or value <= 0:
         return settings.zone_default_dwell_seconds
     return float(value)
 
