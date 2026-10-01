@@ -123,9 +123,8 @@ async def test_person_event_gets_ai_analysis_and_best_photo(client):
     assert body["best_photo_path"]
     assert body["full_photo_url"] == f"/api/v1/events/{event_id}/photo/full"
     assert body["full_photo_boxes"] == body["metadata"]["best_photo"]["frame_boxes"]
-    full = await client.get(body["full_photo_url"])
-    assert full.status_code == 200
-    assert full.content
+    assert (await client.get(body["full_photo_url"])).status_code == 401
+    assert (await client.get(body["full_photo_url"], headers=await _headers(client))).status_code == 200
 
     async with SessionLocal() as session:
         rows = (await session.execute(select(AIAnalysis).where(AIAnalysis.event_id == event_id))).scalars().all()
@@ -167,7 +166,12 @@ async def test_detected_event_regrabs_high_resolution_and_serves_original(client
     assert calls == ["mock-front-door"]
     assert (body["full_photo_width"], body["full_photo_height"]) == (1920, 1080)
     assert body["photo_width"] >= 720 and body["photo_height"] >= 720
-    assert (await client.get(body["full_photo_url"])).content == high
+    assert (await client.get(body["full_photo_url"])).status_code == 401
+    full = await client.get(body["full_photo_url"], headers=await _headers(client))
+    assert full.status_code == 200
+    assert full.headers["cache-control"] == "private, no-store"
+    assert full.headers["content-type"].startswith("image/jpeg")
+    assert full.content == high
 
 
 @pytest.mark.parametrize("failure", ["overflow", "timeout"])
@@ -198,7 +202,10 @@ async def test_failed_high_resolution_capture_keeps_detected_frame(client, monke
         await event_service.create_and_broadcast_event(session, event, trigger_frame=low, frames=[low])
     body = (await client.get(f"/api/v1/events/{event_id}")).json()
     assert (body["full_photo_width"], body["full_photo_height"]) == (640, 480)
-    assert (await client.get(body["full_photo_url"])).content == low
+    assert (await client.get(body["full_photo_url"])).status_code == 401
+    full = await client.get(body["full_photo_url"], headers=await _headers(client))
+    assert full.status_code == 200
+    assert full.content == low
 
 
 async def test_person_in_driveway_zone_is_tagged(client):

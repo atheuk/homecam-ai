@@ -455,7 +455,11 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
 
 
 @router.get("/events/{event_id}/photo/full")
-async def event_full_photo(event_id: str, session: AsyncSession = Depends(get_db)):
+async def event_full_photo(
+    event_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
     """Original full-frame bytes corresponding to the selected event photo."""
     photo = await session.get(EventEvidence, (event_id, "full"))
     if photo is None:
@@ -463,7 +467,10 @@ async def event_full_photo(event_id: str, session: AsyncSession = Depends(get_db
     return Response(
         content=photo.image,
         media_type=photo.content_type or "image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400", "Content-Disposition": f'inline; filename="{event_id}-full.jpg"'},
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{event_id}-full.jpg"',
+        },
     )
 
 

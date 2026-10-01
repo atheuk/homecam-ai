@@ -28,6 +28,7 @@ const RESET: View = {scale: 1, x: 0, y: 0};
 export type LightboxPhoto = {
   src: string;
   fullSrc?: string | null;
+  loginUrl?: string;
   alt: string;
   caption?: string | null;
   title?: string;
@@ -47,6 +48,12 @@ function distanceBetween(a: Point, b: Point) {
 
 export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () => void}) {
   const [view, setView] = useState<View>(RESET);
+  const [fullImage, setFullImage] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const request = useRef<AbortController | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -59,6 +66,59 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
   // Distinguishes a pan that happens to end on the backdrop from a click
   // meant to dismiss, so dragging the photo never closes the viewer.
   const panned = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      request.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (fullImage) URL.revokeObjectURL(fullImage);
+    };
+  }, [fullImage]);
+
+  const loadFullImage = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!photo.fullSrc || loading) return;
+    if (!photo.loginUrl) {
+      setError("Sign-in is not configured for this photo.");
+      return;
+    }
+    const controller = new AbortController();
+    request.current = controller;
+    setLoading(true);
+    setError("");
+    try {
+      const login = await fetch(photo.loginUrl, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({email, password}),
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!login.ok) throw new Error("Sign-in failed. Check your credentials and try again.");
+      const {access_token}: {access_token: string} = await login.json();
+      if (!access_token) throw new Error("Sign-in did not return an access token.");
+      const response = await fetch(photo.fullSrc, {
+        headers: {Authorization: `Bearer ${access_token}`},
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`Could not load full-resolution photo (HTTP ${response.status}).`);
+      const blob = await response.blob();
+      if (controller.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      setFullImage(url);
+      setPassword("");
+      setView(RESET);
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Could not load full-resolution photo.");
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  };
 
   /** Keep the photo's own edges from being dragged inside the viewport.
    *
@@ -236,6 +296,18 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
         </div>
       </div>
 
+      {photo.fullSrc && !fullImage && (
+        <form className="lightbox-auth" onSubmit={loadFullImage}>
+          <span>Sign in to view the full-resolution frame.</span>
+          <input aria-label="Photo account email" type="email" required autoComplete="username"
+            value={email} onChange={event => setEmail(event.target.value)} />
+          <input aria-label="Photo account password" type="password" required autoComplete="current-password"
+            value={password} onChange={event => setPassword(event.target.value)} />
+          <button type="submit" disabled={loading}>{loading ? "Loading…" : "View full resolution"}</button>
+          {error && <span role="alert" className="error">{error}</span>}
+        </form>
+      )}
+
       <div
         className={zoomed ? "lightbox-viewport zoomed" : "lightbox-viewport"}
         ref={viewportRef}
@@ -262,8 +334,8 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
           {/* eslint-disable-next-line @next/next/no-img-element -- next/image
               cannot be used here: the API origin is injected at deploy time,
               not build time, so it cannot be a configured remote pattern. */}
-          <img ref={imageRef} src={photo.fullSrc || photo.src} alt={photo.alt} draggable={false} />
-          <DetectionBoxes boxes={photo.fullSrc ? photo.fullBoxes : photo.boxes} name={photo.subject} />
+          <img ref={imageRef} src={fullImage || photo.src} alt={photo.alt} draggable={false} />
+          <DetectionBoxes boxes={fullImage ? photo.fullBoxes : photo.boxes} name={photo.subject} />
         </span>
       </div>
 
@@ -282,6 +354,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
 export function ZoomablePhoto({
   src,
   fullSrc,
+  loginUrl,
   alt,
   caption,
   title,
@@ -291,6 +364,7 @@ export function ZoomablePhoto({
 }: {
   src: string;
   fullSrc?: string | null;
+  loginUrl?: string;
   alt: string;
   caption?: string | null;
   title?: string;
@@ -308,7 +382,7 @@ export function ZoomablePhoto({
           <DetectionBoxes boxes={boxes} name={subject} />
         </span>
       </button>
-      {open && <Lightbox photo={{src, fullSrc, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
+      {open && <Lightbox photo={{src, fullSrc, loginUrl, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
     </>
   );
 }

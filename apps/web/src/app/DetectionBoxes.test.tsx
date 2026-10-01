@@ -1,5 +1,5 @@
-import {describe,it,expect} from "vitest";
-import {render,screen,fireEvent} from "@testing-library/react";
+import {describe,it,expect,vi} from "vitest";
+import {render,screen,fireEvent,waitFor} from "@testing-library/react";
 import {DetectionBoxes,boxLabel,expandedBox,type DetectionBox} from "./DetectionBoxes";
 import {ZoomablePhoto} from "./Lightbox";
 
@@ -98,12 +98,33 @@ describe("borders on a zoomable photo",()=>{
     expect(screen.getAllByText("Sarah 93%").length).toBeGreaterThan(0);
   });
 
-  it("opens the original frame with full-frame borders, not crop coordinates",()=>{
-    render(<ZoomablePhoto src="/crop" fullSrc="/full" alt="Person"
+  it("opens the authenticated original frame with full-frame borders, not crop coordinates",async()=>{
+    vi.stubGlobal("fetch",vi.fn(async (url:string)=>{
+      if(url==="/login") return new Response(JSON.stringify({access_token:"test-token"}),{status:200});
+      return new Response(new Blob(["full-frame"],{type:"image/jpeg"}),{status:200});
+    }));
+    const create=vi.fn(()=>"blob:full-photo");
+    const revoke=vi.fn();
+    vi.stubGlobal("URL",class extends URL {
+      static createObjectURL=create;
+      static revokeObjectURL=revoke;
+    });
+    render(<ZoomablePhoto src="/crop" fullSrc="/full" loginUrl="/login" alt="Person"
       boxes={[PERSON]} fullBoxes={[{...PERSON,box:{x1:0.1,y1:0.2,x2:0.2,y2:0.3}}]}/>);
     fireEvent.click(screen.getByRole("button",{name:/full screen/}));
-    expect((document.querySelector(".lightbox-figure img") as HTMLImageElement).getAttribute("src")).toBe("/full");
+    expect((document.querySelector(".lightbox-figure img") as HTMLImageElement).getAttribute("src")).toBe("/crop");
+    fireEvent.change(screen.getByRole("textbox",{name:"Photo account email"}),{target:{value:"owner@example.com"}});
+    fireEvent.change(screen.getByLabelText("Photo account password"),{target:{value:"password"}});
+    fireEvent.click(screen.getByRole("button",{name:"View full resolution"}));
+    await waitFor(()=>expect((document.querySelector(".lightbox-figure img") as HTMLImageElement).getAttribute("src")).toBe("blob:full-photo"));
+    expect(global.fetch).toHaveBeenNthCalledWith(2,"/full",expect.objectContaining({
+      headers:{Authorization:"Bearer test-token"},cache:"no-store",
+    }));
+    expect(create).toHaveBeenCalled();
     expect((document.querySelector(".lightbox-figure .detection-box") as HTMLElement).style.left).toBe("9.3%");
+    fireEvent.click(screen.getByRole("button",{name:"Close full screen"}));
+    expect(revoke).toHaveBeenCalledWith("blob:full-photo");
+    vi.unstubAllGlobals();
   });
 
   it("counter-scales the borders so zooming does not bury the subject",()=>{

@@ -1,5 +1,5 @@
 ﻿import {describe,it,expect,vi} from "vitest";
-import {render,screen,fireEvent} from "@testing-library/react";
+import {render,screen,fireEvent,waitFor} from "@testing-library/react";
 import {ZoomablePhoto,Lightbox} from "./Lightbox";
 
 const PHOTO={
@@ -44,6 +44,21 @@ function openViewer(){
 }
 
 describe("opening a photo full screen",()=>{
+  it("does not request the protected image when sign-in fails",async()=>{
+    const fetchMock=vi.fn(async()=>new Response(null,{status:401}));
+    vi.stubGlobal("fetch",fetchMock);
+    render(<ZoomablePhoto {...PHOTO} fullSrc="http://api.test/api/v1/events/evt-1/photo/full"
+      loginUrl="http://api.test/api/v1/auth/login"/>);
+    fireEvent.click(screen.getByRole("button",{name:/open sarah full screen/i}));
+    fireEvent.change(screen.getByRole("textbox",{name:"Photo account email"}),{target:{value:"owner@example.com"}});
+    fireEvent.change(screen.getByLabelText("Photo account password"),{target:{value:"incorrect"}});
+    fireEvent.click(screen.getByRole("button",{name:"View full resolution"}));
+    await waitFor(()=>expect(screen.getByRole("alert")).toHaveTextContent("Sign-in failed"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(viewerImage().getAttribute("src")).toBe(PHOTO.src);
+    vi.unstubAllGlobals();
+  });
+
   it("opens the photo in a full-screen dialog when the thumbnail is clicked",()=>{
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const dialog=openViewer();
@@ -202,4 +217,3 @@ describe("zooming a photo",()=>{
     expect(onClose).not.toHaveBeenCalled();
   });
 });
-
