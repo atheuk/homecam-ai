@@ -14,7 +14,7 @@ type EventsPanelProps={
   onAcknowledgeNew:()=>void;
 };
 
-const FILTER_TYPES=["person","vehicle","animal","package","motion"] as const;
+const FILTER_TYPES=["person","vehicle","animal","package","motion","suspicious_activity"] as const;
 const ACTIVITY_FILTERS=[
   ["all","All activity"],
   ["vehicle","Vehicle arrivals & departures"],

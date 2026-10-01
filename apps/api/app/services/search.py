@@ -82,6 +82,9 @@ def keyword_score(tokens: list[str], haystack: str) -> float:
 
 
 def _haystack(row: Event, summary: str | None) -> str:
+    metadata = row.event_metadata or {}
+    vehicle = metadata.get("vehicle") or {}
+    animal = metadata.get("animal") or {}
     parts = [
         row.type or "",
         row.zone or "",
@@ -89,6 +92,8 @@ def _haystack(row: Event, summary: str | None) -> str:
         summary or "",
         " ".join(str(tag) for tag in (row.tags or [])),
         row.camera_id or "",
+        " ".join(str(vehicle.get(key) or "") for key in ("make", "model", "colour", "body_type")),
+        " ".join(str(animal.get(key) or "") for key in ("common_name", "scientific_name", "species", "breed")),
     ]
     return " ".join(parts)
 

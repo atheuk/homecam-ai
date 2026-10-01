@@ -25,7 +25,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import best_photo as best_photo_module
-from ..ai.animals import describe_animal, get_animal_identifier
+from ..ai.animals import describe_animal, get_animal_identifier, identify_animal_frames, prepare_animal_crop
 from ..ai.appearance import get_appearance_analyzer
 from ..ai.detector import (
     ANIMAL_CLASSES,
@@ -41,10 +41,12 @@ from ..ai.provider import AnalysisContext, get_ai_provider
 from ..ai.schemas import GroundingError
 from ..ai.semantics import derive_semantics
 from ..ai.vision import caption_confirms_person, get_image_captioner, get_image_embedder
+from ..ai.vehicles import build_vehicle_identifier, crop_vehicle
 from ..config import settings
 from ..models.db import AIAnalysis, Event, EventPhoto
 from ..providers.base import CameraOfflineError, CameraNotFoundError, ProviderUnavailableError
 from . import persons as person_service
+from . import suspicious
 from . import zones as zone_service
 
 logger = logging.getLogger(__name__)
@@ -290,6 +292,10 @@ async def enrich_event(
         row.description = str(event["description"])[:500]
         merged = list(event.get("tags") or [])
         row.tags = merged + [tag for tag in semantics.tags if tag not in merged]
+        if scene.get("kind") == "vehicle":
+            known = (row.event_metadata or {}).get("vehicle_track", {}).get("vehicle")
+            if known:
+                row.event_metadata = {**(row.event_metadata or {}), "vehicle": known}
     row.source = "local-ai" if detections else row.source
 
     person_match = None
@@ -302,7 +308,11 @@ async def enrich_event(
         # never be illustrated - or re-identified - from a higher-confidence
         # car in the same frame; other classes are only a fallback when the
         # event's own subject is genuinely absent from every sampled frame.
-        subject = subject_for_label(semantics.primary_detection.label) if semantics.primary_detection else None
+        subject = (
+            "person" if row.type == "suspicious_activity"
+            else subject_for_label(semantics.primary_detection.label)
+            if semantics.primary_detection else None
+        )
         photo_targets = SUBJECT_LABELS.get(subject or "", BEST_PHOTO_TARGETS)
         try:
             photo = best_photo_module.select_best_photo(
@@ -337,7 +347,12 @@ async def enrich_event(
                 caption = None
             await _persist_event_photo(session, row.id, photo, caption)
 
-            animal = await _identify_animal(photo) if is_animal_photo else None
+            animal = None
+            if is_animal_photo:
+                identifier = get_animal_identifier()
+                if identifier is not None:
+                    crops = [prepare_animal_crop(frame, photo.detection.bbox) for frame in frames[:3]]
+                    animal = await identify_animal_frames(identifier, crops)
             if animal is not None:
                 # The identifier returns species "none" when it looks at the
                 # crop and sees no animal - the same false-positive check the
@@ -356,6 +371,8 @@ async def enrich_event(
                 metadata["photo_caption"] = caption
             if appearance is not None:
                 metadata["appearance"] = appearance.as_dict()
+            if is_person_photo and settings.suspicious_enabled:
+                metadata["behaviours"] = await suspicious.assess_behaviour(photo.image)
             if animal is not None:
                 metadata["animal"] = animal.as_dict()
             row.event_metadata = metadata
@@ -369,6 +386,33 @@ async def enrich_event(
                     if tag and tag not in tags:
                         tags.append(tag)
                 row.tags = tags
+            if photo.detection is not None and photo.detection.label in VEHICLE_CLASSES:
+                metadata = dict(row.event_metadata or {})
+                existing_vehicle = (metadata.get("vehicle_track") or {}).get("vehicle")
+                if existing_vehicle:
+                    metadata["vehicle"] = existing_vehicle
+                else:
+                    crops = [crop_vehicle(frame, photo.detection.bbox) for frame in frames[:3]]
+                    vehicle = await build_vehicle_identifier(settings).identify_vehicle_frames(crops)
+                    if vehicle is not None:
+                        metadata["vehicle"] = vehicle.as_dict()
+                if metadata.get("vehicle"):
+                    row.event_metadata = metadata
+                    vehicle = metadata["vehicle"]
+                    parts = [vehicle.get("colour"), vehicle.get("make"), vehicle.get("model")]
+                    name = " ".join(part for part in parts if part and part != "unknown") or photo.detection.label
+                    body = vehicle.get("body_type")
+                    if body and body != "unknown":
+                        name += f" ({body})"
+                    scene_meta = metadata.get("scene") or {}
+                    action = scene_meta.get("transition")
+                    if action in {"arrived", "returned", "first_seen", "moved", "departed"}:
+                        verb = {"first_seen": "was seen", "moved": "moved", "departed": "departed",
+                                "arrived": "arrived", "returned": "returned"}[action]
+                        where = f" in the {row.zone}" if row.zone else f" at {camera_name}"
+                        row.description = f"A {name} {verb}{where}."[:500]
+                    row.tags = list(dict.fromkeys([*(row.tags or []),
+                        *(part.casefold() for part in parts if part and part != "unknown")]))
 
             # Don't teach the matcher from a frame the vision model says has
             # nobody in it: a fence post absorbed as a reference vector
@@ -420,6 +464,7 @@ async def enrich_event(
             "photo_verified": photo_verified,
             "appearance": appearance.as_dict() if appearance else None,
             "animal": animal.as_dict() if animal else None,
+            "vehicle": (row.event_metadata or {}).get("vehicle"),
         }
     )
     return enriched

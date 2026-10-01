@@ -186,6 +186,9 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
             what="Something was taken out of",
         )
 
+    if (row.event_metadata or {}).get("suspicious", {}).get("level") == "suspicious":
+        return await _route_suspicious(session, row, mode)
+
     if row.type not in INTRUSION_EVENT_TYPES:
         return None
     zone_kind = await _zone_kind(session, row.camera_id, row.zone)
@@ -253,6 +256,46 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
         details={"kind": incident.kind, "camera_id": incident.camera_id, "event_id": row.id},
     )
     await _maybe_attach_ai_summary(session, incident)
+    await _broadcast(incident, "incident.created" if created else "incident.updated")
+    return incident
+
+
+async def _route_suspicious(session: AsyncSession, row: Event, mode: str) -> Incident | None:
+    if mode not in {"away", "night"} or not _priority_allows(row):
+        return None
+    verdict = (row.event_metadata or {})["suspicious"]
+    now = _as_aware(row.start_time)
+    kind = "suspicious_activity"
+    async with _lock_for(row.camera_id, row.zone, kind):
+        await _acquire_route_lock(session, row.camera_id, row.zone, kind)
+        existing = await _open_incident_for(session, row.camera_id, row.zone, kind, now)
+        if existing is not None:
+            existing.event_ids = [*existing.event_ids, row.id]
+            existing.event_count += 1
+            existing.last_seen_at = now
+            existing.updated_at = now
+            existing.evidence = {"score": verdict["score"], "reasons": verdict["reasons"],
+                                 "event_ids": verdict["evidence_event_ids"]}
+            incident, created = existing, False
+        else:
+            incident = Incident(
+                id=_new_id(), kind=kind, status="open", severity="high",
+                camera_id=row.camera_id, zone=row.zone, mode_at_creation=mode,
+                event_ids=[row.id], event_count=1, first_seen_at=now, last_seen_at=now,
+                summary="Suspicious activity: " + "; ".join(verdict["reasons"])[:400],
+                evidence={"score": verdict["score"], "reasons": verdict["reasons"],
+                          "event_ids": verdict["evidence_event_ids"]},
+                created_at=now, updated_at=now,
+            )
+            session.add(incident)
+            created = True
+        await session.commit()
+        await session.refresh(incident)
+    await audit_service.record(
+        session, "incident.created" if created else "incident.updated",
+        target_type="incident", target_id=incident.id,
+        details={"kind": kind, "camera_id": row.camera_id, "event_id": row.id},
+    )
     await _broadcast(incident, "incident.created" if created else "incident.updated")
     return incident
 

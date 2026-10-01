@@ -33,10 +33,11 @@ def test_parses_a_full_reply():
     )
     assert result is not None
     assert result.person_present is True
-    assert result.age_band == "adult"
-    assert result.age_confidence == pytest.approx(0.62)
+    assert result.age_band is None
+    assert result.age_confidence is None
     assert result.carrying == "a parcel"
     assert result.face_visible is True
+    assert result.description is None
 
 
 def test_output_never_carries_protected_attributes():
@@ -71,7 +72,7 @@ def test_tolerates_code_fences_and_surrounding_prose():
         ' "age_band": "child"}\n```\nHope that helps.'
     )
     assert result is not None
-    assert result.age_band == "child"
+    assert result.age_band is None
 
 
 @pytest.mark.parametrize(
