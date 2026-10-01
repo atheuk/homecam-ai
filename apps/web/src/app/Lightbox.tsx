@@ -30,7 +30,8 @@ export type LightboxPhoto = {
   fullSrc?: string | null;
   loginUrl?: string;
   requiresAuth?: boolean;
-  accessToken?: string;
+  accessToken?: string | null;
+  useSessionCookie?: boolean;
   alt: string;
   caption?: string | null;
   title?: string;
@@ -95,7 +96,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
     const loadingCrop = Boolean(photo.requiresAuth && !cropImage);
     const loadingFull = Boolean(photo.fullSrc && !fullImage);
     if (loading || (!loadingCrop && !loadingFull)) return;
-    if (!accessToken && !photo.accessToken && !photo.loginUrl) {
+    if (!accessToken && !photo.accessToken && !photo.loginUrl && !photo.useSessionCookie) {
       setError("Sign-in is not configured for this photo.");
       return;
     }
@@ -105,7 +106,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
     setError("");
     try {
       let token = photo.accessToken || accessToken;
-      if (!token) {
+      if (!token && !photo.useSessionCookie) {
         if (!photo.loginUrl) throw new Error("Sign-in is not configured for this photo.");
         const login = await fetch(photo.loginUrl, {
           method: "POST",
@@ -123,7 +124,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
       const imageUrl = loadingCrop ? photo.src : photo.fullSrc;
       if (!imageUrl) return;
       const response = await fetch(imageUrl, {
-        headers: {Authorization: `Bearer ${token}`},
+        headers: token ? {Authorization: `Bearer ${token}`} : {},
         signal: controller.signal,
         cache: "no-store",
         credentials: "include",
@@ -387,6 +388,7 @@ export function ZoomablePhoto({
   loginUrl,
   requiresAuth,
   accessToken,
+  useSessionCookie,
   alt,
   caption,
   title,
@@ -398,7 +400,8 @@ export function ZoomablePhoto({
   fullSrc?: string | null;
   loginUrl?: string;
   requiresAuth?: boolean;
-  accessToken?: string;
+  accessToken?: string | null;
+  useSessionCookie?: boolean;
   alt: string;
   caption?: string | null;
   title?: string;
@@ -412,7 +415,7 @@ export function ZoomablePhoto({
       <button type="button" className="photo-trigger" aria-label={`Open ${title || alt} full screen`} onClick={() => setOpen(true)}>
         <span className="photo-frame">
           {requiresAuth
-            ? <span className="photo-locked">{accessToken?"Open photo":"Sign in to view photo"}</span>
+            ? <span className="photo-locked">{accessToken||useSessionCookie?"Open photo":"Sign in to view photo"}</span>
             : <>
                 {/* eslint-disable-next-line @next/next/no-img-element -- see Lightbox */}
                 <img src={src} alt={alt} />
@@ -420,7 +423,7 @@ export function ZoomablePhoto({
               </>}
         </span>
       </button>
-      {open && <Lightbox photo={{src, fullSrc, loginUrl, requiresAuth, accessToken, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
+      {open && <Lightbox photo={{src, fullSrc, loginUrl, requiresAuth, accessToken, useSessionCookie, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
     </>
   );
 }

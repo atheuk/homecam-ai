@@ -9,7 +9,8 @@ type EventsPanelProps={
   events:EventItem[];
   persons:Person[];
   cameras:CameraSummary[];
-  token:string;
+  token:string|null;
+  useSessionCookie?:boolean;
   newEventIds:Set<string>;
   onChanged:()=>void;
   onAcknowledgeNew:()=>void;
@@ -35,7 +36,7 @@ function dayLabel(value:string){
 }
 
 export default function EventsPanel({
-  events,persons,cameras,token,newEventIds,onChanged,onAcknowledgeNew,
+  events,persons,cameras,token,useSessionCookie=false,newEventIds,onChanged,onAcknowledgeNew,
 }:EventsPanelProps){
   const [type,setType]=useState("all");
   const [cameraId,setCameraId]=useState("all");
@@ -102,7 +103,7 @@ export default function EventsPanel({
     {groups.length?groups.map(group=><section className="event-day" key={group.label}>
       <h4>{group.label}</h4>
       {group.events.map(event=><div className={newEventIds.has(event.id)?"event-arrival":""} key={event.id}>
-        <EventCard event={event} persons={persons} token={token} onChanged={onChanged}/>
+        <EventCard event={event} persons={persons} token={token} useSessionCookie={useSessionCookie} onChanged={onChanged}/>
       </div>)}
     </section>):events.length
       ?<div className="empty-state"><strong>No matching events</strong><p>Try clearing one or more filters.</p></div>

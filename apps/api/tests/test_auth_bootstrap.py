@@ -1,4 +1,4 @@
-"""Production account bootstrap is atomic and closes after the first user."""
+"""Production bootstrap requires an out-of-band secret and is single-use."""
 import asyncio
 from types import SimpleNamespace
 
@@ -8,16 +8,9 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
-@pytest.mark.asyncio
-async def test_production_registration_allows_one_concurrent_bootstrap_user(
-    anonymous_client, monkeypatch, tmp_path
-):
-    from app.config import settings
-    from app.db import get_db
-    from app.main import app
-    from app.models.db import Base, User
+async def _isolated_database(app, get_db, tmp_path):
+    from app.models.db import Base
 
-    monkeypatch.setattr(settings, "app_env", "production")
     engine = create_async_engine(
         URL.create("sqlite+aiosqlite", database=str(tmp_path / "bootstrap.db"))
     )
@@ -31,36 +24,126 @@ async def test_production_registration_allows_one_concurrent_bootstrap_user(
 
     previous_override = app.dependency_overrides.get(get_db)
     app.dependency_overrides[get_db] = override_get_db
-    try:
-        registrations = await asyncio.gather(
-            *[anonymous_client.post(
-                "/api/v1/auth/register",
-                json={"email": f"bootstrap-{index}@example.com", "password": "safe-password-123"},
-            ) for index in range(2)]
-        )
-        assert sorted(response.status_code for response in registrations) == [201, 403]
+    return engine, session_factory, previous_override
 
+
+def _restore_database_override(app, get_db, previous_override):
+    if previous_override is None:
+        app.dependency_overrides.pop(get_db, None)
+    else:
+        app.dependency_overrides[get_db] = previous_override
+
+
+@pytest.mark.asyncio
+async def test_production_bootstrap_requires_secret_and_closes_after_first_user(
+    anonymous_client, monkeypatch, tmp_path
+):
+    from app.config import settings
+    from app.db import get_db
+    from app.main import app
+    from app.models.db import User
+
+    secret = "out-of-band-bootstrap-secret"
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "auth_bootstrap_secret", secret)
+    engine, session_factory, previous_override = await _isolated_database(app, get_db, tmp_path)
+    payload = {"email": "first-user@example.com", "password": "safe-password-123"}
+    try:
+        missing = await anonymous_client.post("/api/v1/auth/register", json=payload)
+        wrong = await anonymous_client.post(
+            "/api/v1/auth/register",
+            json=payload,
+            headers={"X-HomeCam-Bootstrap-Secret": "incorrect"},
+        )
+        assert missing.status_code == wrong.status_code == 403
+        assert secret not in missing.text and secret not in wrong.text
+
+        async with session_factory() as session:
+            assert await session.scalar(select(func.count()).select_from(User)) == 0
+
+        created = await anonymous_client.post(
+            "/api/v1/auth/register",
+            json=payload,
+            headers={"X-HomeCam-Bootstrap-Secret": secret},
+        )
+        assert created.status_code == 201, created.text
+        login = await anonymous_client.post("/api/v1/auth/login", json=payload)
+        assert login.status_code == 200
+        set_cookie = login.headers["set-cookie"].lower()
+        assert "httponly" in set_cookie
+        assert "secure" in set_cookie
+        assert "samesite=none" in set_cookie
+        assert "path=/" in set_cookie
+
+        later = await anonymous_client.post(
+            "/api/v1/auth/register",
+            json={"email": "second-user@example.com", "password": "safe-password-123"},
+            headers={"X-HomeCam-Bootstrap-Secret": secret},
+        )
+        assert later.status_code == 403
+        assert secret not in later.text
+        async with session_factory() as session:
+            users = list((await session.execute(select(User))).scalars())
+            assert [user.email for user in users] == [payload["email"]]
+    finally:
+        _restore_database_override(app, get_db, previous_override)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_production_bootstrap_is_disabled_without_configured_secret(
+    anonymous_client, monkeypatch, tmp_path
+):
+    from app.config import settings
+    from app.db import get_db
+    from app.main import app
+    from app.models.db import User
+
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "auth_bootstrap_secret", None)
+    engine, session_factory, previous_override = await _isolated_database(app, get_db, tmp_path)
+    try:
+        response = await anonymous_client.post(
+            "/api/v1/auth/register",
+            json={"email": "unconfigured@example.com", "password": "safe-password-123"},
+            headers={"X-HomeCam-Bootstrap-Secret": "any-value"},
+        )
+        assert response.status_code == 403
+        async with session_factory() as session:
+            assert await session.scalar(select(func.count()).select_from(User)) == 0
+    finally:
+        _restore_database_override(app, get_db, previous_override)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_production_bootstrap_attempts_create_exactly_one_user(
+    anonymous_client, monkeypatch, tmp_path
+):
+    from app.config import settings
+    from app.db import get_db
+    from app.main import app
+    from app.models.db import User
+
+    secret = "concurrent-bootstrap-secret"
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "auth_bootstrap_secret", secret)
+    engine, session_factory, previous_override = await _isolated_database(app, get_db, tmp_path)
+    try:
+        responses = await asyncio.gather(*(
+            anonymous_client.post(
+                "/api/v1/auth/register",
+                json={"email": f"owner-{index}@example.com", "password": "safe-password-123"},
+                headers={"X-HomeCam-Bootstrap-Secret": secret},
+            )
+            for index in range(2)
+        ))
+        assert sorted(response.status_code for response in responses) == [201, 403]
         async with session_factory() as session:
             users = list((await session.execute(select(User))).scalars())
             assert len(users) == 1
-            first_user_email = users[0].email
-
-        blocked = await anonymous_client.post(
-            "/api/v1/auth/register",
-            json={"email": "later-user@example.com", "password": "safe-password-123"},
-        )
-        assert blocked.status_code == 403
-        assert (await anonymous_client.post(
-            "/api/v1/auth/register",
-            json={"email": first_user_email, "password": "safe-password-123"},
-        )).status_code == 403
-        async with session_factory() as session:
-            assert await session.scalar(select(func.count()).select_from(User)) == 1
     finally:
-        if previous_override is None:
-            app.dependency_overrides.pop(get_db, None)
-        else:
-            app.dependency_overrides[get_db] = previous_override
+        _restore_database_override(app, get_db, previous_override)
         await engine.dispose()
 
 

@@ -7,7 +7,7 @@ import {act} from "react";
  * keeps the public surface the component uses and lets a test fire the exact
  * fatal error a browser would raise. */
 const errorHandlers:((event:string,data:Record<string,unknown>)=>void)[]=[];
-const instances:{startLoad:ReturnType<typeof vi.fn>;recoverMediaError:ReturnType<typeof vi.fn>;destroy:ReturnType<typeof vi.fn>;levels:{videoCodec?:string}[];currentLevel:number}[]=[];
+const instances:{startLoad:ReturnType<typeof vi.fn>;recoverMediaError:ReturnType<typeof vi.fn>;destroy:ReturnType<typeof vi.fn>;levels:{videoCodec?:string}[];currentLevel:number;xhrSetup:(xhr:XMLHttpRequest,url:string)=>void}[]=[];
 let supported=true;
 
 vi.mock("hls.js",()=>{
@@ -30,7 +30,8 @@ vi.mock("hls.js",()=>{
     destroy=vi.fn();
     loadSource=vi.fn();
     attachMedia=vi.fn();
-    constructor(){instances.push(this as never);}
+    xhrSetup:(xhr:XMLHttpRequest,url:string)=>void;
+    constructor(options:{xhrSetup:(xhr:XMLHttpRequest,url:string)=>void}){this.xhrSetup=options.xhrSetup;instances.push(this as never);}
     on(_event:string,handler:(event:string,data:Record<string,unknown>)=>void){errorHandlers.push(handler);}
   }
   return {default:MockHls};
@@ -51,6 +52,20 @@ beforeEach(()=>{
 afterEach(()=>cleanup());
 
 describe("live stream playback errors",()=>{
+  it("sends the bearer token only to HLS resources on the API origin",()=>{
+    const apiOrigin=new URL(process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000").origin;
+    render(<HlsVideo src={`${apiOrigin}/hls/index.m3u8`} token="private-session-token"/>);
+    const xhr=new XMLHttpRequest();
+    xhr.open("GET",`${apiOrigin}/hls/index.m3u8`);
+    const setHeader=vi.spyOn(xhr,"setRequestHeader");
+
+    instances[0].xhrSetup(xhr,`${apiOrigin}/hls/index.m3u8`);
+    instances[0].xhrSetup(xhr,"https://attacker.example/segment.ts");
+
+    expect(setHeader).toHaveBeenCalledTimes(1);
+    expect(setHeader).toHaveBeenCalledWith("Authorization","Bearer private-session-token");
+  });
+
   it("explains an undecodable HEVC stream instead of showing an empty player",()=>{
     const {container}=render(<HlsVideo src="https://api.example/hls/index.m3u8"/>);
     expect(container.querySelector("video")).not.toBeNull();

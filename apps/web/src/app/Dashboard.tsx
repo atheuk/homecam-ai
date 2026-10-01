@@ -83,13 +83,13 @@ function CameraGrid({cameras}:{cameras:Camera[]}){
 
 /** Fetches only browser-safe stream descriptors vetted by the API. Raw RTSP
  * URLs and credentials are never rendered or reconstructed in this client. */
-export function LiveView({cameras,token}:{cameras:Camera[];token:string}){
+export function LiveView({cameras,token}:{cameras:Camera[];token:string|null}){
   const [streams,setStreams]=useState<Record<string,LiveStream>>({});
   useEffect(()=>{
     let cancelled=false;
     cameras.forEach(camera=>{
       fetch(`${API}/api/v1/cameras/${camera.id}/live`,{
-        headers:{Authorization:`Bearer ${token}`},
+        headers:{...(token?{Authorization:`Bearer ${token}`}:{ }),"X-HomeCam-Request":"1"},
         credentials:"include",
       }).then(async response=>{
         if(!response.ok){
@@ -140,13 +140,13 @@ class ApiRequestError extends Error{
   }
 }
 
-async function json<T>(url:string,token:string,timeoutMs=REQUEST_TIMEOUT_MS):Promise<T>{
+async function json<T>(url:string,token:string|null,timeoutMs=REQUEST_TIMEOUT_MS):Promise<T>{
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),timeoutMs);
   try{
     const response=await fetch(url,{
       signal:controller.signal,
-      headers:{Authorization:`Bearer ${token}`},
+      headers:{...(token?{Authorization:`Bearer ${token}`}:{ }),"X-HomeCam-Request":"1"},
       credentials:"include",
     });
     if(!response.ok) throw new ApiRequestError(response.status);
@@ -170,17 +170,39 @@ export default function Dashboard(){
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
   const [token,setToken]=useState<string|null>(null);
+  const [authenticated,setAuthenticated]=useState(false);
+  const [authReady,setAuthReady]=useState(false);
   const [loginEmail,setLoginEmail]=useState("");
   const [loginPassword,setLoginPassword]=useState("");
   const [loginError,setLoginError]=useState("");
   const [loginBusy,setLoginBusy]=useState(false);
+  const [showRegistration,setShowRegistration]=useState(false);
+  const [bootstrapSecret,setBootstrapSecret]=useState("");
   const [newEventIds,setNewEventIds]=useState<Set<string>>(new Set());
   const tabParam=searchParams.get("tab");
 
   useEffect(()=>setTab(tabFrom(tabParam)),[tabParam]);
 
+  useEffect(()=>{
+    const controller=new AbortController();
+    fetch(`${API}/api/v1/auth/me`,{
+      credentials:"include",
+      cache:"no-store",
+      signal:controller.signal,
+    }).then(response=>{
+      if(controller.signal.aborted) return;
+      if(response.ok) setAuthenticated(true);
+      else if(response.status!==401) setLoginError("HomeCam could not verify the current session.");
+    }).catch(()=>{
+      if(!controller.signal.aborted) setLoginError("HomeCam could not reach the API. Try again.");
+    }).finally(()=>{
+      if(!controller.signal.aborted) setAuthReady(true);
+    });
+    return ()=>controller.abort();
+  },[]);
+
   const load=useCallback(async()=>{
-    if(!token) return;
+    if(!authenticated) return;
     setLoading(true);
     setError("");
     // Each source loads independently: the slow NVR-backed camera call must not
@@ -194,6 +216,10 @@ export default function Dashboard(){
       result.status==="rejected"&&result.reason instanceof ApiRequestError&&result.reason.status===401
     )){
       setToken(null);
+      setAuthenticated(false);
+      setCameras([]);
+      setEvents([]);
+      setPersons([]);
       setLoading(false);
       return;
     }
@@ -207,10 +233,10 @@ export default function Dashboard(){
     if(degraded.length===3) setError("HomeCam could not reach the local API. Check the service and try again.");
     else if(degraded.length) setError(degraded.join(" "));
     setLoading(false);
-  },[token]);
+  },[authenticated,token]);
 
   const refreshEvents=useCallback(async()=>{
-    if(!token) return;
+    if(!authenticated) return;
     const [eventResult,personResult]=await Promise.allSettled([
       json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`,token),
       json<{persons?:Person[]}>(`${API}/api/v1/persons`,token),
@@ -219,16 +245,20 @@ export default function Dashboard(){
       result.status==="rejected"&&result.reason instanceof ApiRequestError&&result.reason.status===401
     )){
       setToken(null);
+      setAuthenticated(false);
+      setCameras([]);
+      setEvents([]);
+      setPersons([]);
       return;
     }
     if(eventResult.status==="fulfilled") setEvents(eventResult.value.slice(0,EVENT_LIMIT));
     if(personResult.status==="fulfilled") setPersons(personResult.value.persons||[]);
     if(eventResult.status==="rejected"||personResult.status==="rejected") setError("Events could not be refreshed. Try again.");
-  },[token]);
+  },[authenticated,token]);
 
-  useEffect(()=>{if(token) load();},[load,token]);
+  useEffect(()=>{if(authenticated) load();},[authenticated,load]);
   useEffect(()=>{
-    if(!token) return;
+    if(!authenticated) return;
     const controller=new AbortController();
     void consumeSse(`${API}/api/v1/ws`,token,controller.signal,(type,data)=>{
       if(type!=="event.created") return;
@@ -241,11 +271,17 @@ export default function Dashboard(){
       }
     }).catch(error=>{
       if(controller.signal.aborted) return;
-      if(error instanceof SseResponseError&&error.status===401) setToken(null);
+      if(error instanceof SseResponseError&&error.status===401){
+        setToken(null);
+        setAuthenticated(false);
+        setCameras([]);
+        setEvents([]);
+        setPersons([]);
+      }
       else setError("Live event updates are temporarily unavailable.");
     });
     return ()=>controller.abort();
-  },[token]);
+  },[authenticated,token]);
 
   const signIn=async(event:FormEvent)=>{
     event.preventDefault();
@@ -269,6 +305,7 @@ export default function Dashboard(){
         return;
       }
       setToken(body.access_token);
+      setAuthenticated(true);
       setLoginPassword("");
     }catch{
       setLoginError("HomeCam could not reach the local API. Try again.");
@@ -277,22 +314,77 @@ export default function Dashboard(){
     }
   };
 
-  const signOut=async()=>{
-    if(token){
-      try{
-        await fetch(`${API}/api/v1/auth/logout`,{
-          method:"POST",
-          headers:{Authorization:`Bearer ${token}`},
-          credentials:"include",
-        });
-      }finally{
-        setToken(null);
-        setCameras([]);
-        setEvents([]);
-        setPersons([]);
+  const createAccount=async(event:FormEvent)=>{
+    event.preventDefault();
+    setLoginBusy(true);
+    setLoginError("");
+    try{
+      const registration=await fetch(`${API}/api/v1/auth/register`,{
+        method:"POST",
+        headers:{
+          "Content-Type":"application/json",
+          "X-HomeCam-Bootstrap-Secret":bootstrapSecret,
+          "X-HomeCam-Request":"1",
+        },
+        credentials:"include",
+        cache:"no-store",
+        body:JSON.stringify({email:loginEmail,password:loginPassword}),
+      });
+      if(!registration.ok){
+        setLoginError("Account setup was not accepted. Check the setup secret or sign in with the existing account.");
+        return;
       }
+      const login=await fetch(`${API}/api/v1/auth/login`,{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        credentials:"include",
+        cache:"no-store",
+        body:JSON.stringify({email:loginEmail,password:loginPassword}),
+      });
+      if(!login.ok){
+        setLoginError("The account was created but automatic sign-in failed. Sign in with the new account.");
+        setShowRegistration(false);
+        setLoginPassword("");
+        setBootstrapSecret("");
+        return;
+      }
+      const body=await login.json() as {access_token?:string};
+      if(!body.access_token){
+        setLoginError("The account was created but sign-in did not return a session.");
+        return;
+      }
+      setToken(body.access_token);
+      setAuthenticated(true);
+      setLoginPassword("");
+      setBootstrapSecret("");
+    }catch{
+      setLoginError("HomeCam could not reach the API. Try again.");
+    }finally{
+      setLoginBusy(false);
     }
   };
+
+  const signOut=useCallback(async()=>{
+    try{
+      const response=await fetch(`${API}/api/v1/auth/logout`,{
+        method:"POST",
+        headers:{...(token?{Authorization:`Bearer ${token}`}:{ }),"X-HomeCam-Request":"1"},
+        credentials:"include",
+      });
+      if(!response.ok&&response.status!==401){
+        setError("Could not end the current session. Try again.");
+        return;
+      }
+    }catch{
+      setError("Could not reach HomeCam to end the current session.");
+      return;
+    }
+    setToken(null);
+    setAuthenticated(false);
+    setCameras([]);
+    setEvents([]);
+    setPersons([]);
+  },[token]);
 
   const activeCameras=useMemo(()=>cameras.filter(camera=>camera.online),[cameras]);
   const offlineCount=cameras.length-activeCameras.length;
@@ -304,21 +396,31 @@ export default function Dashboard(){
   };
   const statusTone=error||offlineCount>0||(!loading&&cameras.length===0)?"attention":"healthy";
 
-  if(!token){
+  if(!authReady) return <LoadingDashboard/>;
+
+  if(!authenticated){
     return <main>
       <header>
         <div><span className="eyebrow">LOCAL-FIRST SECURITY</span><h1>HomeCam <em>AI</em></h1></div>
       </header>
       <section className="panel admin-panel" aria-labelledby="signin-title">
-        <h2 id="signin-title">Sign in to HomeCam</h2>
-        <p className="muted">Sign in to view cameras, events, people, and security controls.</p>
-        <form className="admin-form" onSubmit={signIn}>
+        <h2 id="signin-title">{showRegistration?"Create the first account":"Sign in to HomeCam"}</h2>
+        <p className="muted">{showRegistration
+          ?"Initial setup requires the one-time secret supplied by the system owner."
+          :"Sign in to view cameras, events, people, and security controls."}</p>
+        <form className="admin-form" onSubmit={showRegistration?createAccount:signIn}>
           <label>Email<input type="email" autoComplete="username" required value={loginEmail}
             onChange={event=>setLoginEmail(event.target.value)}/></label>
-          <label>Password<input type="password" autoComplete="current-password" required value={loginPassword}
+          <label>Password<input type="password" autoComplete={showRegistration?"new-password":"current-password"} required value={loginPassword}
             onChange={event=>setLoginPassword(event.target.value)}/></label>
+          {showRegistration&&<label>One-time setup secret<input type="password" autoComplete="off" required
+            value={bootstrapSecret} onChange={event=>setBootstrapSecret(event.target.value)}/></label>}
           <div className="admin-actions"><button type="submit" disabled={loginBusy}>
-            {loginBusy?"Signing in…":"Sign in"}
+            {loginBusy?(showRegistration?"Creating account…":"Signing in…"):(showRegistration?"Create account":"Sign in")}
+          </button>
+          <button type="button" className="text-button" disabled={loginBusy}
+            onClick={()=>{setShowRegistration(value=>!value);setLoginError("");}}>
+            {showRegistration?"Back to sign in":"Create first account"}
           </button></div>
           {loginError&&<p className="error" role="alert">{loginError}</p>}
         </form>
@@ -376,9 +478,9 @@ export default function Dashboard(){
         </div>}
         {tab==="Live"&&<LiveView cameras={activeCameras} token={token}/>}
         {tab==="Events"&&<EventsPanel events={events} persons={persons} cameras={cameras}
-          token={token} newEventIds={newEventIds} onChanged={refreshEvents} onAcknowledgeNew={()=>setNewEventIds(new Set())}/>}
-        {tab==="People"&&<div id="panel-people" role="tabpanel" aria-labelledby="tab-people"><PeoplePanel token={token}/></div>}
-        {tab==="Security"&&<div id="panel-security" role="tabpanel" aria-labelledby="tab-security"><SecurityPanel cameras={cameras} authToken={token} onUnauthorized={signOut}/></div>}
+          token={token} useSessionCookie newEventIds={newEventIds} onChanged={refreshEvents} onAcknowledgeNew={()=>setNewEventIds(new Set())}/>}
+        {tab==="People"&&<div id="panel-people" role="tabpanel" aria-labelledby="tab-people"><PeoplePanel token={token} useSessionCookie/></div>}
+        {tab==="Security"&&<div id="panel-security" role="tabpanel" aria-labelledby="tab-security"><SecurityPanel cameras={cameras} authToken={token} authenticated={authenticated} onUnauthorized={signOut}/></div>}
         {tab==="System"&&<section className="panel system-panel" id="panel-system" role="tabpanel" aria-labelledby="tab-system">
           <div className="panel-heading"><div><span className="eyebrow">SYSTEM HEALTH</span><h3>Camera connections</h3></div></div>
           <p className={offlineCount?"error":"success"}>{status}</p>
@@ -388,7 +490,7 @@ export default function Dashboard(){
             <div><dt>Needs attention</dt><dd>{offlineCount}</dd></div>
           </dl>
         </section>}
-        {tab==="Settings"&&<div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings"><AdminPanel authToken={token} onUnauthorized={signOut}/></div>}
+        {tab==="Settings"&&<div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings"><AdminPanel authToken={token} authenticated={authenticated} onUnauthorized={signOut}/></div>}
       </>}
   </main>;
 }

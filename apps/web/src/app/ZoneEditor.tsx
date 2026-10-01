@@ -25,7 +25,7 @@ type Still = {
 
 type Props = {
   apiBase: string;
-  token: string;
+  token: string | null;
   cameraId: string;
   zoneKinds: readonly string[];
   kindHints: Record<string, string>;
@@ -92,7 +92,7 @@ export default function ZoneEditor({
 
   const loadStill = useCallback(
     async (force: boolean) => {
-      if (!cameraId || !token) return;
+      if (!cameraId) return;
       const requestId = ++stillRequestId.current;
       const isCurrent = () => stillRequestId.current === requestId;
       const previousFailure = failures.current[cameraId];
@@ -106,7 +106,8 @@ export default function ZoneEditor({
       setStillError(null);
       try {
         const r = await fetch(`${apiBase}/api/v1/admin/cameras/${cameraId}/still`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: "include",
         });
         if (!isCurrent()) return;
         if (!r.ok) {
@@ -242,7 +243,12 @@ export default function ZoneEditor({
       if (dwellValue !== null) body.dwell_seconds = dwellValue;
       const r = await fetch(url, {
         method: editingId ? "PUT" : "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          "Content-Type": "application/json",
+          "X-HomeCam-Request": "1",
+        },
+        credentials: "include",
         body: JSON.stringify(body),
       });
       if (!r.ok) {

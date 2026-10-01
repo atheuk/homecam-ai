@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./homecam.db"
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "development-only"
+    auth_bootstrap_secret: str | None = None
     media_root: str = "./media"
     cors_origins: str = "http://localhost:3000"
     ai_provider: str = "mock"

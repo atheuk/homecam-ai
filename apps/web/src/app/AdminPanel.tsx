@@ -55,8 +55,12 @@ type SceneStateSummary = {
   zones: { zone_id: string; kind: string; state: string }[];
 };
 
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+function authHeaders(token: string | null): Record<string, string> {
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    "Content-Type": "application/json",
+    "X-HomeCam-Request": "1",
+  };
 }
 
 function channelsToRows(channels: string): ChannelRow[] {
@@ -85,9 +89,11 @@ function rowsToChannels(rows: ChannelRow[]): string {
  * authenticated user as admin. */
 export default function AdminPanel({
   authToken,
+  authenticated,
   onUnauthorized,
 }: {
-  authToken?: string;
+  authToken?: string | null;
+  authenticated?: boolean;
   onUnauthorized?: () => void;
 } = {}) {
   const [token, setToken] = useState<string | null>(authToken ?? null);
@@ -132,11 +138,16 @@ export default function AdminPanel({
   const [zoneBusy, setZoneBusy] = useState(false);
 
   useEffect(() => {
-    if (authToken) setToken(authToken);
-  }, [authToken]);
+    if (authenticated !== undefined) setToken(authToken ?? null);
+    else if (authToken) setToken(authToken);
+  }, [authToken, authenticated]);
+  const hasSession = token !== null || authenticated === true;
 
-  async function loadConfigs(activeToken: string) {
-    const r = await fetch(`${API}/api/v1/admin/providers`, { headers: authHeaders(activeToken) });
+  async function loadConfigs(activeToken: string | null) {
+    const r = await fetch(`${API}/api/v1/admin/providers`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (r.status === 401) {
       setToken(null);
       onUnauthorized?.();
@@ -151,12 +162,12 @@ export default function AdminPanel({
   }
 
   useEffect(() => {
-    if (token) loadConfigs(token);
+    if (hasSession) loadConfigs(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, onUnauthorized]);
+  }, [token, hasSession, onUnauthorized]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!hasSession) return;
     let cancelled = false;
     (async () => {
       const r = await fetch(`${API}/api/v1/cameras`, {
@@ -172,15 +183,16 @@ export default function AdminPanel({
     return () => {
       cancelled = true;
     };
-  }, [token, onUnauthorized]);
+  }, [token, hasSession, onUnauthorized]);
 
-  async function loadZones(cameraId: string, activeToken: string) {
+  async function loadZones(cameraId: string, activeToken: string | null) {
     if (!cameraId) {
       setZones([]);
       return;
     }
     const r = await fetch(`${API}/api/v1/admin/cameras/${cameraId}/zones`, {
       headers: authHeaders(activeToken),
+      credentials: "include",
     });
     if (!r.ok) {
       setZones([]);
@@ -190,6 +202,7 @@ export default function AdminPanel({
     try {
       const s = await fetch(`${API}/api/v1/admin/cameras/${cameraId}/scene-state`, {
         headers: authHeaders(activeToken),
+        credentials: "include",
       });
       setSceneState(s.ok ? await s.json() : null);
     } catch {
@@ -198,19 +211,20 @@ export default function AdminPanel({
   }
 
   useEffect(() => {
-    if (token && zoneCameraId) loadZones(zoneCameraId, token);
+    if (hasSession && zoneCameraId) loadZones(zoneCameraId, token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, zoneCameraId]);
+  }, [token, hasSession, zoneCameraId]);
 
   async function saveZone(e: FormEvent) {
     e.preventDefault();
-    if (!token || !zoneCameraId) return;
+    if (!hasSession || !zoneCameraId) return;
     setZoneBusy(true);
     setZoneStatus(null);
     try {
       const r = await fetch(`${API}/api/v1/admin/cameras/${zoneCameraId}/zones`, {
         method: "POST",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify({
           name: zoneName,
           kind: zoneKind,
@@ -232,10 +246,11 @@ export default function AdminPanel({
   }
 
   async function removeZone(zone: CameraZone) {
-    if (!token) return;
+    if (!hasSession) return;
     await fetch(`${API}/api/v1/admin/cameras/${zone.camera_id}/zones/${zone.id}`, {
       method: "DELETE",
       headers: authHeaders(token),
+      credentials: "include",
     });
     await loadZones(zone.camera_id, token);
   }
@@ -324,7 +339,7 @@ export default function AdminPanel({
 
   async function saveDahua(e: FormEvent) {
     e.preventDefault();
-    if (!token) return;
+    if (!hasSession) return;
     setDahuaBusy(true);
     setDahuaStatus(null);
     try {
@@ -334,6 +349,7 @@ export default function AdminPanel({
       const r = await fetch(url, {
         method: dahuaEditingId ? "PUT" : "POST",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify(dahuaPayload()),
       });
       if (!r.ok) {
@@ -351,7 +367,7 @@ export default function AdminPanel({
   }
 
   async function testDahua() {
-    if (!token) return;
+    if (!hasSession) return;
     setDahuaBusy(true);
     setDahuaTest(null);
     try {
@@ -380,6 +396,7 @@ export default function AdminPanel({
       const r = await fetch(`${API}/api/v1/admin/providers/dahua/test`, {
         method: "POST",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify(payload),
       });
       if (r.ok) {
@@ -418,7 +435,7 @@ export default function AdminPanel({
 
   async function saveEufy(e: FormEvent) {
     e.preventDefault();
-    if (!token) return;
+    if (!hasSession) return;
     setEufyBusy(true);
     setEufyStatus(null);
     try {
@@ -428,6 +445,7 @@ export default function AdminPanel({
       const r = await fetch(url, {
         method: eufyEditingId ? "PUT" : "POST",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify(eufyPayload()),
       });
       if (!r.ok) {
@@ -445,7 +463,7 @@ export default function AdminPanel({
   }
 
   async function testEufy() {
-    if (!token) return;
+    if (!hasSession) return;
     setEufyBusy(true);
     setEufyTest(null);
     try {
@@ -455,6 +473,7 @@ export default function AdminPanel({
       const r = await fetch(`${API}/api/v1/admin/providers/eufy/test`, {
         method: "POST",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify(payload),
       });
       if (r.ok) {
@@ -469,24 +488,29 @@ export default function AdminPanel({
   }
 
   async function toggleEnabled(config: ProviderConfig) {
-    if (!token) return;
+    if (!hasSession) return;
     await fetch(`${API}/api/v1/admin/providers/${config.id}/enabled`, {
       method: "POST",
       headers: authHeaders(token),
+      credentials: "include",
       body: JSON.stringify({ enabled: !config.enabled }),
     });
     await loadConfigs(token);
   }
 
   async function removeConfig(config: ProviderConfig) {
-    if (!token) return;
-    await fetch(`${API}/api/v1/admin/providers/${config.id}`, { method: "DELETE", headers: authHeaders(token) });
+    if (!hasSession) return;
+    await fetch(`${API}/api/v1/admin/providers/${config.id}`, {
+      method: "DELETE",
+      headers: authHeaders(token),
+      credentials: "include",
+    });
     if (dahuaEditingId === config.id) resetDahuaForm();
     if (eufyEditingId === config.id) resetEufyForm();
     await loadConfigs(token);
   }
 
-  if (!token) {
+  if (!hasSession) {
     return (
       <section className="panel admin-panel">
         <h3>Admin sign-in</h3>
@@ -727,7 +751,7 @@ export default function AdminPanel({
           Click or tap the picture to drop points around the area, then name it and pick its kind. Shapes are stored
           as fractions of the image, so they stay correct at any resolution.
         </p>
-        {token && zoneCameraId && (
+        {hasSession && zoneCameraId && (
           <ZoneEditor
             apiBase={API}
             token={token}

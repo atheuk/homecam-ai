@@ -50,18 +50,25 @@ HttpOnly cookie, including camera snapshots/live streams, event and person
 data, photos, activity, settings, security, and the SSE event stream. The
 only unauthenticated versioned endpoints are `POST /api/v1/auth/login` and
 `POST /api/v1/auth/register`; `/health` and `/ready` remain public for
-platform probes. Browser fetches use the in-memory bearer token. The login
-cookie is `Secure` in production and is used by native HLS media requests,
-which cannot attach an Authorization header.
+platform probes. Browser fetches use an in-memory bearer token, which the
+HLS player sends only to URLs on the configured API origin, never to
+provider-supplied cross-origin manifests or segments. The dashboard does
+not persist bearer tokens: on reload it restores the login from the
+`HttpOnly` session cookie and sends authenticated requests with browser
+credentials. The cookie is `Secure; SameSite=None` in production to support
+separate web/API origins; unsafe cookie-authenticated requests require the
+`X-HomeCam-Request: 1` header and are CORS-restricted to configured origins.
 
-In production, registration is a one-time bootstrap: the first account can
-be created only while the user table is empty. PostgreSQL uses a
-transaction-scoped advisory lock so concurrent API replicas cannot create
-multiple initial accounts; SQLite uses `BEGIN IMMEDIATE` for local tests.
-Once created, that account is preserved and later registrations return
-`403`. Development keeps repeat registration available. The per-email
-login-lock map is capped at 256 cached locks; database lockout updates remain
-the correctness boundary across replicas.
+Production registration requires the out-of-band `AUTH_BOOTSTRAP_SECRET`
+environment setting and a matching `X-HomeCam-Bootstrap-Secret` request
+header. If the setting is absent, registration is disabled. When configured,
+the first account is created under a database lock; later attempts return
+`403`. No public endpoint reveals whether an account exists. The deployed
+environment already has an owner account, so normal release rollout neither
+requires nor attempts account creation. Development keeps registration
+available without a bootstrap secret. The per-email login-lock map is capped
+at 256 cached locks; database lockout updates remain the correctness boundary
+across replicas.
 
 ## Arming modes
 
@@ -201,10 +208,6 @@ has two layers:
      `SET` expression against the current row value as one statement), so
      no dialect branching is needed here, and the guarantee holds
      regardless of process count.
-   - Production first-account registration takes a shared PostgreSQL
-     transaction-scoped advisory lock (or a SQLite `BEGIN IMMEDIATE` lock
-     in local/test deployments) before checking whether the user table is
-     empty, so multiple replicas cannot bootstrap separate accounts.
    - The *successful*-login path (`auth_routes._finalize_successful_login`)
      closes a second, subtler race than the counter alone: a login route
      verifies the submitted password against a snapshot of the user row
@@ -240,8 +243,8 @@ is rejected once the lockout commits first.
   current password attempt would have succeeded.
 - **Authentication is still a minimal local account system.** It has no
   MFA, email verification, password recovery, or external identity
-  provider. Registration is closed after production bootstrap, but these
-  controls remain separate production-hardening work.
+  provider. Production bootstrap is an operator-controlled one-time process,
+  but these controls remain separate production-hardening work.
 
 ## Audit trail (`app/services/audit.py`)
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
 import ipaddress
 import json
 import os
@@ -21,10 +22,10 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth.dependencies import get_current_user
+from ..auth.dependencies import get_current_auth_session, get_current_user
 from ..config import settings
-from ..db import get_db
-from ..models.db import AIAnalysis, Event, EventEvidence, EventPhoto, Person, User
+from ..db import SessionLocal, get_db
+from ..models.db import AIAnalysis, AuthSession, Event, EventEvidence, EventPhoto, Person, User
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from ..providers.capabilities import AUDIO_DETECTION
 from ..schemas import (
@@ -62,6 +63,7 @@ from ..services.provider_registry import (
 # Every API-v1 route in this router exposes household state or can mutate it.
 # Keep authentication at the router boundary so new routes fail closed too.
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(get_current_user)])
+SSE_AUTH_RECHECK_INTERVAL_SECONDS = 15
 
 
 async def find_mock_provider_for_camera(camera_id: str):
@@ -928,13 +930,33 @@ def sse_frame(event: object) -> tuple[str, object]:
 
 
 @router.get("/ws")
-async def sse():
+async def sse(auth_session: AuthSession = Depends(get_current_auth_session)):
     async def stream():
         queue = event_service.event_bus.subscribe()
+        next_auth_check = asyncio.get_running_loop().time() + SSE_AUTH_RECHECK_INTERVAL_SECONDS
         try:
             yield "event: ready\ndata: {}\n\n"
             while True:
-                event = await queue.get()
+                timeout = max(0, next_auth_check - asyncio.get_running_loop().time())
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except TimeoutError:
+                    event = None
+
+                if asyncio.get_running_loop().time() >= next_auth_check:
+                    async with SessionLocal() as session:
+                        active_session = await session.get(AuthSession, auth_session.token_hash)
+                    expires_at = active_session.expires_at if active_session else None
+                    if expires_at is not None:
+                        if expires_at.tzinfo is None:
+                            expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    if active_session is None or expires_at <= datetime.now(timezone.utc):
+                        return
+                    next_auth_check = asyncio.get_running_loop().time() + SSE_AUTH_RECHECK_INTERVAL_SECONDS
+
+                if event is None:
+                    yield ": keep-alive\n\n"
+                    continue
                 sse_event, payload = sse_frame(event)
                 yield f"event: {sse_event}\ndata: {json.dumps(payload)}\n\n"
         finally:

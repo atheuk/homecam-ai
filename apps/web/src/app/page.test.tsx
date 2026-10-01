@@ -28,6 +28,8 @@ function mockApi(cameraData:unknown[]=cameras,eventData:unknown[]=events,liveByC
   global.fetch=vi.fn(async(url:string)=>{
     const path=String(url);
     if(path.includes("/auth/login")) return response({access_token:"dashboard-token"});
+    if(path.includes("/auth/me")) return response({detail:"not signed in"},401);
+    if(path.includes("/auth/register")) return response({id:"new-owner"},201);
     if(path.includes("/ws")) return MockSseStream.response();
     if(path.includes("/live")){
       const id=path.match(/\/cameras\/([^/]+)\/live/)?.[1]||"";
@@ -42,6 +44,7 @@ function mockApi(cameraData:unknown[]=cameras,eventData:unknown[]=events,liveByC
 
 async function renderDashboard(){
   const rendered=render(<Home/>);
+  await screen.findByLabelText("Email");
   fireEvent.change(screen.getByLabelText("Email"),{target:{value:"user@example.com"}});
   fireEvent.change(screen.getByLabelText("Password"),{target:{value:"password"}});
   fireEvent.click(screen.getByRole("button",{name:"Sign in"}));
@@ -64,6 +67,41 @@ describe("dashboard",()=>{
     expect(screen.getByText("HomeCam")).toBeInTheDocument();
     expect(screen.getByRole("heading",{name:"Good afternoon."})).toBeInTheDocument();
     await screen.findByText("Front Door");
+  });
+
+  it("restores an existing browser session without persisting a bearer token",async()=>{
+    mockApi();
+    const api=global.fetch;
+    global.fetch=vi.fn(async(url:string,init?:RequestInit)=>
+      String(url).endsWith("/auth/me")?response({email:"owner@example.com"}):api(url,init)) as typeof fetch;
+    render(<Home/>);
+    await screen.findByText("Front Door");
+
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/me"),
+      expect.objectContaining({credentials:"include",cache:"no-store"}));
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/v1/cameras"),
+      expect.objectContaining({credentials:"include",headers:{"X-HomeCam-Request":"1"}}));
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("shows the first-account form only after the user opts in and submits the setup secret",async()=>{
+    render(<Home/>);
+    await screen.findByLabelText("Email");
+    expect(screen.queryByLabelText("One-time setup secret")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button",{name:"Create first account"}));
+    fireEvent.change(screen.getByLabelText("Email"),{target:{value:"owner@example.com"}});
+    fireEvent.change(screen.getByLabelText("Password"),{target:{value:"new-owner-password"}});
+    fireEvent.change(screen.getByLabelText("One-time setup secret"),{target:{value:"owner-supplied-secret"}});
+    fireEvent.click(screen.getByRole("button",{name:"Create account"}));
+    await screen.findByText("Front Door");
+
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/register"),
+      expect.objectContaining({
+        credentials:"include",
+        headers:expect.objectContaining({"X-HomeCam-Bootstrap-Secret":"owner-supplied-secret"}),
+      }));
   });
 
   it.each([
@@ -128,18 +166,24 @@ describe("dashboard",()=>{
   });
 
   it("shows skeletons while the initial API request is pending",async()=>{
-    global.fetch=vi.fn(async(url:string)=>String(url).includes("/auth/login")
-      ?response({access_token:"dashboard-token"})
-      :new Promise<Response>(()=>{})) as typeof fetch;
+    global.fetch=vi.fn(async(url:string)=>{
+      const path=String(url);
+      if(path.includes("/auth/me")) return response({},401);
+      if(path.includes("/auth/login")) return response({access_token:"dashboard-token"});
+      return new Promise<Response>(()=>{});
+    }) as typeof fetch;
     const {container}=await renderDashboard();
     expect(screen.getByLabelText("Loading dashboard")).toHaveAttribute("aria-busy","true");
     expect(container.querySelectorAll(".skeleton-camera")).toHaveLength(2);
   });
 
   it("shows a retryable error when the API cannot be reached",async()=>{
-    global.fetch=vi.fn(async(url:string)=>String(url).includes("/auth/login")
-      ?response({access_token:"dashboard-token"})
-      :Promise.reject(new Error("offline"))) as typeof fetch;
+    global.fetch=vi.fn(async(url:string)=>{
+      const path=String(url);
+      if(path.includes("/auth/me")) return response({},401);
+      if(path.includes("/auth/login")) return response({access_token:"dashboard-token"});
+      return Promise.reject(new Error("offline"));
+    }) as typeof fetch;
     await renderDashboard();
     expect(await screen.findByRole("alert")).toHaveTextContent("HomeCam is not responding");
     expect(screen.getByRole("button",{name:"Retry"})).toBeInTheDocument();
@@ -167,9 +211,12 @@ describe("dashboard",()=>{
   });
 
   it("shows the full-page error only when every source fails",async()=>{
-    global.fetch=vi.fn(async(url:string)=>String(url).includes("/auth/login")
-      ?response({access_token:"dashboard-token"})
-      :response({detail:"down"},503)) as typeof fetch;
+    global.fetch=vi.fn(async(url:string)=>{
+      const path=String(url);
+      if(path.includes("/auth/me")) return response({},401);
+      if(path.includes("/auth/login")) return response({access_token:"dashboard-token"});
+      return response({detail:"down"},503);
+    }) as typeof fetch;
     await renderDashboard();
     expect(await screen.findByRole("alert")).toHaveTextContent("HomeCam is not responding");
   });

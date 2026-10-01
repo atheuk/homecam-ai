@@ -14,11 +14,12 @@ without changing route signatures.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,7 +58,7 @@ def _lock_for_email(email: str) -> asyncio.Lock:
 
 
 async def _lock_initial_registration(session: AsyncSession) -> None:
-    """Serialize production bootstrap across API replicas using the database."""
+    """Serialize one-time account enrollment across API replicas."""
     dialect = session.get_bind().dialect.name
     if dialect == "postgresql":
         await session.execute(
@@ -67,7 +68,7 @@ async def _lock_initial_registration(session: AsyncSession) -> None:
     elif dialect == "sqlite":
         await session.execute(text("BEGIN IMMEDIATE"))
     else:
-        raise HTTPException(status_code=503, detail="Initial account setup is unavailable for this database")
+        raise HTTPException(status_code=503, detail="Account setup is unavailable")
 
 
 async def _register_failed_attempt(session: AsyncSession, user_id: str, now: datetime) -> tuple[int, datetime | None]:
@@ -167,12 +168,26 @@ def _is_locked(user: User, now: datetime) -> bool:
 
 
 @router.post("/register", response_model=UserOut, status_code=201)
-async def register(payload: RegisterIn, session: AsyncSession = Depends(get_db)):
+async def register(
+    payload: RegisterIn,
+    bootstrap_secret: str | None = Header(default=None, alias="X-HomeCam-Bootstrap-Secret"),
+    session: AsyncSession = Depends(get_db),
+):
     if settings.app_env.lower() == "production":
+        configured_secret = settings.auth_bootstrap_secret
+        if (
+            not configured_secret
+            or bootstrap_secret is None
+            or not hmac.compare_digest(
+                bootstrap_secret.encode("utf-8"),
+                configured_secret.encode("utf-8"),
+            )
+        ):
+            raise HTTPException(status_code=403, detail="Account setup is unavailable")
         await _lock_initial_registration(session)
         first_user = await session.execute(select(User.id).limit(1))
         if first_user.scalar_one_or_none() is not None:
-            raise HTTPException(status_code=403, detail="Initial account setup is already complete")
+            raise HTTPException(status_code=403, detail="Account setup is unavailable")
 
     existing = await session.execute(select(User).where(User.email == payload.email))
     if existing.scalars().first() is not None:
@@ -240,7 +255,8 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
         token,
         httponly=True,
         secure=settings.app_env.lower() == "production",
-        samesite="lax",
+        samesite="none" if settings.app_env.lower() == "production" else "lax",
+        path="/",
         expires=int(expires_at.timestamp()),
     )
     return TokenOut(access_token=token, expires_at=expires_at, user=UserOut.model_validate(user))

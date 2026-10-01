@@ -123,9 +123,10 @@ export type Recognition={enabled:boolean;backend:string;semantic:boolean;match_t
 /** Absolute URL for an API-relative media path. */
 export function mediaUrl(path?:string|null){return path?`${API}${path}`:undefined}
 
-function authHeaders(token?:string){
+function authHeaders(token?:string|null){
   return {
     "Content-Type":"application/json",
+    "X-HomeCam-Request":"1",
     ...(token?{Authorization:`Bearer ${token}`}:{})
   };
 }
@@ -145,7 +146,7 @@ export function StarRating({value,onRate,label}:{value?:number|null;onRate:(rati
 }
 
 /** Name-this-person control: pick a known identity, or type a new name. */
-function PersonAssign({event,persons,token,onAssigned}:{event:EventItem;persons:Person[];token?:string;onAssigned:()=>void}){
+function PersonAssign({event,persons,token,onAssigned}:{event:EventItem;persons:Person[];token?:string|null;onAssigned:()=>void}){
   const [name,setName]=useState("");
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
@@ -155,6 +156,7 @@ function PersonAssign({event,persons,token,onAssigned}:{event:EventItem;persons:
     try{
       const response=await fetch(`${API}/api/v1/events/${event.id}/person`,{
         method:"POST",headers:authHeaders(token),body:JSON.stringify(body),
+        credentials:"include",
       });
       if(!response.ok) throw new Error(`HTTP ${response.status}`);
       setName("");
@@ -211,7 +213,9 @@ export function TrustBadge({trust}:{trust?:Trust|null}){
 }
 
 /** One event, with its person photo, caption, rating and identity controls. */
-export function EventCard({event,persons,token,onChanged}:{event:EventItem;persons:Person[];token?:string;onChanged:()=>void}){
+export function EventCard({event,persons,token,useSessionCookie=false,onChanged}:{
+  event:EventItem;persons:Person[];token?:string|null;useSessionCookie?:boolean;onChanged:()=>void
+}){
   const [rating,setRating]=useState<number|null|undefined>(event.photo_rating);
   useEffect(()=>{setRating(event.photo_rating)},[event.photo_rating]);
 
@@ -220,6 +224,7 @@ export function EventCard({event,persons,token,onChanged}:{event:EventItem;perso
     try{
       await fetch(`${API}/api/v1/events/${event.id}/rating`,{
         method:"POST",headers:authHeaders(token),body:JSON.stringify({rating:next}),
+        credentials:"include",
       });
       onChanged();
     }catch{setRating(event.photo_rating);}
@@ -239,6 +244,7 @@ export function EventCard({event,persons,token,onChanged}:{event:EventItem;perso
             fullSrc={event.full_photo_url ? mediaUrl(event.full_photo_url) : null}
             loginUrl={mediaUrl("/api/v1/auth/login")}
             accessToken={token}
+            useSessionCookie={useSessionCookie}
             requiresAuth
             alt={event.photo_caption||`${event.type} detected`}
             caption={event.photo_caption}
@@ -309,7 +315,7 @@ export function EventCard({event,persons,token,onChanged}:{event:EventItem;perso
   </article>;
 }
 
-function PersonRow({person,token,onRenamed}:{person:Person;token?:string;onRenamed:()=>void}){
+function PersonRow({person,token,useSessionCookie=false,onRenamed}:{person:Person;token?:string|null;useSessionCookie?:boolean;onRenamed:()=>void}){
   const [name,setName]=useState(person.name||"");
   const [busy,setBusy]=useState(false);
   const [merged,setMerged]=useState<number>(0);
@@ -320,6 +326,7 @@ function PersonRow({person,token,onRenamed}:{person:Person;token?:string;onRenam
     try{
       const response=await fetch(`${API}/api/v1/persons/${person.id}`,{
         method:"PATCH",headers:authHeaders(token),body:JSON.stringify(body),
+        credentials:"include",
       });
       // Naming is the moment duplicate clusters of the same person get
       // folded together, so tell the user it happened.
@@ -336,6 +343,7 @@ function PersonRow({person,token,onRenamed}:{person:Person;token?:string;onRenam
         ? <ZoomablePhoto src={mediaUrl(person.photo_url)!}
             loginUrl={mediaUrl("/api/v1/auth/login")}
             accessToken={token}
+            useSessionCookie={useSessionCookie}
             requiresAuth
             alt={person.display_name} title={person.display_name}/>
         : <span className="muted">?</span>}
@@ -369,7 +377,9 @@ function PersonRow({person,token,onRenamed}:{person:Person;token?:string;onRenam
 }
 
 /** People tab: everyone HomeCam has grouped together, named or not. */
-export function PeoplePanel({token}:{token?:string}={}){
+export function PeoplePanel({token,useSessionCookie=false}:{
+  token?:string|null;useSessionCookie?:boolean
+}={}){
   const [persons,setPersons]=useState<Person[]>([]);
   const [recognition,setRecognition]=useState<Recognition|null>(null);
   const [loading,setLoading]=useState(true);
@@ -407,7 +417,7 @@ export function PeoplePanel({token}:{token?:string}={}){
     {loading?<p className="muted">Loading people…</p>
       :error?<div className="inline-error" role="alert"><span>{error}</span><button type="button" onClick={load}>Retry</button></div>
       :persons.length?<ul className="person-list">
-        {persons.map(person=><PersonRow key={person.id} person={person} token={token} onRenamed={load}/>)}
+        {persons.map(person=><PersonRow key={person.id} person={person} token={token} useSessionCookie={useSessionCookie} onRenamed={load}/>)}
       </ul>
       :<p className="muted">Nobody recognized yet. People appear here once a person is detected on a camera.</p>}
   </section>;

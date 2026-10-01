@@ -40,8 +40,8 @@ export type DigestResponse={
   };
 };
 
-function authHeaders(token:string):Record<string,string>{
-  return {Authorization:"Bearer "+token};
+function authHeaders(token:string|null):Record<string,string>{
+  return {...(token?{Authorization:"Bearer "+token}:{}),"X-HomeCam-Request":"1"};
 }
 
 function localTime(value:string){
@@ -52,7 +52,7 @@ function localTime(value:string){
 
 /** Natural-language event search. Identity questions are refused by the API,
  * and the refusal is shown to the household verbatim rather than hidden. */
-export function SearchCard({token}:{token:string}){
+export function SearchCard({token}:{token:string|null}){
   const [query,setQuery]=useState("");
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
@@ -65,7 +65,10 @@ export function SearchCard({token}:{token:string}){
     setBusy(true);
     setError("");
     try{
-      const r=await fetch(`${API}/api/v1/search?q=${encodeURIComponent(trimmed)}`,{headers:authHeaders(token)});
+      const r=await fetch(`${API}/api/v1/search?q=${encodeURIComponent(trimmed)}`,{
+        headers:authHeaders(token),
+        credentials:"include",
+      });
       if(r.status===503){
         setResponse(null);
         setError("Search is turned off on this system.");
@@ -110,14 +113,17 @@ export function SearchCard({token}:{token:string}){
 }
 
 /** The day-in-review digest (counts, notable items, unusual activity). */
-export function DigestCard({token}:{token:string}){
+export function DigestCard({token}:{token:string|null}){
   const [digest,setDigest]=useState<DigestResponse|null>(null);
   const [state,setState]=useState<"loading"|"ready"|"error"|"off">("loading");
 
   const load=useCallback(async(refresh:boolean)=>{
     setState("loading");
     try{
-      const r=await fetch(`${API}/api/v1/digest${refresh?"?refresh=true":""}`,{headers:authHeaders(token)});
+      const r=await fetch(`${API}/api/v1/digest${refresh?"?refresh=true":""}`,{
+        headers:authHeaders(token),
+        credentials:"include",
+      });
       if(r.status===503){setState("off");return;}
       if(!r.ok) throw new Error(`HTTP ${r.status}`);
       const body=await r.json() as DigestResponse;

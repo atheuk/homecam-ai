@@ -65,8 +65,12 @@ const KIND_LABELS: Record<string, string> = {
 
 const STATUS_LABELS: Record<string, string> = { open: "Open", acknowledged: "Acknowledged", resolved: "Resolved" };
 
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+function authHeaders(token: string | null): Record<string, string> {
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    "Content-Type": "application/json",
+    "X-HomeCam-Request": "1",
+  };
 }
 
 function timeAgo(value: string): string {
@@ -85,7 +89,7 @@ function timeAgo(value: string): string {
  * kind/severity/status fields above it. */
 function IncidentCard({
   incident, token, cameraName, onChanged,
-}: { incident: Incident; token: string; cameraName: string; onChanged: () => void }) {
+}: { incident: Incident; token: string | null; cameraName: string; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -98,6 +102,7 @@ function IncidentCard({
       const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/${action}`, {
         method: "POST",
         headers: authHeaders(token),
+        credentials: "include",
       });
       if (!r.ok) {
         setError(`Could not ${action} this incident.`);
@@ -116,7 +121,10 @@ function IncidentCard({
     }
     setExpanded(true);
     if (events) return;
-    const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, { headers: authHeaders(token) });
+    const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, {
+      headers: authHeaders(token),
+      credentials: "include",
+    });
     if (r.ok) {
       const body = await r.json();
       setEvents(body.events as IncidentEvent[]);
@@ -127,7 +135,10 @@ function IncidentCard({
     setBusy(true);
     setError(null);
     try {
-      const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, { headers: authHeaders(token) });
+      const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, {
+        headers: authHeaders(token),
+        credentials: "include",
+      });
       if (!r.ok) {
         setError("Could not export this incident.");
         return;
@@ -200,10 +211,12 @@ function IncidentCard({
 export default function SecurityPanel({
   cameras,
   authToken,
+  authenticated,
   onUnauthorized,
 }: {
   cameras: { id: string; name: string }[];
-  authToken?: string;
+  authToken?: string | null;
+  authenticated?: boolean;
   onUnauthorized?: () => void;
 }) {
   const [token, setToken] = useState<string | null>(authToken ?? null);
@@ -222,16 +235,21 @@ export default function SecurityPanel({
   const [auditLog, setAuditLog] = useState<AuditEntry[] | null>(null);
 
   useEffect(() => {
-    if (authToken) setToken(authToken);
-  }, [authToken]);
+    if (authenticated !== undefined) setToken(authToken ?? null);
+    else if (authToken) setToken(authToken);
+  }, [authToken, authenticated]);
+  const hasSession = token !== null || authenticated === true;
 
   const cameraName = useCallback(
     (id: string) => cameras.find((camera) => camera.id === id)?.name || id,
     [cameras],
   );
 
-  const loadMode = useCallback(async (activeToken: string) => {
-    const r = await fetch(`${API}/api/v1/security/mode`, { headers: authHeaders(activeToken) });
+  const loadMode = useCallback(async (activeToken: string | null) => {
+    const r = await fetch(`${API}/api/v1/security/mode`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (r.status === 401) {
       setToken(null);
       onUnauthorized?.();
@@ -240,9 +258,12 @@ export default function SecurityPanel({
     if (r.ok) setModeState(await r.json());
   }, [onUnauthorized]);
 
-  const loadIncidents = useCallback(async (activeToken: string, filter: "open" | "all") => {
+  const loadIncidents = useCallback(async (activeToken: string | null, filter: "open" | "all") => {
     const query = filter === "open" ? "?status=open" : "";
-    const r = await fetch(`${API}/api/v1/security/incidents${query}`, { headers: authHeaders(activeToken) });
+    const r = await fetch(`${API}/api/v1/security/incidents${query}`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (!r.ok) {
       setIncidentsError("Could not load incidents.");
       return;
@@ -251,23 +272,26 @@ export default function SecurityPanel({
     setIncidents(await r.json());
   }, []);
 
-  const loadAuditLog = useCallback(async (activeToken: string) => {
-    const r = await fetch(`${API}/api/v1/security/audit-log?limit=50`, { headers: authHeaders(activeToken) });
+  const loadAuditLog = useCallback(async (activeToken: string | null) => {
+    const r = await fetch(`${API}/api/v1/security/audit-log?limit=50`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (r.ok) setAuditLog(await r.json());
   }, []);
 
   useEffect(() => {
-    if (!token) return;
+    if (!hasSession) return;
     loadMode(token);
     loadIncidents(token, incidentFilter);
     loadAuditLog(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, hasSession]);
 
   useEffect(() => {
-    if (token) loadIncidents(token, incidentFilter);
+    if (hasSession) loadIncidents(token, incidentFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [incidentFilter]);
+  }, [incidentFilter, hasSession, token]);
 
   // `incidentFilter` is read from a ref (not a hook dep) so an open/all
   // toggle doesn't tear down and reopen the SSE connection.
@@ -284,7 +308,7 @@ export default function SecurityPanel({
   // (see IncidentCard's docstring), so re-fetching on any of these three
   // events is always safe, never AI-triggered.
   useEffect(() => {
-    if (!token) return;
+    if (!hasSession) return;
     const controller = new AbortController();
     void consumeSse(`${API}/api/v1/ws`, token, controller.signal, (type) => {
       if (!["incident.created", "incident.updated", "incident.escalated"].includes(type)) return;
@@ -301,7 +325,7 @@ export default function SecurityPanel({
     });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, hasSession]);
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -321,13 +345,14 @@ export default function SecurityPanel({
   }
 
   async function changeMode(next: Mode) {
-    if (!token || modeBusy) return;
+    if (!hasSession || modeBusy) return;
     setModeBusy(true);
     setModeError(null);
     try {
       const r = await fetch(`${API}/api/v1/security/mode`, {
         method: "PUT",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify({ mode: next }),
       });
       if (!r.ok) {
@@ -349,7 +374,7 @@ export default function SecurityPanel({
     [incidents],
   );
 
-  if (!token) {
+  if (!hasSession) {
     return (
       <section className="panel admin-panel">
         <h3>Security sign-in</h3>

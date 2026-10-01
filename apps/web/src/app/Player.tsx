@@ -2,6 +2,16 @@
 import {useEffect,useRef,useState} from "react";
 import Hls from "hls.js";
 
+const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
+
+function isApiRequest(url:string):boolean{
+  try{
+    return new URL(url,window.location.href).origin===new URL(API,window.location.href).origin;
+  }catch{
+    return false;
+  }
+}
+
 /** A fatal media error is often a one-off decoder hiccup, so it is worth
  * retrying before giving up — but retrying forever would spin silently. */
 const MAX_MEDIA_RECOVERIES=2;
@@ -49,14 +59,14 @@ export function describePlaybackError(details:string,codec?:string):string{
  * is what hls.js provides. Without this, `<video src={m3u8Url}>` silently
  * shows nothing outside Safari.
  */
-export function HlsVideo({src,token}:{src:string;token?:string}){
+export function HlsVideo({src,token}:{src:string;token?:string|null}){
   const videoRef=useRef<HTMLVideoElement|null>(null);
   const [error,setError]=useState<string|null>(null);
   useEffect(()=>{
     const video=videoRef.current;
     if(!video) return;
     setError(null);
-    video.crossOrigin="use-credentials";
+    video.crossOrigin=isApiRequest(src)?"use-credentials":"anonymous";
     if(video.canPlayType("application/vnd.apple.mpegurl")){
       // Safari (and some WebKit-based browsers): native HLS support.
       video.src=src;
@@ -70,7 +80,7 @@ export function HlsVideo({src,token}:{src:string;token?:string}){
       return;
     }
     const hls=new Hls({
-      xhrSetup:(xhr)=>{if(token) xhr.setRequestHeader("Authorization",`Bearer ${token}`);},
+      xhrSetup:(xhr,url)=>{if(token&&isApiRequest(url)) xhr.setRequestHeader("Authorization",`Bearer ${token}`);},
     });
     let recoveries=0;
     let destroyed=false;
