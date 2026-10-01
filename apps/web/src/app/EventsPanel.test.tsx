@@ -34,7 +34,7 @@ const events:EventItem[]=[
 
 function renderPanel(newEventIds=new Set<string>()){
   return render(<EventsPanel events={events} persons={people} cameras={cameras}
-    newEventIds={newEventIds} onChanged={()=>{}} onAcknowledgeNew={vi.fn()}/>);
+    token="test-token" newEventIds={newEventIds} onChanged={()=>{}} onAcknowledgeNew={vi.fn()}/>);
 }
 
 describe("events panel",()=>{

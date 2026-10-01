@@ -123,6 +123,13 @@ export type Recognition={enabled:boolean;backend:string;semantic:boolean;match_t
 /** Absolute URL for an API-relative media path. */
 export function mediaUrl(path?:string|null){return path?`${API}${path}`:undefined}
 
+function authHeaders(token?:string){
+  return {
+    "Content-Type":"application/json",
+    ...(token?{Authorization:`Bearer ${token}`}:{})
+  };
+}
+
 /** 1-5 star control. Rating is how *usable* the photo is, which is what
  * promotes a photo to be a person's cover image. */
 export function StarRating({value,onRate,label}:{value?:number|null;onRate:(rating:number|null)=>void;label:string}){
@@ -138,7 +145,7 @@ export function StarRating({value,onRate,label}:{value?:number|null;onRate:(rati
 }
 
 /** Name-this-person control: pick a known identity, or type a new name. */
-function PersonAssign({event,persons,onAssigned}:{event:EventItem;persons:Person[];onAssigned:()=>void}){
+function PersonAssign({event,persons,token,onAssigned}:{event:EventItem;persons:Person[];token?:string;onAssigned:()=>void}){
   const [name,setName]=useState("");
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
@@ -147,7 +154,7 @@ function PersonAssign({event,persons,onAssigned}:{event:EventItem;persons:Person
     setBusy(true);setError("");
     try{
       const response=await fetch(`${API}/api/v1/events/${event.id}/person`,{
-        method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),
+        method:"POST",headers:authHeaders(token),body:JSON.stringify(body),
       });
       if(!response.ok) throw new Error(`HTTP ${response.status}`);
       setName("");
@@ -204,7 +211,7 @@ export function TrustBadge({trust}:{trust?:Trust|null}){
 }
 
 /** One event, with its person photo, caption, rating and identity controls. */
-export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Person[];onChanged:()=>void}){
+export function EventCard({event,persons,token,onChanged}:{event:EventItem;persons:Person[];token?:string;onChanged:()=>void}){
   const [rating,setRating]=useState<number|null|undefined>(event.photo_rating);
   useEffect(()=>{setRating(event.photo_rating)},[event.photo_rating]);
 
@@ -212,7 +219,7 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
     setRating(next); // optimistic: the control must feel instant
     try{
       await fetch(`${API}/api/v1/events/${event.id}/rating`,{
-        method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rating:next}),
+        method:"POST",headers:authHeaders(token),body:JSON.stringify({rating:next}),
       });
       onChanged();
     }catch{setRating(event.photo_rating);}
@@ -231,6 +238,7 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
         ? <ZoomablePhoto src={mediaUrl(event.photo_url)!}
             fullSrc={event.full_photo_url ? mediaUrl(event.full_photo_url) : null}
             loginUrl={mediaUrl("/api/v1/auth/login")}
+            accessToken={token}
             requiresAuth
             alt={event.photo_caption||`${event.type} detected`}
             caption={event.photo_caption}
@@ -295,13 +303,13 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
       </p>}
       {event.has_photo&&<>
         <StarRating value={rating} label={`Rate the photo for ${event.description}`} onRate={rate}/>
-        <PersonAssign event={event} persons={persons} onAssigned={onChanged}/>
+        <PersonAssign event={event} persons={persons} token={token} onAssigned={onChanged}/>
       </>}
     </div>
   </article>;
 }
 
-function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
+function PersonRow({person,token,onRenamed}:{person:Person;token?:string;onRenamed:()=>void}){
   const [name,setName]=useState(person.name||"");
   const [busy,setBusy]=useState(false);
   const [merged,setMerged]=useState<number>(0);
@@ -311,7 +319,7 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
     setBusy(true);
     try{
       const response=await fetch(`${API}/api/v1/persons/${person.id}`,{
-        method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),
+        method:"PATCH",headers:authHeaders(token),body:JSON.stringify(body),
       });
       // Naming is the moment duplicate clusters of the same person get
       // folded together, so tell the user it happened.
@@ -327,6 +335,7 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
       {person.photo_url
         ? <ZoomablePhoto src={mediaUrl(person.photo_url)!}
             loginUrl={mediaUrl("/api/v1/auth/login")}
+            accessToken={token}
             requiresAuth
             alt={person.display_name} title={person.display_name}/>
         : <span className="muted">?</span>}
@@ -360,7 +369,7 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
 }
 
 /** People tab: everyone HomeCam has grouped together, named or not. */
-export function PeoplePanel(){
+export function PeoplePanel({token}:{token?:string}={}){
   const [persons,setPersons]=useState<Person[]>([]);
   const [recognition,setRecognition]=useState<Recognition|null>(null);
   const [loading,setLoading]=useState(true);
@@ -370,7 +379,10 @@ export function PeoplePanel(){
     setLoading(true);
     setError("");
     try{
-      const response=await fetch(`${API}/api/v1/persons`);
+      const response=await fetch(`${API}/api/v1/persons`,{
+        headers:token?{Authorization:`Bearer ${token}`}:{},
+        credentials:"include",
+      });
       if(!response.ok) throw new Error(`HTTP ${response.status}`);
       const body=await response.json();
       setPersons(body.persons||[]);
@@ -381,7 +393,7 @@ export function PeoplePanel(){
       setError("People could not be loaded from the local API.");
     }
     finally{setLoading(false);}
-  },[]);
+  },[token]);
   useEffect(()=>{load()},[load]);
 
   return <section className="panel people-panel">
@@ -395,7 +407,7 @@ export function PeoplePanel(){
     {loading?<p className="muted">Loading people…</p>
       :error?<div className="inline-error" role="alert"><span>{error}</span><button type="button" onClick={load}>Retry</button></div>
       :persons.length?<ul className="person-list">
-        {persons.map(person=><PersonRow key={person.id} person={person} onRenamed={load}/>)}
+        {persons.map(person=><PersonRow key={person.id} person={person} token={token} onRenamed={load}/>)}
       </ul>
       :<p className="muted">Nobody recognized yet. People appear here once a person is detected on a camera.</p>}
   </section>;

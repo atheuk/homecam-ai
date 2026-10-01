@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DigestCard, SearchCard } from "./Insights";
+import { consumeSse, SseResponseError } from "./sse";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -194,11 +195,18 @@ function IncidentCard({
 }
 
 /** Security & incidents: arming modes, incident acknowledge/resolve/export,
- * and the audit trail. Requires its own sign-in, same single-user-is-admin
- * scope as AdminPanel - see that component's docstring. Every write here is
- * a human action; nothing on this panel is triggered autonomously by AI. */
-export default function SecurityPanel({ cameras }: { cameras: { id: string; name: string }[] }) {
-  const [token, setToken] = useState<string | null>(null);
+ * and the audit trail. Every write here is a human action; nothing on this
+ * panel is triggered autonomously by AI. */
+export default function SecurityPanel({
+  cameras,
+  authToken,
+  onUnauthorized,
+}: {
+  cameras: { id: string; name: string }[];
+  authToken?: string;
+  onUnauthorized?: () => void;
+}) {
+  const [token, setToken] = useState<string | null>(authToken ?? null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -213,6 +221,10 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
 
   const [auditLog, setAuditLog] = useState<AuditEntry[] | null>(null);
 
+  useEffect(() => {
+    if (authToken) setToken(authToken);
+  }, [authToken]);
+
   const cameraName = useCallback(
     (id: string) => cameras.find((camera) => camera.id === id)?.name || id,
     [cameras],
@@ -222,10 +234,11 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
     const r = await fetch(`${API}/api/v1/security/mode`, { headers: authHeaders(activeToken) });
     if (r.status === 401) {
       setToken(null);
+      onUnauthorized?.();
       return;
     }
     if (r.ok) setModeState(await r.json());
-  }, []);
+  }, [onUnauthorized]);
 
   const loadIncidents = useCallback(async (activeToken: string, filter: "open" | "all") => {
     const query = filter === "open" ? "?status=open" : "";
@@ -272,15 +285,21 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
   // events is always safe, never AI-triggered.
   useEffect(() => {
     if (!token) return;
-    const source = new EventSource(`${API}/api/v1/ws`);
-    const refresh = () => {
+    const controller = new AbortController();
+    void consumeSse(`${API}/api/v1/ws`, token, controller.signal, (type) => {
+      if (!["incident.created", "incident.updated", "incident.escalated"].includes(type)) return;
       loadIncidents(token, incidentFilterRef.current);
       loadAuditLog(token);
-    };
-    source.addEventListener("incident.created", refresh);
-    source.addEventListener("incident.updated", refresh);
-    source.addEventListener("incident.escalated", refresh);
-    return () => source.close();
+    }).catch((error) => {
+      if (controller.signal.aborted) return;
+      if (error instanceof SseResponseError && error.status === 401) {
+        setToken(null);
+        onUnauthorized?.();
+      } else {
+        setIncidentsError("Live incident updates are temporarily unavailable.");
+      }
+    });
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -290,6 +309,7 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
     const r = await fetch(`${API}/api/v1/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ email: loginEmail, password: loginPassword }),
     });
     if (!r.ok) {

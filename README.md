@@ -45,6 +45,8 @@ Anything else, or a model path that does not exist, no longer silently downgrade
 
 ## Local development
 
+All `/api/v1` endpoints other than login and initial registration require a bearer token or session cookie; `/health` and `/ready` are public. In production, registration is available only to create the first account. See [`docs/security.md`](docs/security.md) for the access-control and bootstrap details.
+
 Backend (Python 3.12):
 ```bash
 cd apps/api
@@ -148,10 +150,10 @@ The existing `FOUNDRY_VISION_DEPLOYMENT` must support image inputs and strict JS
 
 Generate an event:
 ```bash
-curl -X POST http://localhost:8000/api/v1/mock/events -H "Content-Type: application/json" -d "{\"camera_id\":\"mock-eufy-doorbell\",\"type\":\"doorbell\"}"
+curl -X POST http://localhost:8000/api/v1/mock/events -H "Authorization: Bearer <access-token>" -H "Content-Type: application/json" -d "{\"camera_id\":\"mock-eufy-doorbell\",\"type\":\"doorbell\"}"
 ```
 
-Register and log in:
+Register and log in first, then use the returned access token for protected API calls:
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/register -H "Content-Type: application/json" -d "{\"email\":\"owner@example.com\",\"password\":\"supersecret1\"}"
 curl -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" -d "{\"email\":\"owner@example.com\",\"password\":\"supersecret1\"}"
@@ -159,7 +161,9 @@ curl -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: applicati
 
 ## Limitations
 
-The mock snapshot is a deterministic placeholder, not a real image. MediaMTX is present but not connected to camera hardware. Authentication is a minimal local scaffold (PBKDF2 + opaque DB-backed session tokens, now with failed-login lockout and bulk session revocation — see `docs/security.md`) suitable for local development only — there is no email verification, password reset, or production identity provider integration; the Admin and Security panels have their own local login forms, but there is still no site-wide login UI/route guard for the rest of the dashboard. Dahua and Eufy code is an opt-in integration boundary with mocked contract tests; no live hardware verification has been claimed without a locally configured reachable LAN host/adapter. The AI pipeline ships with a deterministic mock detector and mock AI provider: the ONNX detector backend is opt-in and has **not** been verified here against a real model or hardware, no model weights are bundled, audio detection finds speech-like activity only (no transcription, no speaker identity) and is `UNAVAILABLE` because no provider currently exposes an audio buffer, there is no person identity/face clustering, and embeddings are stored as JSON arrays rather than a native pgvector column so similarity search is not index-accelerated yet (see `docs/ai-pipeline.md`). The new security layer (`docs/security.md`) raises/tracks incidents and escalation levels but has no external notification/paging channel yet (push/SMS/email), no MFA, and no video-retention/purge job. The modern AI features (`docs/ai-features.md`) ship with the same mock-first posture: natural-language search falls back to keyword matching whenever an event was never embedded or the mock AI provider is active and is not index-accelerated (embeddings are JSON arrays, ranked in Python over a bounded candidate window), the daily digest falls back to a deterministic template when the provider is unavailable, and deterrence is a mock no-op provider that by design executes nothing without an explicit authenticated human confirmation. There are no Azure, cloud AI inference, notifications, retention jobs, or production deployment integrations. Do not expose this development stack to the internet.
+The mock snapshot is a deterministic placeholder, not a real image. MediaMTX is present but not connected to camera hardware. Authentication is a minimal local account system (PBKDF2, opaque DB-backed session tokens, failed-login lockout, and bulk session revocation; see `docs/security.md`); the dashboard has a shared sign-in and all household API routes require authentication. Production registration is limited to initial account bootstrap. There is no email verification, password reset, MFA, or external identity provider integration. Dahua and Eufy code is an opt-in integration boundary with mocked contract tests; no live hardware verification has been claimed without a locally configured reachable LAN host/adapter.
+
+The AI pipeline ships with a deterministic mock detector and mock AI provider: the ONNX detector backend is opt-in and has **not** been verified here against a real model or hardware, no model weights are bundled, audio detection finds speech-like activity only (no transcription, no speaker identity) and is `UNAVAILABLE` because no provider currently exposes an audio buffer, there is no person identity/face clustering, and embeddings are stored as JSON arrays rather than a native pgvector column so similarity search is not index-accelerated yet (see `docs/ai-pipeline.md`). The security layer (`docs/security.md`) raises/tracks incidents and escalation levels but has no external notification/paging channel yet (push/SMS/email) or video-retention/purge job. The modern AI features (`docs/ai-features.md`) ship with the same mock-first posture: natural-language search falls back to keyword matching whenever an event was never embedded or the mock AI provider is active and is not index-accelerated (embeddings are JSON arrays, ranked in Python over a bounded candidate window), the daily digest falls back to a deterministic template when the provider is unavailable, and deterrence is a mock no-op provider that by design executes nothing without an explicit authenticated human confirmation. There are no Azure, cloud AI inference, notifications, retention jobs, or production deployment integrations. Do not expose this development stack to the internet.
 
 ## Repository
 

@@ -83,8 +83,14 @@ function rowsToChannels(rows: ChannelRow[]): string {
  * (see docs/dahua.md and docs/eufy.md). The HomeCam session token is kept
  * only in component state (never localStorage) since this phase treats any
  * authenticated user as admin. */
-export default function AdminPanel() {
-  const [token, setToken] = useState<string | null>(null);
+export default function AdminPanel({
+  authToken,
+  onUnauthorized,
+}: {
+  authToken?: string;
+  onUnauthorized?: () => void;
+} = {}) {
+  const [token, setToken] = useState<string | null>(authToken ?? null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -125,10 +131,15 @@ export default function AdminPanel() {
   const [zoneStatus, setZoneStatus] = useState<string | null>(null);
   const [zoneBusy, setZoneBusy] = useState(false);
 
+  useEffect(() => {
+    if (authToken) setToken(authToken);
+  }, [authToken]);
+
   async function loadConfigs(activeToken: string) {
     const r = await fetch(`${API}/api/v1/admin/providers`, { headers: authHeaders(activeToken) });
     if (r.status === 401) {
       setToken(null);
+      onUnauthorized?.();
       return;
     }
     if (!r.ok) {
@@ -142,13 +153,17 @@ export default function AdminPanel() {
   useEffect(() => {
     if (token) loadConfigs(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, onUnauthorized]);
 
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
     (async () => {
-      const r = await fetch(`${API}/api/v1/cameras`);
+      const r = await fetch(`${API}/api/v1/cameras`, {
+        headers: authHeaders(token),
+        credentials: "include",
+      });
+      if (r.status === 401) onUnauthorized?.();
       if (!r.ok || cancelled) return;
       const body = (await r.json()) as CameraOption[];
       setCameras(body);
@@ -157,7 +172,7 @@ export default function AdminPanel() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, onUnauthorized]);
 
   async function loadZones(cameraId: string, activeToken: string) {
     if (!cameraId) {
@@ -231,6 +246,7 @@ export default function AdminPanel() {
     const r = await fetch(`${API}/api/v1/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ email: loginEmail, password: loginPassword }),
     });
     if (!r.ok) {

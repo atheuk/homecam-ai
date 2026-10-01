@@ -30,6 +30,7 @@ export type LightboxPhoto = {
   fullSrc?: string | null;
   loginUrl?: string;
   requiresAuth?: boolean;
+  accessToken?: string;
   alt: string;
   caption?: string | null;
   title?: string;
@@ -94,7 +95,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
     const loadingCrop = Boolean(photo.requiresAuth && !cropImage);
     const loadingFull = Boolean(photo.fullSrc && !fullImage);
     if (loading || (!loadingCrop && !loadingFull)) return;
-    if (!accessToken && !photo.loginUrl) {
+    if (!accessToken && !photo.accessToken && !photo.loginUrl) {
       setError("Sign-in is not configured for this photo.");
       return;
     }
@@ -103,7 +104,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
     setLoading(true);
     setError("");
     try {
-      let token = accessToken;
+      let token = photo.accessToken || accessToken;
       if (!token) {
         if (!photo.loginUrl) throw new Error("Sign-in is not configured for this photo.");
         const login = await fetch(photo.loginUrl, {
@@ -112,6 +113,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
           body: JSON.stringify({email, password}),
           signal: controller.signal,
           cache: "no-store",
+          credentials: "include",
         });
         if (!login.ok) throw new Error("Sign-in failed. Check your credentials and try again.");
         const {access_token}: {access_token: string} = await login.json();
@@ -124,6 +126,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
         headers: {Authorization: `Bearer ${token}`},
         signal: controller.signal,
         cache: "no-store",
+        credentials: "include",
       });
       if (!response.ok) throw new Error(`Could not load photo (HTTP ${response.status}).`);
       const blob = await response.blob();
@@ -320,9 +323,9 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
       {((photo.requiresAuth && !cropImage) || (photo.fullSrc && !fullImage)) && (
         <form className="lightbox-auth" onSubmit={loadPhoto}>
           <span>{photo.requiresAuth && !cropImage
-            ? "Sign in to view this photo."
+            ? photo.accessToken ? "View this photo." : "Sign in to view this photo."
             : "View the full-resolution frame."}</span>
-          {!accessToken && <>
+          {!photo.accessToken && !accessToken && <>
             <input aria-label="Photo account email" type="email" required autoComplete="username"
               value={email} onChange={event => setEmail(event.target.value)} />
             <input aria-label="Photo account password" type="password" required autoComplete="current-password"
@@ -383,6 +386,7 @@ export function ZoomablePhoto({
   fullSrc,
   loginUrl,
   requiresAuth,
+  accessToken,
   alt,
   caption,
   title,
@@ -394,6 +398,7 @@ export function ZoomablePhoto({
   fullSrc?: string | null;
   loginUrl?: string;
   requiresAuth?: boolean;
+  accessToken?: string;
   alt: string;
   caption?: string | null;
   title?: string;
@@ -407,7 +412,7 @@ export function ZoomablePhoto({
       <button type="button" className="photo-trigger" aria-label={`Open ${title || alt} full screen`} onClick={() => setOpen(true)}>
         <span className="photo-frame">
           {requiresAuth
-            ? <span className="photo-locked">Sign in to view photo</span>
+            ? <span className="photo-locked">{accessToken?"Open photo":"Sign in to view photo"}</span>
             : <>
                 {/* eslint-disable-next-line @next/next/no-img-element -- see Lightbox */}
                 <img src={src} alt={alt} />
@@ -415,7 +420,7 @@ export function ZoomablePhoto({
               </>}
         </span>
       </button>
-      {open && <Lightbox photo={{src, fullSrc, loginUrl, requiresAuth, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
+      {open && <Lightbox photo={{src, fullSrc, loginUrl, requiresAuth, accessToken, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
     </>
   );
 }

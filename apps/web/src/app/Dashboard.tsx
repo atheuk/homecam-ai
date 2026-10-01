@@ -1,12 +1,13 @@
 "use client";
 
-import {useCallback,useEffect,useMemo,useState} from "react";
+import {useCallback,useEffect,useMemo,useState,type FormEvent} from "react";
 import {useRouter,useSearchParams} from "next/navigation";
 import AdminPanel from "./AdminPanel";
 import EventsPanel from "./EventsPanel";
 import SecurityPanel from "./SecurityPanel";
 import {HlsVideo} from "./Player";
 import {EventCard,PeoplePanel,type EventItem,type Person} from "./People";
+import {consumeSse,SseResponseError} from "./sse";
 
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
 const EVENT_LIMIT=50;
@@ -82,12 +83,15 @@ function CameraGrid({cameras}:{cameras:Camera[]}){
 
 /** Fetches only browser-safe stream descriptors vetted by the API. Raw RTSP
  * URLs and credentials are never rendered or reconstructed in this client. */
-export function LiveView({cameras}:{cameras:Camera[]}){
+export function LiveView({cameras,token}:{cameras:Camera[];token:string}){
   const [streams,setStreams]=useState<Record<string,LiveStream>>({});
   useEffect(()=>{
     let cancelled=false;
     cameras.forEach(camera=>{
-      fetch(`${API}/api/v1/cameras/${camera.id}/live`).then(async response=>{
+      fetch(`${API}/api/v1/cameras/${camera.id}/live`,{
+        headers:{Authorization:`Bearer ${token}`},
+        credentials:"include",
+      }).then(async response=>{
         if(!response.ok){
           if(!cancelled) setStreams(current=>({...current,[camera.id]:{error:`Stream unavailable (HTTP ${response.status}).`}}));
           return;
@@ -101,7 +105,7 @@ export function LiveView({cameras}:{cameras:Camera[]}){
       });
     });
     return ()=>{cancelled=true;};
-  },[cameras]);
+  },[cameras,token]);
 
   if(!cameras.length) return <div className="empty-state"><strong>No connected cameras</strong><p>Live streams will appear when a camera comes online.</p></div>;
   return <section className="grid" id="panel-live" role="tabpanel" aria-labelledby="tab-live">
@@ -111,7 +115,7 @@ export function LiveView({cameras}:{cameras:Camera[]}){
         <div className="camera-art stream-art">
           {!stream?<div className="stream-loading"><span className="spinner"/><span>Connecting…</span></div>
             :"error" in stream?<span className="error">{stream.error}</span>
-            :stream.kind==="hls"?<HlsVideo src={stream.stream_url}/>
+            :stream.kind==="hls"?<HlsVideo src={stream.stream_url} token={token}/>
             :stream.browser_playable&&stream.kind==="link"?<a href={stream.stream_url} target="_blank" rel="noreferrer">Open stream</a>
             :<span className="muted stream-message">Live preview not available in the browser for this camera{stream.kind==="webrtc"?" (WebRTC client required)":""}. Use snapshot or the edge connector&apos;s own viewer.</span>}
         </div>
@@ -130,12 +134,22 @@ function LoadingDashboard(){
 
 const REQUEST_TIMEOUT_MS=15_000;
 
-async function json<T>(url:string,timeoutMs=REQUEST_TIMEOUT_MS):Promise<T>{
+class ApiRequestError extends Error{
+  constructor(readonly status:number){
+    super(`HTTP ${status}`);
+  }
+}
+
+async function json<T>(url:string,token:string,timeoutMs=REQUEST_TIMEOUT_MS):Promise<T>{
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),timeoutMs);
   try{
-    const response=await fetch(url,{signal:controller.signal});
-    if(!response.ok) throw new Error(`HTTP ${response.status}`);
+    const response=await fetch(url,{
+      signal:controller.signal,
+      headers:{Authorization:`Bearer ${token}`},
+      credentials:"include",
+    });
+    if(!response.ok) throw new ApiRequestError(response.status);
     return await response.json() as T;
   }finally{
     clearTimeout(timer);
@@ -155,21 +169,34 @@ export default function Dashboard(){
   const [persons,setPersons]=useState<Person[]>([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
+  const [token,setToken]=useState<string|null>(null);
+  const [loginEmail,setLoginEmail]=useState("");
+  const [loginPassword,setLoginPassword]=useState("");
+  const [loginError,setLoginError]=useState("");
+  const [loginBusy,setLoginBusy]=useState(false);
   const [newEventIds,setNewEventIds]=useState<Set<string>>(new Set());
   const tabParam=searchParams.get("tab");
 
   useEffect(()=>setTab(tabFrom(tabParam)),[tabParam]);
 
   const load=useCallback(async()=>{
+    if(!token) return;
     setLoading(true);
     setError("");
     // Each source loads independently: the slow NVR-backed camera call must not
     // take down events and people when it times out or fails.
     const [cameraResult,eventResult,personResult]=await Promise.allSettled([
-      json<Camera[]>(`${API}/api/v1/cameras`),
-      json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`),
-      json<{persons?:Person[]}>(`${API}/api/v1/persons`),
+      json<Camera[]>(`${API}/api/v1/cameras`,token),
+      json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`,token),
+      json<{persons?:Person[]}>(`${API}/api/v1/persons`,token),
     ]);
+    if([cameraResult,eventResult,personResult].some(result=>
+      result.status==="rejected"&&result.reason instanceof ApiRequestError&&result.reason.status===401
+    )){
+      setToken(null);
+      setLoading(false);
+      return;
+    }
     const degraded:string[]=[];
     if(cameraResult.status==="fulfilled") setCameras(cameraResult.value);
     else degraded.push("Camera status is unavailable.");
@@ -180,33 +207,92 @@ export default function Dashboard(){
     if(degraded.length===3) setError("HomeCam could not reach the local API. Check the service and try again.");
     else if(degraded.length) setError(degraded.join(" "));
     setLoading(false);
-  },[]);
+  },[token]);
 
   const refreshEvents=useCallback(async()=>{
+    if(!token) return;
     const [eventResult,personResult]=await Promise.allSettled([
-      json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`),
-      json<{persons?:Person[]}>(`${API}/api/v1/persons`),
+      json<EventItem[]>(`${API}/api/v1/events?limit=${EVENT_LIMIT}`,token),
+      json<{persons?:Person[]}>(`${API}/api/v1/persons`,token),
     ]);
+    if([eventResult,personResult].some(result=>
+      result.status==="rejected"&&result.reason instanceof ApiRequestError&&result.reason.status===401
+    )){
+      setToken(null);
+      return;
+    }
     if(eventResult.status==="fulfilled") setEvents(eventResult.value.slice(0,EVENT_LIMIT));
     if(personResult.status==="fulfilled") setPersons(personResult.value.persons||[]);
     if(eventResult.status==="rejected"||personResult.status==="rejected") setError("Events could not be refreshed. Try again.");
-  },[]);
+  },[token]);
 
-  useEffect(()=>{load();},[load]);
+  useEffect(()=>{if(token) load();},[load,token]);
   useEffect(()=>{
-    const source=new EventSource(`${API}/api/v1/ws`);
-    const receive=(message:Event)=>{
+    if(!token) return;
+    const controller=new AbortController();
+    void consumeSse(`${API}/api/v1/ws`,token,controller.signal,(type,data)=>{
+      if(type!=="event.created") return;
       try{
-        const next=JSON.parse((message as MessageEvent).data) as EventItem;
+        const next=JSON.parse(data) as EventItem;
         setEvents(current=>[next,...current.filter(event=>event.id!==next.id)].slice(0,EVENT_LIMIT));
         setNewEventIds(current=>new Set(current).add(next.id));
       }catch{
         setError("A live event update could not be read. Existing events are still available.");
       }
-    };
-    source.addEventListener("event.created",receive);
-    return ()=>source.close();
-  },[]);
+    }).catch(error=>{
+      if(controller.signal.aborted) return;
+      if(error instanceof SseResponseError&&error.status===401) setToken(null);
+      else setError("Live event updates are temporarily unavailable.");
+    });
+    return ()=>controller.abort();
+  },[token]);
+
+  const signIn=async(event:FormEvent)=>{
+    event.preventDefault();
+    setLoginBusy(true);
+    setLoginError("");
+    try{
+      const response=await fetch(`${API}/api/v1/auth/login`,{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        credentials:"include",
+        cache:"no-store",
+        body:JSON.stringify({email:loginEmail,password:loginPassword}),
+      });
+      if(!response.ok){
+        setLoginError("Invalid email or password.");
+        return;
+      }
+      const body=await response.json() as {access_token?:string};
+      if(!body.access_token){
+        setLoginError("Sign-in did not return a session.");
+        return;
+      }
+      setToken(body.access_token);
+      setLoginPassword("");
+    }catch{
+      setLoginError("HomeCam could not reach the local API. Try again.");
+    }finally{
+      setLoginBusy(false);
+    }
+  };
+
+  const signOut=async()=>{
+    if(token){
+      try{
+        await fetch(`${API}/api/v1/auth/logout`,{
+          method:"POST",
+          headers:{Authorization:`Bearer ${token}`},
+          credentials:"include",
+        });
+      }finally{
+        setToken(null);
+        setCameras([]);
+        setEvents([]);
+        setPersons([]);
+      }
+    }
+  };
 
   const activeCameras=useMemo(()=>cameras.filter(camera=>camera.online),[cameras]);
   const offlineCount=cameras.length-activeCameras.length;
@@ -218,9 +304,32 @@ export default function Dashboard(){
   };
   const statusTone=error||offlineCount>0||(!loading&&cameras.length===0)?"attention":"healthy";
 
+  if(!token){
+    return <main>
+      <header>
+        <div><span className="eyebrow">LOCAL-FIRST SECURITY</span><h1>HomeCam <em>AI</em></h1></div>
+      </header>
+      <section className="panel admin-panel" aria-labelledby="signin-title">
+        <h2 id="signin-title">Sign in to HomeCam</h2>
+        <p className="muted">Sign in to view cameras, events, people, and security controls.</p>
+        <form className="admin-form" onSubmit={signIn}>
+          <label>Email<input type="email" autoComplete="username" required value={loginEmail}
+            onChange={event=>setLoginEmail(event.target.value)}/></label>
+          <label>Password<input type="password" autoComplete="current-password" required value={loginPassword}
+            onChange={event=>setLoginPassword(event.target.value)}/></label>
+          <div className="admin-actions"><button type="submit" disabled={loginBusy}>
+            {loginBusy?"Signing in…":"Sign in"}
+          </button></div>
+          {loginError&&<p className="error" role="alert">{loginError}</p>}
+        </form>
+      </section>
+    </main>;
+  }
+
   return <main>
     <header>
       <div><span className="eyebrow">LOCAL-FIRST SECURITY</span><h1>HomeCam <em>AI</em></h1></div>
+      <button type="button" className="text-button" onClick={signOut}>Sign out</button>
       <span className={`status status-${statusTone}`} role="status">
         <i aria-hidden="true"/>{loading?"Checking system":statusTone==="healthy"?"System operational":"Attention needed"}
       </span>
@@ -265,11 +374,11 @@ export default function Dashboard(){
             {!events.length&&<div className="empty-state compact"><strong>Nothing to review</strong><p>New activity will appear here automatically.</p></div>}
           </section>
         </div>}
-        {tab==="Live"&&<LiveView cameras={activeCameras}/>}
+        {tab==="Live"&&<LiveView cameras={activeCameras} token={token}/>}
         {tab==="Events"&&<EventsPanel events={events} persons={persons} cameras={cameras}
-          newEventIds={newEventIds} onChanged={refreshEvents} onAcknowledgeNew={()=>setNewEventIds(new Set())}/>}
-        {tab==="People"&&<div id="panel-people" role="tabpanel" aria-labelledby="tab-people"><PeoplePanel/></div>}
-        {tab==="Security"&&<div id="panel-security" role="tabpanel" aria-labelledby="tab-security"><SecurityPanel cameras={cameras}/></div>}
+          token={token} newEventIds={newEventIds} onChanged={refreshEvents} onAcknowledgeNew={()=>setNewEventIds(new Set())}/>}
+        {tab==="People"&&<div id="panel-people" role="tabpanel" aria-labelledby="tab-people"><PeoplePanel token={token}/></div>}
+        {tab==="Security"&&<div id="panel-security" role="tabpanel" aria-labelledby="tab-security"><SecurityPanel cameras={cameras} authToken={token} onUnauthorized={signOut}/></div>}
         {tab==="System"&&<section className="panel system-panel" id="panel-system" role="tabpanel" aria-labelledby="tab-system">
           <div className="panel-heading"><div><span className="eyebrow">SYSTEM HEALTH</span><h3>Camera connections</h3></div></div>
           <p className={offlineCount?"error":"success"}>{status}</p>
@@ -279,7 +388,7 @@ export default function Dashboard(){
             <div><dt>Needs attention</dt><dd>{offlineCount}</dd></div>
           </dl>
         </section>}
-        {tab==="Settings"&&<div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings"><AdminPanel/></div>}
+        {tab==="Settings"&&<div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings"><AdminPanel authToken={token} onUnauthorized={signOut}/></div>}
       </>}
   </main>;
 }
