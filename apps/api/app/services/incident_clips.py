@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
+
+from sqlalchemy import func, select, text
 
 from ..config import settings
 from ..db import SessionLocal
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 _tasks: set[asyncio.Task] = set()
 _captures: dict[str, set[asyncio.Task]] = {}
 _MAX_CAPTURES_PER_CAMERA = 2
+_BUDGET_LOCK_KEY = 873284610
 
 
 def seed(camera_id: str) -> tuple[ClipSegment, ...]:
@@ -105,10 +108,38 @@ async def _finish(incident_id: str, capture_task: asyncio.Task) -> None:
     try:
         video = await capture_task
         async with SessionLocal() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                # Serialize admission across API replicas; a lock held through
+                # commit ensures both aggregate reads see the previous insert.
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BUDGET_LOCK_KEY}
+                )
             row = await session.get(Incident, incident_id)
             if row is None or row.clip_status != "pending":
                 return
-            session.add(IncidentClip(incident_id=incident_id, video=video, created_at=datetime.now(timezone.utc)))
+            now = datetime.now(timezone.utc)
+            today = datetime.combine(now.date(), datetime_time.min, tzinfo=timezone.utc)
+            daily_count = (await session.execute(
+                select(func.count()).select_from(IncidentClip).where(
+                    IncidentClip.created_at >= today,
+                    IncidentClip.created_at < today + timedelta(days=1),
+                )
+            )).scalar_one()
+            stored_bytes = (await session.execute(
+                select(func.coalesce(func.sum(IncidentClip.size_bytes), 0))
+            )).scalar_one()
+            if (
+                daily_count >= settings.incident_clip_daily_limit
+                or stored_bytes + len(video) > settings.incident_clip_storage_limit_bytes
+            ):
+                row.clip_status = "skipped"
+                await session.commit()
+                await incident_service._broadcast(row, "incident.updated")
+                logger.info("incident clip %s skipped: daily or storage budget reached", incident_id)
+                return
+            session.add(IncidentClip(
+                incident_id=incident_id, video=video, size_bytes=len(video), created_at=now
+            ))
             row.clip_status = "ready"
             await session.commit()
             await incident_service._broadcast(row, "incident.updated")

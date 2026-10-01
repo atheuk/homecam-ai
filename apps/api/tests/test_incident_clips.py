@@ -70,6 +70,7 @@ async def test_clip_capture_playback_hold_and_retention(client, anonymous_client
         async with SessionLocal() as session:
             await retention.run(session, dry_run=False, now=now)
             assert await session.get(IncidentClip, incident_id) is None
+            assert (await session.get(Incident, incident_id)).clip_status == "expired"
         assert (await client.get(path, headers=headers)).status_code == 404
     finally:
         for task in list(incident_clips._tasks):
@@ -133,3 +134,57 @@ async def test_post_roll_is_captured_while_incident_enrichment_is_slow(client, m
             hub._readers.pop(camera_id, None)
         else:
             hub._readers[camera_id] = previous
+
+
+async def test_daily_and_global_budgets_skip_without_evicting_held_clips(client, monkeypatch):
+    now = datetime.now(timezone.utc)
+    existing_id = "clip-budget-held"
+    candidate_ids = ("clip-budget-daily", "clip-budget-storage")
+    async with SessionLocal() as session:
+        for incident_id in (existing_id, *candidate_ids):
+            session.add(Incident(
+                id=incident_id, kind="intrusion", status="resolved", severity="high",
+                camera_id="mock-front-door", mode_at_creation="away", event_ids=[], event_count=0,
+                first_seen_at=now, last_seen_at=now, created_at=now, updated_at=now,
+                summary="Budget test", clip_status="ready" if incident_id == existing_id else "pending",
+                clip_hold=incident_id == existing_id,
+            ))
+        session.add(IncidentClip(
+            incident_id=existing_id, video=b"held", size_bytes=4, created_at=now
+        ))
+        await session.commit()
+    try:
+        monkeypatch.setattr(settings, "incident_clip_daily_limit", 1)
+        monkeypatch.setattr(settings, "incident_clip_storage_limit_bytes", 8)
+        daily = asyncio.create_task(asyncio.sleep(0, result=b"clip"))
+        await incident_clips._finish(candidate_ids[0], daily)
+        async with SessionLocal() as session:
+            assert (await session.get(Incident, candidate_ids[0])).clip_status == "skipped"
+        login = await client.post("/api/v1/auth/login", json={
+            "email": "pytest-default@homecam.test", "password": "pytest-password-123"
+        })
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = await client.get(
+            f"/api/v1/security/incidents/{candidate_ids[0]}", headers=headers
+        )
+        assert response.json()["clip"] == {"status": "skipped", "url": None}
+        monkeypatch.setattr(settings, "incident_clip_daily_limit", 2)
+        storage = asyncio.create_task(asyncio.sleep(0, result=b"12345"))
+        await incident_clips._finish(candidate_ids[1], storage)
+        async with SessionLocal() as session:
+            assert (await session.get(Incident, candidate_ids[1])).clip_status == "skipped"
+            held = await session.get(IncidentClip, existing_id)
+            assert held.video == b"held"
+            assert (await session.get(Incident, existing_id)).clip_hold is True
+            assert await session.get(IncidentClip, candidate_ids[0]) is None
+            assert await session.get(IncidentClip, candidate_ids[1]) is None
+    finally:
+        async with SessionLocal() as session:
+            held = await session.get(IncidentClip, existing_id)
+            if held is not None:
+                await session.delete(held)
+            for incident_id in (existing_id, *candidate_ids):
+                row = await session.get(Incident, incident_id)
+                if row is not None:
+                    await session.delete(row)
+            await session.commit()

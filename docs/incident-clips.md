@@ -21,6 +21,22 @@ misleading partial video. New clips start only for newly opened incidents;
 additional events merged into an incident do not multiply video storage.
 Older incidents have no clip. Camera-offline incidents cannot have a clip.
 
+**Aggregate capacity guard:** At most 10 clips are admitted per UTC day
+across all cameras, and stored clip payloads (including held clips) may
+occupy at most 4,000,000,000 bytes in total. PostgreSQL serializes admissions
+across API replicas with a transaction-scoped advisory lock; the count and
+the sum of the stored `size_bytes` values are checked immediately before
+each insert. This bounds *clip payloads*, not the entire PostgreSQL database
+(indices, WAL, backups, other media and metadata need separate headroom).
+For a 32 GB Flexible Server with roughly 5 GB already used, the default
+clip budget is under 4 GB plus storage overhead. Ten 16 MB clips per day
+for 30 days consume up to 4.8 GB without the cap; the hard aggregate guard
+prevents reaching that amount. With retention disabled or held evidence
+accumulating, capacity fills and subsequent incident clips are explicitly
+`skipped`; nothing evicts a kept clip. Operators should monitor database
+storage and consider increasing capacity before changing the limit.
+Resolved unheld clips purged by retention show `expired`, not `unavailable`.
+
 `GET /api/v1/security/incidents/{id}/clip` requires a household session,
 returns `video/mp4` with `private, no-store`, and never exposes a private
 HLS URL or camera secret. Add `?download=true` for an attachment response.
@@ -46,6 +62,8 @@ Configuration (API environment; all values capped by schema):
 | `INCIDENT_CLIP_POST_SECONDS` | `8` | Capture after detection |
 | `INCIDENT_CLIP_BUFFER_BYTES` | `8000000` | Per-reader rolling segment cap |
 | `INCIDENT_CLIP_MAX_BYTES` | `16000000` | Per-incident stored clip cap |
+| `INCIDENT_CLIP_DAILY_LIMIT` | `10` | New clips admitted per UTC day, across replicas |
+| `INCIDENT_CLIP_STORAGE_LIMIT_BYTES` | `4000000000` | Aggregate stored clip payload cap, including holds |
 
 Validate that the private HLS relay serves fMP4 (`EXT-X-MAP` and `moof`
 fragments), that the API Tailscale sidecar can reach the relay, and that

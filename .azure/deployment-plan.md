@@ -30,6 +30,9 @@ release's authorization.**
 The existing ingestion lease holder reads private fMP4 HLS from MediaMTX
 (Dahua) or go2rtc (Eufy), retains at most 8 MB of segments per camera and
 captures at most 16 MB per newly opened incident (8s pre/post by default).
+PostgreSQL admission allows at most 10 clips per UTC day and
+4,000,000,000 stored clip payload bytes total across replicas, including
+held evidence. Exhaustion marks new clips `skipped`; purged clips are `expired`.
 The completed clip is stored in PostgreSQL, accessible on both API replicas
 only via an authenticated `private, no-store` endpoint. A signed-in user
 can download it or place an audited retention hold; resolved unheld clips
@@ -46,10 +49,13 @@ preserve existing behavior; the zone editor exposes an optional alert toggle.
       configuration, documentation and migration.
 - [x] Review security, multi-replica behavior and failure handling locally.
 - [x] Obtain green PR CI, including Linux Docker image builds (all backend,
-      frontend, edge and Docker checks passed in both push and PR workflows).
+      frontend, edge and Docker checks passed on previous head; rerun on this
+      aggregate-budget revision before signoff).
 - [x] Open draft PR; **do not merge** until coordinator authorizes.
 - [ ] Obtain coordinator's explicit go-ahead and confirm subscription/location,
       edge connectivity, storage headroom and existing image/revision baseline.
+      Confirm the current ~5 GB baseline on the 32 GB PostgreSQL server and
+      monitor headroom for clip payloads, indexes, WAL and other media.
 - [ ] Update this plan to `Ready for Validation`; run `azure-validate` and resolve
       any issues before invoking `azure-deploy`.
 - [ ] Apply additive migration through existing job, then API and web images;
@@ -59,12 +65,13 @@ preserve existing behavior; the zone editor exposes an optional alert toggle.
 
 ## Validation and rollback
 
-Local results (2026-10-01): API 786 passed/3 skipped; Dahua edge 33 passed;
+Current local results (2026-10-01): API 787 passed/3 skipped; Dahua edge 33 passed;
 Eufy edge 21 passed; web 195 passed, lint/typecheck/production build green;
 Python Ruff green; isolated SQLite `alembic upgrade head` reached
 `0015_incident_clips`. A targeted review identified two capture/hold races,
-both corrected before final regression testing. PR CI passed on the release
-commit, including Linux Docker image builds; a real private HLS playback
+both corrected before final regression testing. New aggregate admission
+limits passed local tests; fresh PR CI is required before signoff. Previous PR CI passed on the
+earlier release commit, including Linux Docker image builds; a real private HLS playback
 check still requires the development edge environment. Do not mark this
 release `Validated` using
 earlier release results; invoke `azure-validate` once deployment is authorized.

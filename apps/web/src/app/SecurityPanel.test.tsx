@@ -82,6 +82,8 @@ describe("SecurityPanel",()=>{
       "/security/incidents":()=>jsonResponse([
         {...baseIncident,id:"inc-pending",clip:{status:"pending",url:null}},
         {...baseIncident,id:"inc-unavailable",clip:{status:"unavailable",url:null}},
+        {...baseIncident,id:"inc-skipped",clip:{status:"skipped",url:null}},
+        {...baseIncident,id:"inc-expired",clip:{status:"expired",url:null}},
         baseIncident,
       ]),
       "/security/audit-log":()=>jsonResponse([]),
@@ -89,8 +91,10 @@ describe("SecurityPanel",()=>{
     await signIn();
     expect(await screen.findByText("Incident clip is being prepared.")).toBeInTheDocument();
     expect(screen.getByText("No clip is available for this incident.")).toBeInTheDocument();
+    expect(screen.getByText("Clip skipped: daily or storage limit reached.")).toBeInTheDocument();
+    expect(screen.getByText("This incident clip has expired.")).toBeInTheDocument();
     expect(screen.queryByRole("button",{name:"Play incident clip"})).not.toBeInTheDocument();
-    expect(document.querySelectorAll(".incident-clip")).toHaveLength(2);
+    expect(document.querySelectorAll(".incident-clip")).toHaveLength(4);
   });
 
   it("fetches a ready clip only after play is requested and revokes its blob URL on unmount",async()=>{

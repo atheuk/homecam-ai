@@ -315,7 +315,7 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
             if deletable:
                 await session.execute(delete(IncidentClip).where(IncidentClip.incident_id.in_(deletable)))
                 await session.execute(
-                    update(Incident).where(Incident.id.in_(deletable)).values(clip_status="unavailable")
+                    update(Incident).where(Incident.id.in_(deletable)).values(clip_status="expired")
                 )
             await session.commit()
             report.counts["media"] += len(deletable)

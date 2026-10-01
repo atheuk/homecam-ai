@@ -14,6 +14,7 @@ def upgrade():
         "incident_clips",
         sa.Column("incident_id", sa.String(64), sa.ForeignKey("incidents.id"), primary_key=True),
         sa.Column("video", sa.LargeBinary, nullable=False),
+        sa.Column("size_bytes", sa.Integer, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 

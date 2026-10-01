@@ -52,7 +52,9 @@ Two protections outrank every cutoff:
    on a ready clip. This protects the clip and its incident from both
    media and incident retention until the hold is cleared. A resolved
    unheld clip ages out after `RETENTION_MEDIA_DAYS`; open/acknowledged
-   incident clips remain available while the incident is active.
+   incident clips remain available while the incident is active. Stored
+   clips also count toward the aggregate budget in `docs/incident-clips.md`;
+   reaching it skips new clips rather than deleting held evidence.
 
 ## The purge job
 

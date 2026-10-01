@@ -81,7 +81,7 @@ type Incident = {
   escalation_level: number;
   summary: string;
   ai_summary: string | null;
-  clip?: { status: "pending" | "ready" | "unavailable"; url: string | null };
+  clip?: { status: "pending" | "ready" | "unavailable" | "skipped" | "expired"; url: string | null };
   clip_hold?: boolean;
   evidence?:{score?:number;reasons?:string[];event_ids?:string[]}|null;
 };
@@ -342,6 +342,8 @@ function IncidentCard({
         <div className="incident-clip">
           {incident.clip.status === "pending" && <p className="muted">Incident clip is being prepared.</p>}
           {incident.clip.status === "unavailable" && <p className="muted">No clip is available for this incident.</p>}
+          {incident.clip.status === "skipped" && <p className="muted">Clip skipped: daily or storage limit reached.</p>}
+          {incident.clip.status === "expired" && <p className="muted">This incident clip has expired.</p>}
           {incident.clip.status === "ready" && !incident.clip.url && <p className="muted">No clip is available for this incident.</p>}
           {incident.clip.status === "ready" && incident.clip.url && (
             <div className="incident-clip-actions">

@@ -550,6 +550,7 @@ class IncidentClip(Base):
     __tablename__ = "incident_clips"
     incident_id: Mapped[str] = mapped_column(String(64), ForeignKey("incidents.id"), primary_key=True)
     video: Mapped[bytes] = mapped_column(LargeBinary)
+    size_bytes: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
