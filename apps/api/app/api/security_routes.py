@@ -19,6 +19,7 @@ import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.dependencies import get_current_user
@@ -250,8 +251,15 @@ async def hold_incident_clip(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    incident = await _get_incident_or_404(session, incident_id)
+    incident = (await session.execute(
+        select(Incident).where(Incident.id == incident_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
     if incident.clip_status != "ready":
+        raise HTTPException(status_code=409, detail="No completed clip to keep")
+    if await session.get(IncidentClip, incident_id) is None:
         raise HTTPException(status_code=409, detail="No completed clip to keep")
     incident.clip_hold = payload.hold
     await audit_service.record(

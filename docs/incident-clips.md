@@ -46,6 +46,10 @@ Incident JSON includes `{clip:{status,url}, clip_hold}`. A signed-in human
 can set `PUT /api/v1/security/incidents/{id}/clip/hold` with
 `{"hold":true}` to protect a ready clip; clearing the hold restores normal
 retention. There is no public blob container or pre-signed link.
+The hold request locks the incident before verifying that the clip still
+exists, so a concurrent purge either sees the hold and preserves the clip
+or finishes first and causes the hold request to return HTTP 409. A missing
+clip can never be reported as successfully kept.
 
 The existing zone editor also offers **Alert for activity in this zone**.
 It defaults on; switching it off suppresses *incident creation* for events

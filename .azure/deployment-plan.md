@@ -70,7 +70,9 @@ Eufy edge 21 passed; web 195 passed, lint/typecheck/production build green;
 Python Ruff green; isolated SQLite `alembic upgrade head` reached
 `0015_incident_clips`. A targeted review identified two capture/hold races,
 both corrected before final regression testing. New aggregate admission
-limits passed local tests; fresh PR CI is required before signoff. Previous PR CI passed on the
+limits passed local tests; a clip-hold/purge row-lock race was also addressed
+with a two-order transactional regression. Fresh PR CI is required before
+signoff. Previous PR CI passed on the
 earlier release commit, including Linux Docker image builds; a real private HLS playback
 check still requires the development edge environment. Do not mark this
 release `Validated` using

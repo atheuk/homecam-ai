@@ -72,6 +72,12 @@ async def test_clip_capture_playback_hold_and_retention(client, anonymous_client
             assert await session.get(IncidentClip, incident_id) is None
             assert (await session.get(Incident, incident_id)).clip_status == "expired"
         assert (await client.get(path, headers=headers)).status_code == 404
+        # Retention won the transaction first: a late hold must not report
+        # success on evidence that was already removed.
+        late_hold = await client.put(path + "/hold", json={"hold": True}, headers=headers)
+        assert late_hold.status_code == 409
+        async with SessionLocal() as session:
+            assert (await session.get(Incident, incident_id)).clip_hold is False
     finally:
         for task in list(incident_clips._tasks):
             task.cancel()
