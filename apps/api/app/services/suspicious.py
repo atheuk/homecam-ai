@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..models.db import Event, Person
-from ..ai.detector import Detection
+from ..ai.detector import BoundingBox, Detection
 from ..ai.zones import Zone, intersection_area
 from .persons import trust_of
 
@@ -103,8 +103,12 @@ def score(
     visits = int(signals.get("return_visits") or 0)
     if visits >= (settings.suspicious_night_return_visits if night else settings.suspicious_return_visits):
         value += 3
-        period = "within 2 hours at night" if night else "today"
-        reasons.append(f"possibly the same unrecognised person returned {visits} times {period}")
+        hours = (settings.suspicious_night_return_window_hours if night
+                 else settings.suspicious_return_window_hours)
+        reasons.append(
+            f"a person with a similar appearance was seen here {visits} times "
+            f"in the last {hours:g} hours"
+        )
     behavioural = bool(reasons)
     if behavioural:
         lower = (clothing or "").casefold()
@@ -162,7 +166,55 @@ async def returning_visits(session: AsyncSession, row: Event, at: datetime, nigh
             "appearance_confidence": row.person_confidence}
 
 
-def observe(scene, detections: list[Detection], zones: list[Zone], now: float) -> list:
+async def is_trusted_event(session: AsyncSession, row: Event) -> bool:
+    """Human trust applies to every behaviour signal, not only repeat visits."""
+    if not row.person_id:
+        return False
+    person = await session.get(Person, row.person_id)
+    return trust_of(person) == "trusted" and (
+        row.person_confirmed or row.person_confidence is not None
+        and row.person_confidence >= settings.person_match_threshold
+    )
+
+
+async def matched_person_for_box(
+    session: AsyncSession, camera_id: str, box: BoundingBox, now: float
+) -> str | None:
+    """Associate a box only with a recent confident sighting, including untrusted ones."""
+    recent = datetime.fromtimestamp(now - settings.suspicious_gap_seconds, timezone.utc)
+    current = datetime.fromtimestamp(now + settings.suspicious_gap_seconds, timezone.utc)
+    results = await session.execute(
+        select(Event, Person)
+        .join(Person, Event.person_id == Person.id)
+        .where(
+            Event.camera_id == camera_id,
+            Event.start_time >= recent,
+            Event.start_time <= current,
+        )
+        .order_by(Event.start_time.desc())
+        .limit(20)
+    )
+    for event, person in results:
+        if not (event.person_confirmed or
+                event.person_confidence is not None and
+                event.person_confidence >= settings.person_match_threshold):
+            continue
+        photographed = ((event.event_metadata or {}).get("best_photo") or {}).get("detection") or {}
+        coords = photographed.get("bbox") or {}
+        if photographed.get("label") != "person":
+            continue
+        try:
+            matched = BoundingBox(*(float(coords[key]) for key in ("x1", "y1", "x2", "y2")))
+        except (KeyError, ValueError, TypeError):
+            continue
+        if box.area > 0 and intersection_area(box, matched) / box.area >= 0.5:
+            return person.id
+    return None
+
+
+async def observe(
+    session: AsyncSession, scene, detections: list[Detection], zones: list[Zone], now: float
+) -> list:
     """Advance lease-fenced scene records, one per spatial person track."""
     from .scene_state import SceneTransition, ZoneRecord, _boost_sampling
 
@@ -193,6 +245,22 @@ def observe(scene, detections: list[Detection], zones: list[Zone], now: float) -
             records.append(record)
         used.add(record.zone_id)
         data = dict(record.data)
+        matched_id = await matched_person_for_box(session, scene.camera_id, box, now)
+        if matched_id:
+            data["person_id"] = matched_id
+        person_id = data.get("person_id")
+        if person_id:
+            trusted_person = await session.get(Person, person_id)
+            if trust_of(trusted_person) == "trusted":
+                data.update({
+                    "last": now, "center": [cx, cy], "vehicle_since": None,
+                    "property_since": None, "sides": [], "alert_at": None,
+                })
+                record.data = data
+                scene.dirty_zones.add(record.zone_id)
+                continue
+            if trusted_person is None:
+                data.pop("person_id", None)
         nearby = [
             track for track in scene.tracks.values()
             if (track.state == "stable" or track.data.get("interacted")) and box.area > 0 and

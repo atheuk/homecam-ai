@@ -1,11 +1,16 @@
 """End-to-end AI pipeline tests: zones admin CRUD, semantic enrichment,
 AI analysis persistence, activity correlation and audio capability."""
 import pytest
+from datetime import datetime, timezone
+from io import BytesIO
+
+from PIL import Image
 from sqlalchemy import delete, select
 
 from app.ai.animals import AnimalIdentity
 from app.ai.appearance import Appearance
 from app.ai.detector import BoundingBox, Detection, mock_detector
+from app.ai.vehicles import VehicleIdentity
 from app.db import SessionLocal
 from app.models.db import Activity, AIAnalysis, CameraZone, Event
 from app.services import ai_pipeline
@@ -213,6 +218,52 @@ async def test_unnamed_species_still_produces_an_animal_event(client, monkeypatc
     assert body["animal"]["species"] == "other"
     assert body["animal"]["breed"] is None
     assert "An animal was seen" in body["description"]
+
+
+async def test_vehicle_identity_cached_on_scene_track_avoids_second_vision_call(client, monkeypatch):
+    class Identifier:
+        def __init__(self):
+            self.calls = 0
+
+        async def identify_vehicle_frames(self, crops):
+            self.calls += 1
+            return VehicleIdentity(vehicle_present="yes", make="Volkswagen",
+                                   model="Golf", colour="dark blue", body_type="hatchback")
+
+    identifier = Identifier()
+    monkeypatch.setattr(ai_pipeline, "build_vehicle_identifier", lambda _settings: identifier)
+    mock_detector().set_script(
+        "mock-garden", [Detection("car", .95, BoundingBox(.15, .2, .85, .8))]
+    )
+    image = BytesIO()
+    Image.new("RGB", (640, 480), (45, 60, 90)).save(image, format="JPEG")
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as session:
+        first = Event(id="vehicle-cache-first", camera_id="mock-garden", type="vehicle",
+                      priority="normal", source="local-ai", start_time=now,
+                      description="vehicle arrived", event_metadata={"scene": {
+                          "kind": "vehicle", "transition": "arrived", "track_id": "track-1",
+                      }})
+        session.add(first)
+        await session.flush()
+        await ai_pipeline.enrich_event(session, first, {"type": "vehicle",
+            "description": "vehicle arrived", "camera_name": "garden"}, frames=[image.getvalue()])
+        assert identifier.calls == 1
+        identity = first.event_metadata["vehicle"]
+        second = Event(id="vehicle-cache-second", camera_id="mock-garden", type="vehicle",
+                       priority="normal", source="local-ai", start_time=now,
+                       description="vehicle returned", event_metadata={"scene": {
+                           "kind": "vehicle", "transition": "returned",
+                           "track_id": "track-1", "vehicle": identity,
+                       }})
+        session.add(second)
+        await session.flush()
+        await ai_pipeline.enrich_event(session, second, {"type": "vehicle",
+            "description": "vehicle returned", "camera_name": "garden"}, frames=[image.getvalue()])
+        assert identifier.calls == 1
+        assert second.event_metadata["vehicle"] == identity
+        assert "Volkswagen Golf" in second.description
+        await session.rollback()
 
 
 async def test_identification_failure_never_breaks_the_event(client, monkeypatch):

@@ -324,7 +324,7 @@ as an alert reason. A photo alone cannot establish intent.
 | Driveway/street-facing property zone >= 90s | +2 |
 | Visibly trying handle / hands at vehicle | +1.5 each |
 | Other allowlisted visible action | +0.75 each |
-| Possibly same unrecognised appearance, 3 visits/24h or 2 visits/2h at night | +3 |
+| Similar unrecognised appearance, 3 visits/24h or 2 visits/2h at night | +3 |
 | Visible hood up / face covered / balaclava | +0.5, **only with behaviour** |
 | Night / armed away or night | ×1.25 each, **only with behaviour** |
 | Historically unusual time | +0.75, **only with behaviour** |
@@ -333,8 +333,9 @@ Scores >= 3 are `elevated`; >= 5 are `suspicious` and can open a
 `suspicious_activity` incident while armed away/night. While home or disarmed
 there is only an event/notification, never an incident. Every verdict stores
 reasons, score and linked visit event IDs. Repeat visits use the existing
-appearance embedding and exclude named or human-trusted people; the wording
-always says **possibly the same person**, never asserts identity. Clothing
+appearance embedding and exclude named or human-trusted people; all behaviour
+signals also skip a confidently matched human-trusted person. The wording says
+**a person with a similar appearance**, never asserts identity. Clothing
 contributes only weak context because hoodies are normal attire, not evidence
 of intent; it cannot alert by itself. No autonomous deterrence or dispatch.
 Sampling at the mailbox or beside a tracked parked vehicle reuses the

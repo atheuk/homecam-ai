@@ -112,6 +112,7 @@ async def apply_signals(session: AsyncSession, row: Event, *, mode: str | None =
 
     if settings.suspicious_enabled and (row.type in {"person", "suspicious_activity"}
                                         or "mailbox_visit" in tags):
+        trusted = await suspicious.is_trusted_event(session, row)
         at = row.start_time or datetime.now(timezone.utc)
         at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
         hour = at.astimezone(ZoneInfo(settings.home_timezone)).hour
@@ -121,10 +122,10 @@ async def apply_signals(session: AsyncSession, row: Event, *, mode: str | None =
         if row.type == "person":
             evidence.update(await suspicious.returning_visits(session, row, at, night))
         appearance = metadata.get("appearance") or {}
-        verdict = suspicious.score(
+        verdict = ({"level": None} if trusted else suspicious.score(
             evidence, clothing=appearance.get("clothing"), mode=mode,
             night=night, unusual=unusual_hit,
-        )
+        ))
         if verdict["level"]:
             metadata["suspicious"] = verdict
             if verdict["level"] not in tags:
