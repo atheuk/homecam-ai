@@ -161,11 +161,65 @@ curl -X POST http://localhost:8000/api/v1/auth/register -H "Content-Type: applic
 curl -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" -d "{\"email\":\"owner@example.com\",\"password\":\"supersecret1\"}"
 ```
 
+## Instant incident alerts
+
+Incidents can be pushed out of the dashboard the moment they are raised or
+escalate. Everything is opt-in: with no channel configured, nothing is ever
+sent. Configure it under **Security → Instant incident alerts**, or with the
+`/api/v1/notifications/*` API (authentication required).
+
+| Channel | Transport | Snapshot images |
+| --- | --- | --- |
+| Web push | VAPID push to subscribed browsers (PWA installable) | Never — text and a deep link only |
+| ntfy | `POST` to a topic on `ntfy.sh` or your own server | Only with an access token configured and images enabled |
+| Telegram | Bot API `sendMessage` / `sendPhoto` | Only when images are enabled |
+| Webhook | `POST` JSON to an HTTPS URL you control, HMAC-signed | Never |
+
+An alert carries the camera name, incident kind and severity, a short
+deterministic summary, the local time and a link back to the incident. It
+never claims to know *who* someone is, consistent with the RAI rules in
+[docs/ai-features.md](docs/ai-features.md).
+
+Delivery is fire-and-forget on a background task with per-request timeouts,
+so a slow or broken channel can never delay event ingestion. Each incident is
+delivered once per channel (once more per escalation level), rate-limited per
+channel per hour, and suppressed during quiet hours unless the severity is at
+or above the configured override.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `NOTIFICATIONS_ENABLED` | `true` | Master switch; channels are still individually opt-in. |
+| `WEB_APP_BASE_URL` | empty | Public URL of the web app. Without it an alert carries no link. |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | empty | Web push keys. Web push stays unavailable until both are set. |
+| `VAPID_SUBJECT` | `mailto:admin@homecam.local` | Contact passed to the push service. |
+| `NOTIFICATION_TIMEOUT_SECONDS` | `10` | Per-send HTTP timeout. |
+| `NOTIFICATION_MAX_PER_HOUR` | `20` | Default per-channel hourly cap. |
+
+Generate a VAPID key pair (never commit or log the private key):
+
+```bash
+node -e "const{generateKeyPairSync}=require('crypto');const{publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'prime256v1'});const pub=publicKey.export({format:'jwk'});const b=s=>Buffer.from(s,'base64url');console.log('VAPID_PUBLIC_KEY',Buffer.concat([Buffer.from([4]),b(pub.x),b(pub.y)]).toString('base64url'));console.log('VAPID_PRIVATE_KEY',privateKey.export({format:'jwk'}).d)"
+```
+
+Channel secrets (ntfy token, Telegram bot token, webhook signing secret) are
+encrypted at rest with the same mechanism as camera provider secrets, are
+never returned by the API (`has_secret: true` is all you get back) and are
+never written to logs. Every channel configuration change is audit-logged.
+
+`pywebpush` is an optional dependency: if it is not installed, every other
+channel keeps working and the status endpoint reports web push as
+unavailable.
+
+To get alerts on a phone: open the web app, install it to the home screen
+(it ships a PWA manifest and service worker), then use **Enable alerts in
+this browser**. iOS only allows web push for an installed app. ntfy or
+Telegram work without installing anything.
+
 ## Limitations
 
 The mock snapshot is a deterministic placeholder, not a real image. MediaMTX is present but not connected to camera hardware. Authentication is a minimal local account system (PBKDF2, opaque DB-backed session tokens, failed-login lockout, and bulk session revocation; see `docs/security.md`); the dashboard has a shared sign-in and all household API routes require authentication. Production registration is disabled by default; an operator may temporarily configure `AUTH_BOOTSTRAP_SECRET` for controlled first-account enrollment, while the existing account remains usable without this setting. There is no email verification, password reset, MFA, or external identity provider integration. Dahua and Eufy code is an opt-in integration boundary with mocked contract tests; no live hardware verification has been claimed without a locally configured reachable LAN host/adapter.
 
-The AI pipeline ships with a deterministic mock detector and mock AI provider: the ONNX detector backend is opt-in and has **not** been verified here against a real model or hardware, no model weights are bundled, audio detection finds speech-like activity only (no transcription, no speaker identity) and is `UNAVAILABLE` because no provider currently exposes an audio buffer, there is no person identity/face clustering, and embeddings are stored as JSON arrays rather than a native pgvector column so similarity search is not index-accelerated yet (see `docs/ai-pipeline.md`). The security layer (`docs/security.md`) raises/tracks incidents and escalation levels but has no external notification/paging channel yet (push/SMS/email). Retention is now enforced (`docs/retention.md`) but ships disabled and dry-run-first, so an operator must deliberately enable it; it deletes database rows and blobs, not recorded video files, which are not produced by this stack yet. The modern AI features (`docs/ai-features.md`) ship with the same mock-first posture: natural-language search falls back to keyword matching whenever an event was never embedded or the mock AI provider is active and is not index-accelerated (embeddings are JSON arrays, ranked in Python over a bounded candidate window), the daily digest falls back to a deterministic template when the provider is unavailable, and deterrence is a mock no-op provider that by design executes nothing without an explicit authenticated human confirmation. There are no Azure, cloud AI inference, notifications, or production deployment integrations. Do not expose this development stack to the internet.
+The AI pipeline ships with a deterministic mock detector and mock AI provider: the ONNX detector backend is opt-in and has **not** been verified here against a real model or hardware, no model weights are bundled, audio detection finds speech-like activity only (no transcription, no speaker identity) and is `UNAVAILABLE` because no provider currently exposes an audio buffer, there is no person identity/face clustering, and embeddings are stored as JSON arrays rather than a native pgvector column so similarity search is not index-accelerated yet (see `docs/ai-pipeline.md`). The security layer (`docs/security.md`) raises/tracks incidents and escalation levels and can now notify outbound channels (web push, ntfy, Telegram, webhook - all opt-in, see "Instant incident alerts" above), though there is still no SMS or email channel. Retention is now enforced (`docs/retention.md`) but ships disabled and dry-run-first, so an operator must deliberately enable it; it deletes database rows and blobs, not recorded video files, which are not produced by this stack yet. The modern AI features (`docs/ai-features.md`) ship with the same mock-first posture: natural-language search falls back to keyword matching whenever an event was never embedded or the mock AI provider is active and is not index-accelerated (embeddings are JSON arrays, ranked in Python over a bounded candidate window), the daily digest falls back to a deterministic template when the provider is unavailable, and deterrence is a mock no-op provider that by design executes nothing without an explicit authenticated human confirmation. There are no Azure, cloud AI inference, or production deployment integrations. Do not expose this development stack to the internet.
 
 ## Repository
 

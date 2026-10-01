@@ -107,8 +107,11 @@ describe("SecurityPanel",()=>{
       ]),
     });
     await signIn();
-    expect(await screen.findByText("security.mode_changed")).toBeInTheDocument();
-    expect(document.body.textContent).not.toMatch(/password|secret|rtsp|token/i);
+    const auditAction=await screen.findByText("security.mode_changed");
+    // Scoped to the audit trail: other panels legitimately use words like
+    // "token" in their own labels.
+    const auditPanel=auditAction.closest("section");
+    expect(auditPanel?.textContent).not.toMatch(/password|secret|rtsp|token/i);
   });
 
   it("shows a camera health banner for open camera incidents", async()=>{

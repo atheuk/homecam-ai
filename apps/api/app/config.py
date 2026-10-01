@@ -506,6 +506,28 @@ class Settings(BaseSettings):
     # runs instead of one long transaction that blocks ingestion.
     retention_batch_size: int = Field(default=500, ge=1, le=10000)
     retention_max_batches_per_run: int = Field(default=20, ge=1, le=1000)
+    # --- Instant incident alerts (outbound notifications) -----------------
+    # Master switch for the whole outbound plane. Even with it on, nothing
+    # is sent until a human creates and enables at least one channel: a
+    # notification channel is always explicitly opt-in (see
+    # app/services/notifications/ and docs/security.md).
+    notifications_enabled: bool = True
+    # Hard ceiling on one outbound send. Notifications are dispatched in a
+    # background task so ingestion is never blocked, but a hung push
+    # service must still not pile up tasks forever.
+    notification_timeout_seconds: float = Field(default=6.0, gt=0.0, le=60.0)
+    # Public base URL of the web app, used to build the deep link carried by
+    # every notification ("open the incident"). Without it the payload
+    # simply carries no link rather than a broken one.
+    web_app_base_url: str | None = None
+    # VAPID keypair for Web Push (RFC 8292). Generated once per deployment
+    # and stored like any other secret; the *public* key is served to
+    # signed-in browsers, the private key never leaves the server.
+    vapid_public_key: str | None = None
+    vapid_private_key: str | None = None
+    # RFC 8292 "sub" claim: a mailto:/https: contact for this deployment
+    # that push services can use to report abuse.
+    vapid_subject: str = "mailto:homecam@localhost"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

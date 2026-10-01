@@ -205,6 +205,9 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
     where = f"the {row.zone} zone" if row.zone else "an unzoned area"
     severity = _SEVERITY_BY_EVENT_TYPE.get(row.type, "low")
 
+    # Tracks whether a merge actually raised the incident's severity, which
+    # is the only kind of update worth re-alerting a human about.
+    severity_raised = False
     async with _lock_for(row.camera_id, row.zone, "intrusion"):
         await _acquire_route_lock(session, row.camera_id, row.zone, "intrusion")
         existing = await _open_incident_for(session, row.camera_id, row.zone, "intrusion", now)
@@ -214,6 +217,7 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
             existing.last_seen_at = now
             if _severity_rank(severity) > _severity_rank(existing.severity):
                 existing.severity = severity
+                severity_raised = True
             existing.summary = (
                 f"{existing.event_count} {row.type} detections in {where} on {camera_name} "
                 f"since {existing.first_seen_at.strftime('%H:%M')}."
@@ -254,6 +258,8 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
     )
     await _maybe_attach_ai_summary(session, incident)
     await _broadcast(incident, "incident.created" if created else "incident.updated")
+    if created or severity_raised:
+        _notify(incident, "created" if created else "escalated")
     return incident
 
 
@@ -294,11 +300,30 @@ async def _route_suspicious(session: AsyncSession, row: Event, mode: str) -> Inc
         details={"kind": kind, "camera_id": row.camera_id, "event_id": row.id},
     )
     await _broadcast(incident, "incident.created" if created else "incident.updated")
+    if created:
+        _notify(incident, "created")
     return incident
 
 
 def _severity_rank(severity: str) -> int:
     return {"low": 0, "medium": 1, "high": 2, "critical": 3}.get(severity, 0)
+
+
+def _notify(incident: Incident, reason: str) -> None:
+    """Hand a finished incident to the outbound notification plane.
+
+    Deliberately synchronous and deliberately tiny: it takes a plain dict
+    snapshot and schedules a background task, so nothing in the ingestion
+    path waits on a push service and no ORM object escapes its session.
+    Imported locally to keep the incident module free of a hard dependency
+    on the notification plane.
+    """
+    from .notifications import notify_incident
+
+    try:
+        notify_incident(to_dict(incident), reason=reason)
+    except Exception:  # noqa: BLE001 - alerting is best-effort, never fatal
+        logger.warning("could not schedule notification for incident %s", incident.id, exc_info=True)
 
 
 def _is_package_removal(row: Event) -> bool:
@@ -388,6 +413,8 @@ async def _route_package_theft(
     )
     await _maybe_attach_ai_summary(session, incident)
     await _broadcast(incident, "incident.created" if created else "incident.updated")
+    if created:
+        _notify(incident, "created")
     return incident
 
 
@@ -466,6 +493,7 @@ async def raise_camera_health(
             await session.commit()
             await session.refresh(incident)
     await _broadcast(incident, "incident.created")
+    _notify(incident, "created")
     logger.warning("camera health incident raised: %s (%s)", camera_id, kind)
     return incident
 
@@ -539,6 +567,7 @@ async def escalate_due_incidents(session_factory) -> int:
             await session.commit()
             await session.refresh(incident)
             await _broadcast(incident, "incident.escalated")
+            _notify(incident, "escalated")
     return escalated
 
 

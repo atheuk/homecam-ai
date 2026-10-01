@@ -324,7 +324,71 @@ is rejected once the lockout commits first.
   provider. Production bootstrap is an operator-controlled one-time process,
   but these controls remain separate production-hardening work.
 
+## Outbound alerts (`app/services/notifications/`)
+
+Incidents reach a phone instead of only the dashboard. The design keeps the
+blast radius small: nothing is sent until a human adds a channel, and a
+broken channel can never affect ingestion.
+
+**Trigger points.** Five minimal hooks in `app/services/incidents.py` fire on
+incident creation (including `camera_offline` and other health incidents) and
+on each severity escalation. The hook is a synchronous, non-awaiting
+`notify_incident(dict)` call that schedules a background task and returns;
+it is passed a plain `to_dict()` payload, never an ORM instance, so a later
+commit cannot expire an attribute mid-send.
+
+**Policy before delivery** (`policy.py`). An alert is suppressed unless the
+incident's severity meets both the global and the per-channel minimum, and
+during quiet hours unless severity is at or above
+`quiet_hours_override_severity`. Arming mode is already respected upstream:
+an activity that does not raise an incident never produces an alert.
+
+**Dedupe and rate limiting are database-backed**, because the API runs more
+than one replica. `claim_delivery()` inserts a row into
+`notification_deliveries` *before* sending; a unique-constraint violation on
+`(channel_id, dedupe_key)` means another replica already claimed it. The key
+is `{incident_id}:{reason}:{escalation_level}`, so each escalation level
+alerts exactly once. The hourly cap is counted from the same table.
+
+**Secrets.** Channel secrets use the same encrypted-at-rest mechanism as
+camera provider credentials. `to_out()` returns `has_secret: true` and never
+the value; sending an empty string clears a secret. Failures are logged
+through `scrub()`, which strips tokens and query strings from any message
+before it reaches a log line. Every create/update/delete/test and settings
+change is audit-logged (`notification.channel.*`,
+`notification.settings.updated`), with the secret change recorded as a
+boolean only.
+
+**Snapshot images are gated on authenticated delivery.**
+`ChannelSpec.supports_images()` requires the admin to have explicitly enabled
+attachments *and* the channel type to be Telegram or ntfy *and*, for ntfy,
+an access token to be configured — an unauthenticated public topic never
+receives a snapshot. Web push and webhooks never carry an image; a web push
+alert is text plus a link that opens the app, so the image stays behind
+sign-in.
+
+**SSRF guard.** `validate_https_url()` rejects anything that is not HTTPS and
+resolves loopback, link-local, private and reserved address ranges, so an
+operator cannot aim a webhook or custom ntfy server at the cloud metadata
+endpoint or an internal service. A URL that embeds credentials
+(`https://user:pass@host/`) is rejected too, because `config` is stored in the
+clear and returned to the admin UI: a credential belongs in the encrypted
+secret field. Because a hostname that resolved publicly at save time can later
+resolve somewhere private (DNS rebinding), `assert_public_host()` re-resolves
+and re-checks the host immediately before every outbound request, including
+each stored web push endpoint. Redirects are disabled on every client.
+
+**Content.** `payload.py` builds the message from deterministic fields only —
+camera name, incident kind, severity, event count, local time — plus the
+existing incident summary. It makes no identity claim, consistent with
+`docs/ai-features.md`.
+
+**Degradation.** `pywebpush` is optional. If it is missing, or VAPID keys are
+unset, `GET /status` reports web push unavailable with a reason and every
+other channel is unaffected.
+
 ## Audit trail (`app/services/audit.py`)
+
 
 Every security-relevant human action — mode changes, acknowledge, resolve,
 evidence export, login/logout, register — is written to `audit_log`
@@ -366,6 +430,14 @@ shapes are unchanged. See `test_auth_hardening.py`.
 | GET | `/api/v1/security/incidents/{id}/export` | Evidence export JSON (audit-logged) |
 | GET | `/api/v1/security/audit-log` | Audit trail (`action` filter) |
 | POST | `/api/v1/auth/sessions/revoke-all` | Invalidate all of the current user's session tokens (audit-logged) |
+| GET | `/api/v1/notifications/status` | Channel/web-push availability, counts, VAPID public key |
+| GET / PUT | `/api/v1/notifications/settings` | Global alert policy (audit-logged) |
+| GET / POST | `/api/v1/notifications/channels` | List / create a channel (audit-logged) |
+| PATCH / DELETE | `/api/v1/notifications/channels/{id}` | Update / remove a channel (audit-logged) |
+| POST | `/api/v1/notifications/channels/{id}/test` | Send a test alert (audit-logged) |
+| GET | `/api/v1/notifications/push/subscriptions` | List this account's browser subscriptions |
+| POST | `/api/v1/notifications/push/subscriptions` | Register a browser for web push |
+| POST | `/api/v1/notifications/push/subscriptions/remove` | Unregister by endpoint |
 
 ## Frontend
 
@@ -378,6 +450,12 @@ the next transition and an explicit "manual override is active" note), the
 incident list with acknowledge/resolve/export/timeline
 actions and a visually distinct AI-summary badge, a camera-health banner
 derived from open `camera_*` incidents, and the audit trail.
+`NotificationsPanel.tsx` sits inside it and configures outbound alerts:
+global policy, quiet hours, per-channel enable/severity/snapshot opt-in,
+test sends, and the subscribe/unsubscribe control for this browser.
+Permission is requested only on an explicit click. Secret fields are
+write-only password inputs; nothing ever renders a stored secret. A tapped
+alert arrives as `?tab=security&incident=<id>` and highlights that card.
 
 ## Tests
 
@@ -392,5 +470,15 @@ regression test that the lockout threshold cannot be bypassed by
 simultaneous requests), `test_realtime.py` (SSE frame payload is never
 mutated in place, so concurrent subscribers all see the correct event
 name).
+`test_notifications_policy.py` (quiet hours including midnight wrap,
+severity gating, payload content and no-identity-claims, secret scrubbing,
+SSRF rejections, image-gating matrix, webhook signature),
+`test_notifications_dispatch.py` (delivery, dedupe, per-escalation-level
+alerting, rate limiting, failure recorded without leaking the secret,
+master switch), `test_notifications_api.py` (channel CRUD, secrets never
+returned, push-subscription lifecycle, 401 on every route, audit entries).
 Frontend: `SecurityPanel.test.tsx` (sign-in gating, mode display/switch,
-incident acknowledge, audit-log content-safety, camera-health banner).
+incident acknowledge, audit-log content-safety, camera-health banner) and
+`NotificationsPanel.test.tsx` (channel list, snapshot opt-in only for
+authenticated transports, write-only secret fields, settings save,
+failed-test reporting).

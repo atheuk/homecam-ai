@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DigestCard, SearchCard } from "./Insights";
+import NotificationsPanel from "./NotificationsPanel";
 import { consumeSse, SseResponseError } from "./sse";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -135,8 +136,8 @@ function timeAgo(value: string): string {
  * as AI-generated context, never as a substitute for the deterministic
  * kind/severity/status fields above it. */
 function IncidentCard({
-  incident, token, cameraName, onChanged,
-}: { incident: Incident; token: string | null; cameraName: string; onChanged: () => void }) {
+  incident, token, cameraName, onChanged, highlighted,
+}: { incident: Incident; token: string | null; cameraName: string; onChanged: () => void; highlighted?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -204,7 +205,10 @@ function IncidentCard({
   }
 
   return (
-    <article className={`incident-card severity-${incident.severity}`}>
+    <article
+      className={`incident-card severity-${incident.severity}${highlighted ? " highlighted" : ""}`}
+      {...(highlighted ? { "data-deep-linked": "true" } : {})}
+    >
       <div className="incident-head">
         <div>
           <span className={`badge status-${incident.status}`}>{STATUS_LABELS[incident.status] || incident.status}</span>
@@ -449,6 +453,16 @@ export default function SecurityPanel({
 
   const [auditLog, setAuditLog] = useState<AuditEntry[] | null>(null);
 
+  // A tapped alert arrives as ?incident=<id>. Show "all" so a resolved or
+  // acknowledged incident is still findable, and mark the card.
+  const [deepLinkedIncidentId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return new URLSearchParams(window.location.search).get("incident");
+  });
+  useEffect(() => {
+    if (deepLinkedIncidentId) setIncidentFilter("all");
+  }, [deepLinkedIncidentId]);
+
   useEffect(() => {
     if (authenticated !== undefined) setToken(authToken ?? null);
     else if (authToken) setToken(authToken);
@@ -654,6 +668,8 @@ export default function SecurityPanel({
       <SearchCard token={token} />
       <DigestCard token={token} />
 
+      <NotificationsPanel token={token} />
+
       <section className="panel admin-panel incidents-panel">
         <div className="panel-heading">
           <div><span className="eyebrow">SECURITY</span><h3>Incidents</h3></div>
@@ -674,6 +690,7 @@ export default function SecurityPanel({
             token={token}
             cameraName={cameraName(incident.camera_id)}
             onChanged={() => loadIncidents(token, incidentFilter)}
+            highlighted={incident.id === deepLinkedIncidentId}
           />
         ))}
       </section>

@@ -34,3 +34,10 @@ opencv-python-headless==4.11.0.86 ; platform_system != "Windows" or platform_mac
 # (PekingU/rtdetr_r18vd) are Apache-2.0, so they can ship in this image.
 # CPU-only; the model file itself is baked in by the Dockerfile.
 onnxruntime==1.26.0
+# Web Push (VAPID) delivery for instant incident alerts. Optional at
+# runtime: the webpush sender lazy-imports it and reports the channel as
+# unavailable when it is missing, so the rest of the API still boots.
+# cryptography (its dependency) has no Windows ARM64 wheel, which would
+# break local dev on that platform, so the install is skipped there and
+# web push is simply reported unavailable.
+pywebpush==2.0.0 ; platform_system != "Windows" or platform_machine != "ARM64"
