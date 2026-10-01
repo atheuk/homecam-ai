@@ -200,10 +200,19 @@ class DahuaClient:
 
     async def evidence_snapshot(self, channel: int) -> bytes:
         """One complete main-stream attempt, even for substream-pinned channels."""
-        response = await self._get(
-            "/cgi-bin/snapshot.cgi", {"channel": channel, "subtype": 0},
-            timeout=self.settings.evidence_snapshot_timeout_seconds,
-        )
+        deadline = self.settings.evidence_snapshot_timeout_seconds
+        try:
+            response = await asyncio.wait_for(
+                self._get(
+                    "/cgi-bin/snapshot.cgi", {"channel": channel, "subtype": 0},
+                    timeout=deadline,
+                ),
+                timeout=deadline,
+            )
+        except asyncio.TimeoutError as exc:
+            raise httpx.TimeoutException(
+                f"evidence snapshot exceeded its {deadline:g}s total deadline"
+            ) from exc
         response.raise_for_status()
         if not response.content.startswith(JPEG_START_OF_IMAGE) or _is_truncated_jpeg(response.content):
             raise ValueError(f"channel {channel} main-stream evidence snapshot is invalid or truncated")

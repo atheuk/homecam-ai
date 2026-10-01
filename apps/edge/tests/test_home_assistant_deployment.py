@@ -1,6 +1,8 @@
 """Ensure the Home Assistant add-on carries event snapshot timeout settings."""
+import asyncio
 import importlib.util
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -57,6 +59,51 @@ async def test_addon_full_snapshot_uses_configured_timeout():
     assert len(requests) == 1
     assert requests[0].url.params["subtype"] == "0"
     assert requests[0].extensions["timeout"]["read"] == 1.25
+
+
+@pytest.mark.asyncio
+async def test_addon_evidence_deadline_includes_waiting_for_the_nvr_lock():
+    settings = homecam_edge.EdgeSettings(
+        dahua_host="192.0.2.1",
+        dahua_username="user",
+        dahua_password="password",
+        evidence_snapshot_timeout_seconds=0.04,
+    )
+    client = homecam_edge.DahuaClient(settings=settings)
+    started = time.monotonic()
+    async with client._lock:
+        with pytest.raises(httpx.TimeoutException, match="total deadline"):
+            await client.evidence_snapshot(1)
+    assert time.monotonic() - started < 0.2
+
+
+@pytest.mark.asyncio
+async def test_addon_evidence_deadline_caps_slow_drip_response():
+    class SlowDrip(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for part in (b"\xff\xd8", b"\x00", b"\x00", b"\x00", b"\x00", b"\xff\xd9"):
+                await asyncio.sleep(0.02)
+                yield part
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, stream=SlowDrip())
+
+    settings = homecam_edge.EdgeSettings(
+        dahua_host="192.0.2.1",
+        dahua_username="user",
+        dahua_password="password",
+        evidence_snapshot_timeout_seconds=0.07,
+    )
+    client = homecam_edge.DahuaClient(settings=settings, transport=httpx.MockTransport(handler))
+    started = time.monotonic()
+    with pytest.raises(httpx.TimeoutException, match="total deadline"):
+        await client.evidence_snapshot(1)
+    elapsed = time.monotonic() - started
+    assert len(requests) == 1
+    assert 0.05 <= elapsed < 0.2, "deadline must stop slow-drip bodies, not reset per chunk"
 
 
 def test_addon_options_are_wired_through_supervisor_to_the_connector():

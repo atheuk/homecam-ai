@@ -13,6 +13,7 @@ import pytest
 from PIL import Image
 from sqlalchemy import select
 
+from _auth import auth_headers
 from app.ai.vision import (
     NO_PERSON_CAPTION,
     LocalImageEmbedder,
@@ -80,10 +81,13 @@ async def test_event_photo_is_served_as_real_image_bytes(client):
     """
     event_id = await _make_event()
 
-    response = await client.get(f"/api/v1/events/{event_id}/photo")
+    url = f"/api/v1/events/{event_id}/photo"
+    assert (await client.get(url)).status_code == 401
+    response = await client.get(url, headers=await auth_headers(client))
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.headers["cache-control"] == "private, no-store"
     assert response.content == JPEG_BYTES
     assert response.content[:2] == b"\xff\xd8"  # real JPEG magic bytes
 
@@ -101,7 +105,11 @@ async def test_event_listing_advertises_photo_and_caption(client):
 async def test_missing_photo_is_reported_not_faked(client):
     event_id = await _make_event(with_photo=False)
 
-    assert (await client.get(f"/api/v1/events/{event_id}/photo")).status_code == 404
+    assert (
+        await client.get(
+            f"/api/v1/events/{event_id}/photo", headers=await auth_headers(client)
+        )
+    ).status_code == 404
     payload = (await client.get(f"/api/v1/events/{event_id}")).json()
     assert payload["has_photo"] is False
     assert payload["photo_url"] is None
@@ -190,9 +198,12 @@ async def test_person_photo_serves_their_cover_image(client):
         await client.post(f"/api/v1/events/{event_id}/person", json={"name": "Jo"})
     ).json()["id"]
 
-    response = await client.get(f"/api/v1/persons/{person_id}/photo")
+    url = f"/api/v1/persons/{person_id}/photo"
+    assert (await client.get(url)).status_code == 401
+    response = await client.get(url, headers=await auth_headers(client))
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
     assert response.content == JPEG_BYTES
 
 
@@ -357,7 +368,9 @@ async def test_real_ingestion_stores_a_viewable_photo_and_an_identity(client):
     assert detail["has_photo"] is True, "pipeline did not persist photo bytes"
     assert detail["person_id"], "pipeline did not attach an identity"
 
-    photo = await client.get(f"/api/v1/events/{event_id}/photo")
+    photo = await client.get(
+        f"/api/v1/events/{event_id}/photo", headers=await auth_headers(client)
+    )
     assert photo.status_code == 200
     assert len(photo.content) > 0
 

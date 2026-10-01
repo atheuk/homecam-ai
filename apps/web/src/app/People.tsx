@@ -230,7 +230,8 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
       {event.has_photo&&event.photo_url
         ? <ZoomablePhoto src={mediaUrl(event.photo_url)!}
             fullSrc={event.full_photo_url ? mediaUrl(event.full_photo_url) : null}
-            loginUrl={event.full_photo_url ? mediaUrl("/api/v1/auth/login") : undefined}
+            loginUrl={mediaUrl("/api/v1/auth/login")}
+            requiresAuth
             alt={event.photo_caption||`${event.type} detected`}
             caption={event.photo_caption}
             boxes={event.photo_boxes}
@@ -324,7 +325,10 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
   return <li className="person-row">
     <div className="person-avatar">
       {person.photo_url
-        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!} alt={person.display_name} title={person.display_name}/>
+        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!}
+            loginUrl={mediaUrl("/api/v1/auth/login")}
+            requiresAuth
+            alt={person.display_name} title={person.display_name}/>
         : <span className="muted">?</span>}
     </div>
     <div className="person-info">

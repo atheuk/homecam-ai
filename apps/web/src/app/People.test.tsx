@@ -46,10 +46,10 @@ describe("event photo card",()=>{
     expect(screen.getByRole("link",{name:"evt-older"})).toHaveAttribute("href","#event-evt-older");
   });
 
-  it("shows the detected person's photo, not a server-side file path",()=>{
+  it("keeps the detected person's protected photo hidden until authentication",()=>{
     render(<EventCard event={EVENT} persons={[]} onChanged={()=>{}}/>);
-    const image=screen.getByRole("img") as HTMLImageElement;
-    expect(image.src).toContain("/api/v1/events/evt-1/photo");
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.getByText("Sign in to view photo")).toBeInTheDocument();
     expect(screen.queryByText(/media[\\/]best-photos/)).not.toBeInTheDocument();
   });
 
@@ -58,9 +58,10 @@ describe("event photo card",()=>{
     expect(screen.getByText(/An adult in a dark jacket carrying a parcel/)).toBeInTheDocument();
   });
 
-  it("uses the caption as alt text for screen readers",()=>{
+  it("uses a descriptive accessible label for protected photo controls",()=>{
     render(<EventCard event={EVENT} persons={[]} onChanged={()=>{}}/>);
-    expect(screen.getByAltText("An adult in a dark jacket carrying a parcel.")).toBeInTheDocument();
+    expect(screen.getByRole("button",{name:/open person detected on front yard/i}))
+      .toBeInTheDocument();
   });
 
   it("says so when no photo was captured rather than showing a broken image",()=>{

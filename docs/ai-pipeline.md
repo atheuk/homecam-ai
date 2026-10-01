@@ -137,10 +137,10 @@ frame — cropped with 8% padding and a minimum readable crop — under
 `MEDIA_ROOT/best-photos/`. The durable copy is stored in `event_photos`;
 the original full-resolution frame is stored in `event_evidence` as `full`.
 `photo_url` serves the crop and `full_photo_url` opens the original frame
-in the zoomable viewer after sign-in, with full-frame detection boxes.
-The full-frame endpoint requires a bearer token and sends
-`Cache-Control: private, no-store`; the viewer fetches it as a temporary
-blob URL that is revoked on close. `photo_width`,
+in the zoomable viewer after sign-in, with full-frame detection boxes. Both
+the event crop and person-cover photo endpoints require a bearer token and
+send `Cache-Control: private, no-store`; the viewer fetches them as temporary
+blob URLs that are revoked on close. `photo_width`,
 `photo_height`, `full_photo_width` and `full_photo_height` expose their
 resolutions. The local `best_photo_path` / `thumbnail_path` mirror is
 diagnostic only.

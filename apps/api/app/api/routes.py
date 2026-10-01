@@ -433,7 +433,11 @@ async def digest(
 
 
 @router.get("/events/{event_id}/photo")
-async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
+async def event_photo(
+    event_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
     """The stored best photo for an event, as real renderable image bytes.
 
     Served from the database rather than ``media_root`` because the deployed
@@ -447,8 +451,7 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
         content=photo.image,
         media_type=photo.content_type or "image/jpeg",
         headers={
-            # Photos are immutable once captured, so let the browser keep them.
-            "Cache-Control": "public, max-age=86400",
+            "Cache-Control": "private, no-store",
             "Content-Disposition": f'inline; filename="{event_id}.jpg"',
         },
     )
@@ -646,7 +649,11 @@ async def merge_persons(
 
 
 @router.get("/persons/{person_id}/photo")
-async def person_photo(person_id: str, session: AsyncSession = Depends(get_db)):
+async def person_photo(
+    person_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
     """Representative photo for an identity (their best-rated sighting)."""
     person = await person_service.get_person(session, person_id)
     if person is None:
@@ -659,7 +666,7 @@ async def person_photo(person_id: str, session: AsyncSession = Depends(get_db)):
     return Response(
         content=photo.image,
         media_type=photo.content_type or "image/jpeg",
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
