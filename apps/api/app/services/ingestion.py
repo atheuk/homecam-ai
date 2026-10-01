@@ -46,7 +46,7 @@ from ..ai import camera_health
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from . import ai_pipeline, scene_state
+from . import ai_pipeline, scene_dedup, scene_state
 from . import events as event_service
 from . import incidents as incident_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
@@ -277,8 +277,9 @@ async def _emit_scene_transitions(
         return 0
     for transition in transitions:
         frames = transition.frames or stream_frames
+        event_id = "evt-" + uuid.uuid4().hex[:16]
         event = {
-            "id": "evt-" + uuid.uuid4().hex[:16],
+            "id": event_id,
             "camera_id": camera_id,
             "camera_name": camera_name,
             "type": transition.event_type,
@@ -292,8 +293,31 @@ async def _emit_scene_transitions(
         }
         try:
             async with session_factory() as session:
+                if transition.dedup_key:
+                    # The claim is only flushed here. It commits in the same
+                    # transaction as the event row (persist_event's commit),
+                    # so an error or crash before the event is persisted
+                    # rolls the claim back too and never suppresses the
+                    # removal on the other replica.
+                    won = await scene_dedup.claim(
+                        session,
+                        transition.dedup_key,
+                        transition.observed_at if transition.observed_at is not None else time.time(),
+                        transition.dedup_window_seconds,
+                        event_id,
+                        commit=False,
+                    )
+                    if not won:
+                        logger.info(
+                            "scene transition %s: %s deduplicated across replicas", camera_id, transition.transition
+                        )
+                        continue
                 row = await event_service.create_and_broadcast_event(
-                    session, event, trigger_frame=(frames or [image])[0], frames=frames
+                    session,
+                    event,
+                    trigger_frame=(frames or [image])[0],
+                    frames=frames,
+                    evidence_images=transition.evidence_images,
                 )
                 await scene_state.note_event(session, transition, row.id)
         except Exception:  # noqa: BLE001

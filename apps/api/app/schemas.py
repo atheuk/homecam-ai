@@ -147,6 +147,7 @@ class IncidentOut(BaseModel):
     last_escalated_at: datetime | None = None
     summary: str
     ai_summary: str | None = None
+    evidence: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -167,3 +168,44 @@ class AuditLogOut(BaseModel):
     details: dict
     created_at: datetime
 
+
+
+class DeterrenceActionIn(BaseModel):
+    """A *proposal* to run a deterrent. Creating one never executes it."""
+
+    camera_id: str
+    # Closed set - deliberately contains nothing that contacts a third
+    # party or emergency services. See app/services/deterrence.py.
+    action: Literal["siren", "light", "voice"]
+    reason: str = Field(default="", max_length=300)
+    incident_id: str | None = None
+
+
+class DeterrenceActionOut(BaseModel):
+    id: str
+    camera_id: str
+    action: str
+    status: str
+    reason: str
+    incident_id: str | None = None
+    requested_by: str | None = None
+    confirmed_by: str | None = None
+    result: str | None = None
+    created_at: datetime
+    expires_at: datetime
+    resolved_at: datetime | None = None
+
+
+class DeterrenceCapabilityOut(BaseModel):
+    action: str
+    supported: bool
+    detail: str
+
+
+class DeterrenceCapabilitiesOut(BaseModel):
+    enabled: bool
+    provider: str
+    # Always True. Present in the payload so any client can see, without
+    # reading the docs, that HomeCam will not fire a deterrent on its own.
+    requires_human_confirmation: bool
+    actions: list[DeterrenceCapabilityOut]

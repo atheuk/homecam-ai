@@ -21,9 +21,10 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..db import get_db
-from ..models.db import AIAnalysis, Event, EventPhoto, Person
+from ..models.db import AIAnalysis, Event, EventEvidence, EventPhoto, Person, User
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from ..providers.capabilities import AUDIO_DETECTION
 from ..schemas import (
@@ -42,8 +43,10 @@ from ..ai.audio import analyze_pcm
 from ..ai.vision import get_image_embedder
 from ..services import activities as activity_service
 from ..services import cameras as camera_service
+from ..services import digest as digest_service
 from ..services import events as event_service
 from ..services import persons as person_service
+from ..services import search as search_service
 from ..services.stream_frames import stream_hub
 from ..services.provider_registry import (
     active_mock_providers,
@@ -355,6 +358,75 @@ async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dic
     return payloads
 
 
+@router.get("/search")
+async def search(
+    q: str,
+    camera_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 20,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Natural-language event search ("blue van in the driveway last night").
+
+    Requires sign-in: results carry AI descriptions, priority reasons and
+    loitering/package-theft signals, the same class of data the incident
+    endpoints protect. Queries asking *who* someone is are refused or
+    stripped first - see :mod:`app.ai.query_moderation`.
+    """
+    if not settings.search_enabled:
+        raise HTTPException(status_code=503, detail="Search is disabled")
+    moderation, hits = await search_service.search_events(
+        session, q, camera_id=camera_id, since=since, until=until, limit=limit
+    )
+    if moderation.refused:
+        return {
+            "query": q,
+            "refused": True,
+            "notice": moderation.message,
+            "blocked_categories": list(moderation.categories),
+            "results": [],
+        }
+    payloads = await _decorate_events(session, [hit.row for hit in hits])
+    for payload, hit in zip(payloads, hits):
+        payload["score"] = round(hit.score, 4)
+        payload["semantic_score"] = round(hit.semantic_score, 4)
+        payload["keyword_score"] = round(hit.keyword_score, 4)
+    return {
+        "query": moderation.query,
+        "refused": False,
+        "notice": moderation.message,
+        "blocked_categories": list(moderation.categories),
+        "results": payloads,
+    }
+
+
+@router.get("/digest")
+async def digest(
+    date: str | None = None,
+    refresh: bool = False,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """The day-in-review digest. Defaults to today (UTC).
+
+    Requires sign-in, like the incident endpoints: the digest exposes
+    incident ids and summaries.
+    """
+    if not settings.digest_enabled:
+        raise HTTPException(status_code=503, detail="Digest is disabled")
+    if date:
+        try:
+            day = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from None
+    else:
+        day = datetime.now(timezone.utc).date()
+    result = await digest_service.generate(session, day, refresh=refresh)
+    return result.as_dict()
+
+
 @router.get("/events/{event_id}/photo")
 async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
     """The stored best photo for an event, as real renderable image bytes.
@@ -373,6 +445,32 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
             # Photos are immutable once captured, so let the browser keep them.
             "Cache-Control": "public, max-age=86400",
             "Content-Disposition": f'inline; filename="{event_id}.jpg"',
+        },
+    )
+
+
+@router.get("/events/{event_id}/evidence/{label}")
+async def event_evidence(
+    event_id: str,
+    label: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """A stored labelled evidence image for an event (e.g. package
+    ``before``/``after`` crops referenced by ``Incident.evidence``).
+
+    Authenticated because it is incident evidence, and served from the
+    database so any replica can return it. See ``app.models.db.EventEvidence``.
+    """
+    row = await session.get(EventEvidence, (event_id, label))
+    if row is None:
+        raise HTTPException(404, "No evidence stored for this event and label")
+    return Response(
+        content=row.image,
+        media_type=row.content_type or "image/jpeg",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "Content-Disposition": f'inline; filename="{event_id}-{label}.jpg"',
         },
     )
 

@@ -13,6 +13,7 @@ from .ai import camera_health
 from .config import settings
 from .db import SessionLocal, init_db
 from .services.cameras import sync_cameras
+from .services.digest_scheduler import digest_scheduler
 from .services.ingestion import ingestion_service
 from .services.provider_registry import discover_all_cameras
 
@@ -27,10 +28,12 @@ async def lifespan(app: FastAPI):
     await camera_health.seed_from_open_incidents(SessionLocal)
     if settings.event_ingestion_enabled:
         ingestion_service.start()
+    digest_scheduler.start()
     try:
         yield
     finally:
         await ingestion_service.stop()
+        await digest_scheduler.stop()
 
 
 app = FastAPI(title="HomeCam AI API", version="0.1.0", lifespan=lifespan)

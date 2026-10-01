@@ -300,6 +300,75 @@ class Settings(BaseSettings):
     # correct.
     auth_max_failed_attempts: int = Field(default=5, ge=1, le=100)
     auth_lockout_minutes: float = Field(default=15.0, gt=0.0)
+
+    # --- Modern AI security features (see docs/ai-features.md) -------------
+    # Natural-language event search. The query is embedded with the active
+    # AI provider and cosine-ranked against the per-event embeddings the AI
+    # pipeline already stores, then *blended* with a plain keyword match so
+    # the feature degrades to keyword search (rather than to nothing) on
+    # events that were never embedded.
+    search_enabled: bool = True
+    # How much of the blended score comes from the embedding. 0 = pure
+    # keyword search, 1 = pure semantic search.
+    search_embedding_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Results scoring below this are dropped rather than padded out.
+    search_min_score: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Newest N events considered before ranking. Ranking happens in Python
+    # so the same code path works on SQLite (tests) and PostgreSQL, which
+    # means the candidate set has to stay bounded.
+    search_candidate_limit: int = Field(default=500, ge=1, le=5000)
+    search_default_limit: int = Field(default=20, ge=1, le=200)
+
+    # Loitering: a person continuously present in one zone for longer than
+    # that zone's dwell threshold. Per-zone ``dwell_seconds`` overrides this
+    # default. Presence is tracked in the database, not in memory, because
+    # the API can run as two replicas.
+    loitering_detection_enabled: bool = True
+    zone_default_dwell_seconds: float = Field(default=60.0, gt=0.0)
+    # A gap longer than this between two sightings ends the visit and
+    # restarts the dwell clock: "came back twice" is not "stayed".
+    loitering_gap_seconds: float = Field(default=45.0, gt=0.0)
+    # Once flagged, the same zone is not flagged again for this long.
+    loitering_repeat_seconds: float = Field(default=300.0, ge=0.0)
+
+    # Package theft: a package that was present in a mailbox/porch zone
+    # before a visit and gone after it, escalated to an incident while the
+    # household is armed away/night.
+    package_theft_detection_enabled: bool = True
+
+    # Unusual activity: per-camera hour-of-week baseline learned from the
+    # event history. Purely a *timing* signal - it never involves identity.
+    unusual_activity_enabled: bool = True
+    unusual_activity_window_days: int = Field(default=28, ge=1, le=365)
+    # Below this many historical events for a camera there is no baseline
+    # worth trusting, so nothing is ever flagged.
+    unusual_activity_min_history: int = Field(default=50, ge=1)
+    # How far below the mean an hour-of-week slot has to be to count as
+    # "historically quiet".
+    unusual_activity_z_threshold: float = Field(default=1.5, ge=0.0)
+    unusual_activity_max_samples: int = Field(default=5000, ge=1)
+
+    # Daily home digest. Always available on demand; the background
+    # generator is opt-in so tests and dev runs do not spin a timer.
+    digest_enabled: bool = True
+    digest_scheduler_enabled: bool = False
+    digest_scheduler_interval_seconds: float = Field(default=3600.0, gt=0.0)
+    digest_max_notable_items: int = Field(default=8, ge=1, le=50)
+
+    # Smart notification priority (critical/high/normal/low) computed from
+    # event type, arming mode, zone, loitering/unusual/theft flags and
+    # detector confidence.
+    notification_priority_enabled: bool = True
+    # Events below this priority never open an incident, so the incident
+    # feed stays actionable. "low" disables the suppression entirely.
+    incident_min_priority: str = "normal"
+
+    # Deterrence (siren/light/voice). Off by default, and *never*
+    # autonomous: a request is only ever executed after an explicit,
+    # authenticated human confirmation. See docs/ai-features.md.
+    deterrence_enabled: bool = False
+    deterrence_confirmation_ttl_seconds: float = Field(default=300.0, gt=0.0)
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()

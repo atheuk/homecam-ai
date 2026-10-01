@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { DigestCard, SearchCard } from "./Insights";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -374,6 +375,9 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
           </p>
         )}
       </section>
+
+      <SearchCard token={token} />
+      <DigestCard token={token} />
 
       <section className="panel admin-panel incidents-panel">
         <div className="panel-heading">
