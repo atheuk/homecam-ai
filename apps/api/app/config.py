@@ -442,6 +442,71 @@ class Settings(BaseSettings):
     deterrence_enabled: bool = False
     deterrence_confirmation_ttl_seconds: float = Field(default=300.0, gt=0.0)
 
+    # --- Automatic arming schedules (docs/security.md) ---------------------
+    # Recurring windows that arm the household without anyone touching the
+    # app ("night 23:00-07:00 daily", "away weekdays 09:00-17:00"). The
+    # schedules themselves live in the database; these settings only decide
+    # whether the background applier runs, how often it looks, and what the
+    # household falls back to when no window is active.
+    arming_scheduler_enabled: bool = True
+    arming_scheduler_interval_seconds: float = Field(default=30.0, gt=0.0)
+    # Timezone the schedule's wall-clock times are interpreted in. Empty
+    # falls back to ``home_timezone`` (Europe/Amsterdam by default), so a
+    # household only ever configures this in one place.
+    arming_schedule_timezone: str = ""
+    # Mode applied when no window covers the current moment.
+    arming_schedule_default_mode: str = "disarmed"
+    # How far back a transition is still worth applying. A replica that was
+    # down over a long weekend should land on the schedule's *current*
+    # intent, not replay a week of boundaries; only the most recent
+    # boundary inside this window is ever applied.
+    arming_schedule_lookback_days: int = Field(default=8, ge=1, le=31)
+    # Shared secret for the integration endpoint used by external presence
+    # automations (Home Assistant). Unset (the default) disables the
+    # endpoint entirely - it then refuses every request rather than
+    # accepting an empty token. Every accepted call is audit-logged.
+    security_integration_token: str | None = None
+
+    # --- Data retention (docs/retention.md) --------------------------------
+    # HomeCam reported "retention_days: 30" long before anything deleted
+    # anything. These settings are the real policy, and
+    # ``GET /api/v1/settings`` reports them.
+    #
+    # ``retention_enabled`` runs the background purge job at all;
+    # ``retention_dry_run`` keeps that job counting-only, which is how a
+    # deployment starts: the first runs log exactly what *would* be deleted
+    # so nobody discovers the policy by losing data.
+    retention_enabled: bool = False
+    retention_dry_run: bool = True
+    retention_interval_seconds: float = Field(default=3600.0, gt=0.0)
+    # Events (and, with them, their photos, evidence, analyses and
+    # sightings) older than this. Never applied to an event on retention
+    # hold or still referenced by an incident.
+    retention_event_days: int = Field(default=30, ge=1, le=3650)
+    # Image blobs age out first: they are by far the largest rows, and an
+    # event's text/metadata stays useful (and searchable) without them.
+    retention_media_days: int = Field(default=30, ge=1, le=3650)
+    # AI analyses outlive nothing: capped at the event retention by
+    # construction, but configurable lower to drop model output sooner.
+    retention_ai_analysis_days: int = Field(default=30, ge=1, le=3650)
+    # Search embeddings are cleared from analyses this old (the analysis
+    # row itself stays until its own cutoff). Natural-language search then
+    # degrades to keyword matching for those events, which is exactly how
+    # it already behaves for never-embedded events.
+    retention_embedding_days: int = Field(default=30, ge=1, le=3650)
+    # Resolved incidents only. An open or acknowledged incident is never
+    # purged, whatever its age, and neither is any event it references.
+    retention_incident_days: int = Field(default=90, ge=1, le=3650)
+    # The audit trail is kept deliberately longer than the imagery it
+    # describes: "who armed the house, and when" is the record you need
+    # months later, and it contains no camera content.
+    retention_audit_days: int = Field(default=365, ge=1, le=3650)
+    # Rows per DELETE statement, and how many batches one run may do. Both
+    # bound a single purge so a large backlog is worked off over several
+    # runs instead of one long transaction that blocks ingestion.
+    retention_batch_size: int = Field(default=500, ge=1, le=10000)
+    retention_max_batches_per_run: int = Field(default=20, ge=1, le=1000)
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()

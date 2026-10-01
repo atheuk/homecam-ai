@@ -9,16 +9,19 @@ from .ai.detector import detector_status
 from .api.admin_routes import router as admin_router
 from .api.admin_routes import zones_router as admin_zones_router
 from .api.auth_routes import router as auth_router
+from .api.retention_routes import router as retention_router
 from .api.routes import router
 from .api.security_routes import router as security_router
 from .auth.dependencies import COOKIE_NAME
 from .ai import camera_health
 from .config import settings
 from .db import SessionLocal, init_db
+from .services.arming_scheduler import arming_scheduler
 from .services.cameras import sync_cameras
 from .services.digest_scheduler import digest_scheduler
 from .services.ingestion import ingestion_service
 from .services.provider_registry import discover_all_cameras
+from .services.retention_scheduler import retention_scheduler
 from .services import detector_watchdog
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -46,11 +49,15 @@ async def lifespan(app: FastAPI):
     if settings.event_ingestion_enabled:
         ingestion_service.start()
     digest_scheduler.start()
+    arming_scheduler.start()
+    retention_scheduler.start()
     try:
         yield
     finally:
         await ingestion_service.stop()
         await digest_scheduler.stop()
+        await arming_scheduler.stop()
+        await retention_scheduler.stop()
 
 
 app = FastAPI(title="HomeCam AI API", version="0.1.0", lifespan=lifespan)
@@ -80,6 +87,7 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(admin_zones_router)
 app.include_router(security_router)
+app.include_router(retention_router)
 
 
 @app.get("/health")

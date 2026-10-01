@@ -39,16 +39,19 @@ from ..schemas import (
     PersonUpdateIn,
     PhotoRatingIn,
     ProviderOutageIn,
+    RetentionHoldIn,
 )
 from ..ai.audio import analyze_pcm
 from ..ai.detector import SUPPORTED_BACKENDS, detector_status
 from ..ai.vision import get_image_embedder
 from ..services import activities as activity_service
+from ..services import audit as audit_service
 from ..services import cameras as camera_service
 from ..services import detector_watchdog
 from ..services import digest as digest_service
 from ..services import events as event_service
 from ..services import persons as person_service
+from ..services import retention as retention_service
 from ..services import search as search_service
 from ..services.ingestion import frame_stats as ingestion_service_stats
 from ..services.stream_frames import stream_hub
@@ -537,6 +540,36 @@ async def rate_event_photo(
     return {"id": row.id, "photo_rating": row.photo_rating}
 
 
+@router.put("/events/{event_id}/retention-hold")
+async def set_event_retention_hold(
+    event_id: str,
+    payload: RetentionHoldIn,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Mark an event "keep this", exempting it from the retention purge.
+
+    Deliberately a human-only switch: nothing in the pipeline ever sets or
+    clears it, so a hold outranks every age cutoff for as long as somebody
+    leaves it on.
+    """
+    row = await session.get(Event, event_id)
+    if row is None:
+        raise HTTPException(404, "Event not found")
+    row.retention_hold = payload.hold
+    await audit_service.record(
+        session,
+        "retention.hold_set" if payload.hold else "retention.hold_cleared",
+        actor_user_id=user.id,
+        target_type="event",
+        target_id=event_id,
+        details={"hold": payload.hold},
+    )
+    await session.commit()
+    await session.refresh(row)
+    return {"id": row.id, "retention_hold": row.retention_hold}
+
+
 @router.post("/events/{event_id}/person")
 async def assign_event_person(
     event_id: str, payload: PersonAssignIn, session: AsyncSession = Depends(get_db)
@@ -897,7 +930,10 @@ async def readiness():
 async def get_settings():
     return {
         "privacy_mode": "LOCAL ONLY",
-        "retention_days": 30,
+        # Reported from the retention policy that is actually enforced by
+        # ``app.services.retention``, not a constant.
+        "retention_days": retention_service.reported_retention_days(),
+        "retention": retention_service.policy(),
         "ai_provider": settings.ai_provider,
         "ai_detector_backend": settings.ai_detector_backend,
         "ai_analysis_enabled": settings.ai_analysis_enabled,

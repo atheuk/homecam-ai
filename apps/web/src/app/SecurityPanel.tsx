@@ -13,7 +13,54 @@ const MODES: { value: Mode; label: string; hint: string }[] = [
   { value: "night", label: "Night", hint: "Same coverage as Away. Use while everyone is home and asleep." },
 ];
 
-type SecurityMode = { mode: string; changed_by: string | null; changed_at: string };
+type ScheduleStatus = {
+  enabled: boolean;
+  timezone: string;
+  scheduled_mode: string;
+  active_schedule_id: string | null;
+  active_schedule_name: string | null;
+  next_transition_at: string | null;
+  next_transition_mode: string | null;
+  override_active: boolean;
+};
+
+type SecurityMode = {
+  mode: string;
+  changed_by: string | null;
+  changed_at: string;
+  changed_source?: string;
+  schedule?: ScheduleStatus | null;
+};
+
+type ArmingSchedule = {
+  id: string;
+  name: string;
+  mode: Mode;
+  days_of_week: number[];
+  start_time: string;
+  end_time: string;
+  enabled: boolean;
+  priority: number;
+};
+
+const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function describeDays(days: number[]): string {
+  const sorted = [...days].sort((a, b) => a - b);
+  if (sorted.length === 7) return "Every day";
+  if (sorted.join() === "0,1,2,3,4") return "Weekdays";
+  if (sorted.join() === "5,6") return "Weekends";
+  return sorted.map((day) => DAY_LABELS[day]).join(", ");
+}
+
+function formatWhen(value: string | null): string {
+  if (!value) return "not scheduled";
+  return new Date(value).toLocaleString(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 type Incident = {
   id: string;
@@ -202,6 +249,174 @@ function IncidentCard({
         </ul>
       )}
     </article>
+  );
+}
+
+/** Automatic arming schedules: recurring windows that arm the household on
+ * their own. Deliberately shows the next transition and whether the current
+ * mode is overriding the schedule, so "why is the house armed?" is always
+ * answerable from this panel. */
+function SchedulesCard({
+  token, status, onChanged,
+}: { token: string | null; status: ScheduleStatus | null | undefined; onChanged: () => void }) {
+  const [schedules, setSchedules] = useState<ArmingSchedule[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState("");
+  const [scheduleMode, setScheduleMode] = useState<Mode>("night");
+  const [days, setDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
+  const [startTime, setStartTime] = useState("23:00");
+  const [endTime, setEndTime] = useState("07:00");
+
+  const load = useCallback(async (activeToken: string | null) => {
+    const r = await fetch(`${API}/api/v1/security/schedules`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
+    if (!r.ok) {
+      setError("Could not load arming schedules.");
+      return;
+    }
+    setError(null);
+    setSchedules(await r.json());
+  }, []);
+
+  useEffect(() => {
+    load(token);
+  }, [load, token]);
+
+  async function send(path: string, method: string, body?: unknown) {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/api/v1/security/schedules${path}`, {
+        method,
+        headers: authHeaders(token),
+        credentials: "include",
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => null);
+        setError(typeof detail?.detail === "string" ? detail.detail : "Could not save the schedule.");
+        return false;
+      }
+      setError(null);
+      await load(token);
+      onChanged();
+      return true;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createSchedule(e: FormEvent) {
+    e.preventDefault();
+    if (!days.length) {
+      setError("Pick at least one day.");
+      return;
+    }
+    const created = await send("", "POST", {
+      name: name.trim() || `${scheduleMode} ${startTime}-${endTime}`,
+      mode: scheduleMode,
+      days_of_week: days,
+      start_time: startTime,
+      end_time: endTime,
+    });
+    if (created) {
+      setShowForm(false);
+      setName("");
+    }
+  }
+
+  return (
+    <section className="panel admin-panel schedules-panel">
+      <div className="panel-heading">
+        <div><span className="eyebrow">SECURITY</span><h3>Arming schedules</h3></div>
+        <button type="button" onClick={() => setShowForm((open) => !open)} disabled={busy}>
+          {showForm ? "Cancel" : "Add schedule"}
+        </button>
+      </div>
+      <p className="muted">
+        Recurring windows arm the household automatically, in {status?.timezone || "the household timezone"}. Changing
+        the mode by hand overrides the schedule until its next transition - nothing expires in between.
+      </p>
+      {status && (
+        <p className="muted schedule-status" data-testid="schedule-status">
+          Schedule wants <strong>{status.scheduled_mode}</strong>
+          {status.active_schedule_name ? ` (${status.active_schedule_name})` : ""}; next change to{" "}
+          <strong>{status.next_transition_mode || "-"}</strong> {formatWhen(status.next_transition_at)}.
+          {status.override_active ? " Manual override is active until then." : ""}
+        </p>
+      )}
+      {error && <p className="error">{error}</p>}
+      {showForm && (
+        <form className="admin-form schedule-form" onSubmit={createSchedule}>
+          <label>
+            Name
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nights" />
+          </label>
+          <label>
+            Mode
+            <select value={scheduleMode} onChange={(e) => setScheduleMode(e.target.value as Mode)}>
+              {MODES.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Start
+            <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} required />
+          </label>
+          <label>
+            End
+            <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} required />
+          </label>
+          <div className="day-picker" role="group" aria-label="Days of week">
+            {DAY_LABELS.map((label, day) => (
+              <button
+                type="button"
+                key={label}
+                className={days.includes(day) ? "active" : ""}
+                aria-pressed={days.includes(day)}
+                onClick={() =>
+                  setDays((current) =>
+                    current.includes(day) ? current.filter((d) => d !== day) : [...current, day].sort((a, b) => a - b),
+                  )
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button type="submit" disabled={busy}>Save schedule</button>
+        </form>
+      )}
+      {schedules !== null && !schedules.length && <p className="muted">No schedules yet - the mode only changes by hand.</p>}
+      {!!schedules?.length && (
+        <ul className="schedule-list">
+          {schedules.map((schedule) => (
+            <li key={schedule.id} className={schedule.enabled ? "" : "disabled"}>
+              <div>
+                <strong>{schedule.name}</strong> - {schedule.mode} {schedule.start_time}-{schedule.end_time}
+                <span className="muted"> ({describeDays(schedule.days_of_week)})</span>
+              </div>
+              <div className="schedule-actions">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => send(`/${schedule.id}`, "PUT", { enabled: !schedule.enabled })}
+                >
+                  {schedule.enabled ? "Disable" : "Enable"}
+                </button>
+                <button type="button" disabled={busy} onClick={() => send(`/${schedule.id}`, "DELETE")}>
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -419,7 +634,12 @@ export default function SecurityPanel({
           ))}
         </div>
         {mode && <p className="muted mode-hint">{MODES.find((option) => option.value === mode.mode)?.hint}</p>}
-        {mode?.changed_at && <p className="muted mode-changed">Last changed {timeAgo(mode.changed_at)}.</p>}
+        {mode?.changed_at && (
+          <p className="muted mode-changed">
+            Last changed {timeAgo(mode.changed_at)}
+            {mode.changed_source && mode.changed_source !== "manual" ? ` by the ${mode.changed_source} schedule` : ""}.
+          </p>
+        )}
         {modeError && <p className="error">{modeError}</p>}
         {cameraHealthIncidents.length > 0 && (
           <p className="error camera-health-banner">
@@ -428,6 +648,8 @@ export default function SecurityPanel({
           </p>
         )}
       </section>
+
+      <SchedulesCard token={token} status={mode?.schedule} onChanged={() => loadMode(token)} />
 
       <SearchCard token={token} />
       <DigestCard token={token} />
