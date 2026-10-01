@@ -128,7 +128,9 @@ UPDATE security_states SET mode = :mode, last_transition_at = :boundary
 ```
 
 The replica whose UPDATE reports `rowcount == 1` owns the transition and
-writes the audit entry; every other replica rolls back and does nothing.
+writes the audit entry in that same transaction — the claim is what stops
+the boundary from ever being retried, so a separate audit commit could lose
+the record to a crash. Every other replica rolls back and does nothing.
 Nothing is in-memory, so restarts and rolling deploys cannot double-apply
 or skip a transition (boundaries are searched back
 `ARMING_SCHEDULE_LOOKBACK_DAYS`, default 8 days).

@@ -67,6 +67,15 @@ Two protections outrank every cutoff:
   and description while the biometric-ish data is gone.
 - **Single-run safety.** Running in several replicas is harmless: deletes
   are idempotent and keyed on ids selected inside the same transaction.
+- **Holds are re-checked under a row lock.** Candidates are selected in one
+  statement and deleted in another, so under PostgreSQL's READ COMMITTED a
+  hold set in between would otherwise be missed. Before each delete the
+  purge re-reads the candidate events `FOR UPDATE` and drops any that have
+  since been held, which also makes a concurrent `PUT /retention-hold` wait
+  rather than race.
+- **Dry runs count in SQL.** Counts come from `SELECT count(*)`, never from
+  materialising ids, so the first dry run against a long-neglected database
+  stays cheap no matter how large the backlog is.
 
 ## Rolling it out conservatively
 

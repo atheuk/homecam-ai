@@ -190,6 +190,36 @@ async def _delete_event_children(session: AsyncSession, event_ids: list[str]) ->
     )
 
 
+async def _count(session: AsyncSession, statement) -> int:
+    """Row count for a candidate query.
+
+    Dry runs must not materialise every matching id: the whole point of the
+    dry run is to be safe to call against a long-neglected database, and a
+    backlog of millions of rows would then be loaded into the API process.
+    """
+    return int((await session.execute(select(func.count()).select_from(statement.subquery()))).scalar_one())
+
+
+async def _lock_unheld(session: AsyncSession, event_ids: list[str]) -> list[str]:
+    """Re-check ``retention_hold`` for ``event_ids`` while holding a row lock.
+
+    Candidates are selected in one statement and deleted in another, so under
+    PostgreSQL's READ COMMITTED a hold placed in between would otherwise be
+    missed and the held event deleted anyway. Locking the rows here makes a
+    concurrent ``PUT /retention-hold`` wait for this transaction, after which
+    it either finds the event gone (404) or has safely excluded it. SQLite
+    ignores ``FOR UPDATE`` and serialises writers anyway.
+    """
+    if not event_ids:
+        return []
+    statement = (
+        select(Event.id)
+        .where(Event.id.in_(event_ids), Event.retention_hold.is_(False))
+        .with_for_update()
+    )
+    return list((await session.execute(statement)).scalars().all())
+
+
 async def run(session: AsyncSession, *, dry_run: bool | None = None, now: datetime | None = None) -> RetentionReport:
     """Execute (or simulate) one retention pass.
 
@@ -215,9 +245,7 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
         Incident.status == "resolved", Incident.last_seen_at < cutoffs["incidents"]
     )
     if dry_run:
-        report.counts["incidents"] = len(
-            (await session.execute(incident_stmt)).scalars().all()
-        )
+        report.counts["incidents"] = await _count(session, incident_stmt)
     else:
         for _ in range(max_batches):
             ids = list((await session.execute(incident_stmt.limit(batch))).scalars().all())
@@ -258,9 +286,7 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
         photo_stmt = photo_stmt.where(Event.id.notin_(protected))
         evidence_stmt = evidence_stmt.where(Event.id.notin_(protected))
     if dry_run:
-        report.counts["media"] = len((await session.execute(photo_stmt)).scalars().all()) + len(
-            (await session.execute(evidence_stmt)).scalars().all()
-        )
+        report.counts["media"] = await _count(session, photo_stmt) + await _count(session, evidence_stmt)
     else:
         for stmt, model, column in (
             (photo_stmt, EventPhoto, EventPhoto.event_id),
@@ -270,9 +296,11 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
                 ids = list((await session.execute(stmt.limit(batch))).scalars().all())
                 if not ids:
                     break
-                await session.execute(delete(model).where(column.in_(ids)))
+                deletable = await _lock_unheld(session, ids)
+                if deletable:
+                    await session.execute(delete(model).where(column.in_(deletable)))
                 await session.commit()
-                report.counts["media"] += len(ids)
+                report.counts["media"] += len(deletable)
                 if len(ids) < batch:
                     break
             else:
@@ -282,7 +310,7 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
     # search degrades to keyword matching exactly as it does for events
     # that were never embedded.
     embedding_stmt = (
-        select(AIAnalysis.id)
+        select(AIAnalysis.id, AIAnalysis.event_id)
         .join(Event, Event.id == AIAnalysis.event_id)
         .where(
             AIAnalysis.created_at < cutoffs["embeddings"],
@@ -293,42 +321,48 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
     if protected:
         embedding_stmt = embedding_stmt.where(Event.id.notin_(protected))
     if dry_run:
-        report.counts["embeddings"] = len((await session.execute(embedding_stmt)).scalars().all())
+        report.counts["embeddings"] = await _count(session, embedding_stmt)
     else:
         for _ in range(max_batches):
-            ids = list((await session.execute(embedding_stmt.limit(batch))).scalars().all())
-            if not ids:
+            rows = list((await session.execute(embedding_stmt.limit(batch))).all())
+            if not rows:
                 break
-            await session.execute(
-                update(AIAnalysis)
-                .where(AIAnalysis.id.in_(ids))
-                .values(embedding=[], embedding_dimensions=0)
-            )
+            unheld = set(await _lock_unheld(session, [event_id for _, event_id in rows]))
+            ids = [analysis_id for analysis_id, event_id in rows if event_id in unheld]
+            if ids:
+                await session.execute(
+                    update(AIAnalysis)
+                    .where(AIAnalysis.id.in_(ids))
+                    .values(embedding=[], embedding_dimensions=0)
+                )
             await session.commit()
             report.counts["embeddings"] += len(ids)
-            if len(ids) < batch:
+            if len(rows) < batch:
                 break
         else:
             report.truncated = True
 
     analysis_stmt = (
-        select(AIAnalysis.id)
+        select(AIAnalysis.id, AIAnalysis.event_id)
         .join(Event, Event.id == AIAnalysis.event_id)
         .where(AIAnalysis.created_at < cutoffs["ai_analyses"], Event.retention_hold.is_(False))
     )
     if protected:
         analysis_stmt = analysis_stmt.where(Event.id.notin_(protected))
     if dry_run:
-        report.counts["ai_analyses"] = len((await session.execute(analysis_stmt)).scalars().all())
+        report.counts["ai_analyses"] = await _count(session, analysis_stmt)
     else:
         for _ in range(max_batches):
-            ids = list((await session.execute(analysis_stmt.limit(batch))).scalars().all())
-            if not ids:
+            rows = list((await session.execute(analysis_stmt.limit(batch))).all())
+            if not rows:
                 break
-            await session.execute(delete(AIAnalysis).where(AIAnalysis.id.in_(ids)))
+            unheld = set(await _lock_unheld(session, [event_id for _, event_id in rows]))
+            ids = [analysis_id for analysis_id, event_id in rows if event_id in unheld]
+            if ids:
+                await session.execute(delete(AIAnalysis).where(AIAnalysis.id.in_(ids)))
             await session.commit()
             report.counts["ai_analyses"] += len(ids)
-            if len(ids) < batch:
+            if len(rows) < batch:
                 break
         else:
             report.truncated = True
@@ -340,10 +374,12 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
             ids = await _purgeable_event_ids(session, cutoffs["events"], protected, batch)
             if not ids:
                 break
-            await _delete_event_children(session, ids)
-            await session.execute(delete(Event).where(Event.id.in_(ids)))
+            deletable = await _lock_unheld(session, ids)
+            if deletable:
+                await _delete_event_children(session, deletable)
+                await session.execute(delete(Event).where(Event.id.in_(deletable)))
             await session.commit()
-            report.counts["events"] += len(ids)
+            report.counts["events"] += len(deletable)
             if len(ids) < batch:
                 break
         else:
@@ -353,7 +389,7 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
     # describes, and contains no camera content.
     audit_stmt = select(AuditLog.id).where(AuditLog.created_at < cutoffs["audit_logs"])
     if dry_run:
-        report.counts["audit_logs"] = len((await session.execute(audit_stmt)).scalars().all())
+        report.counts["audit_logs"] = await _count(session, audit_stmt)
     else:
         for _ in range(max_batches):
             ids = list((await session.execute(audit_stmt.limit(batch))).scalars().all())

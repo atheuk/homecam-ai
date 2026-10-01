@@ -45,8 +45,6 @@ from .security_modes import DEFAULT_MODE, MODES, STATE_ID, get_state
 
 logger = logging.getLogger(__name__)
 
-_DAY_SECONDS = 24 * 60 * 60
-
 
 def schedule_timezone() -> ZoneInfo:
     """Timezone the schedule's wall-clock times are interpreted in.
@@ -152,19 +150,18 @@ def windows_between(
         except ValueError:
             logger.warning("skipping malformed arming schedule %s", schedule.id)
             continue
-        duration = (
-            datetime.combine(date(2000, 1, 2), end_time) - datetime.combine(date(2000, 1, 2), start_time)
-        ).total_seconds()
-        if duration <= 0:
-            # Wraps past midnight; equal times mean "the whole day".
-            duration += _DAY_SECONDS
         day = first_day
         while day <= last_day:
             if day.weekday() in days:
-                window_start = _local_to_utc(day, start_time, tz)
+                # Both ends are resolved as *wall-clock* times on their own
+                # local day rather than start + a fixed duration: across a DST
+                # shift a 23:00-07:00 window must still end at 07:00 local,
+                # not at 06:00 or 08:00. ``end <= start`` wraps past midnight,
+                # and equal times mean "the whole day".
+                end_day = day if end_time > start_time else day + timedelta(days=1)
                 window = Window(
-                    start=window_start,
-                    end=window_start + timedelta(seconds=duration),
+                    start=_local_to_utc(day, start_time, tz),
+                    end=_local_to_utc(end_day, end_time, tz),
                     mode=schedule.mode,
                     priority=schedule.priority,
                     schedule_id=schedule.id,
@@ -429,10 +426,12 @@ async def apply_due_transition(session: AsyncSession, now: datetime | None = Non
         # Another replica claimed this boundary; it owns the audit entry.
         await session.rollback()
         return None
-    await session.commit()
-    session.expire_all()
     if previous_mode != desired:
-        await audit_service.record(
+        # Staged, not recorded: the claim above is what stops this boundary
+        # from ever being retried, so the audit row must become durable in
+        # the *same* commit. Committing them separately would allow a crash
+        # to leave an automatic mode change with no audit trail at all.
+        audit_service.stage(
             session,
             "security.mode_changed",
             actor_user_id=None,
@@ -448,6 +447,8 @@ async def apply_due_transition(session: AsyncSession, now: datetime | None = Non
                 "schedule_name": window.schedule_name if window else None,
             },
         )
+    await session.commit()
+    session.expire_all()
     return {
         "mode": desired,
         "previous_mode": previous_mode,

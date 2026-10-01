@@ -57,15 +57,21 @@ def test_highest_priority_window_wins_when_they_overlap():
 
 
 def test_wall_clock_times_survive_a_dst_shift():
-    """23:00 stays 23:00 local across the spring-forward weekend."""
+    """23:00-07:00 keeps both its local edges across both DST changes."""
     night = _schedule()
-    # 2026-03-29 is the European DST change (02:00 -> 03:00 local).
-    before = _utc(2026, 3, 28, 23, 30)
-    after = _utc(2026, 3, 29, 23, 30)
-    assert arming_schedules.resolve([night], before, AMS)[0] == "night"
-    assert arming_schedules.resolve([night], after, AMS)[0] == "night"
-    # The offsets really did differ, so this is not a trivially equal pair.
-    assert before.hour != after.hour
+    # 2026-03-29 is the European spring-forward (02:00 -> 03:00 local), so the
+    # night window spanning it is only 7 hours long in real time; 2026-10-25 is
+    # the fall-back, where the same window lasts 9 hours. Resolving by local
+    # wall clock must keep 06:59 armed and 07:00 disarmed on both mornings,
+    # which naive start+duration arithmetic gets wrong by an hour each way.
+    for day, month in ((29, 3), (25, 10)):
+        eve = _utc(2026, month, day - 1, 23, 30)
+        assert arming_schedules.resolve([night], eve, AMS)[0] == "night"
+        assert arming_schedules.resolve([night], _utc(2026, month, day, 6, 59), AMS)[0] == "night"
+        assert arming_schedules.resolve([night], _utc(2026, month, day, 7, 0), AMS)[0] == "disarmed"
+        # The boundary instant itself is 07:00 local, not 06:00 or 08:00.
+        end = arming_schedules.next_boundary([night], eve, AMS)
+        assert end.astimezone(AMS).hour == 7
 
 
 def test_boundaries_are_the_window_edges():
@@ -170,6 +176,42 @@ async def test_transition_is_applied_once_and_audited(client):
 
     async with SessionLocal() as session:
         await _clear_schedules(session)
+
+
+@pytest.mark.asyncio
+async def test_transition_and_its_audit_entry_commit_together(client):
+    """A crash mid-transition must not leave a claimed boundary unaudited."""
+    audit_url = "/api/v1/security/audit-log"
+    params = {"action": "security.mode_changed"}
+    async with SessionLocal() as session:
+        await _clear_schedules(session)
+    entries_before = len((await client.get(audit_url, params=params)).json())
+
+    async with SessionLocal() as session:
+        await arming_schedules.create_schedule(
+            session,
+            name="always away",
+            mode="away",
+            days_of_week=[0, 1, 2, 3, 4, 5, 6],
+            start_time="00:00",
+            end_time="00:00",
+            priority=1,
+        )
+        before = await security_modes.get_mode(session)
+
+        async def explode():
+            raise RuntimeError("process died mid-transition")
+
+        session.commit = explode  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            await arming_schedules.apply_due_transition(session)
+
+    # The claim and the audit row shared one commit, so neither survived.
+    async with SessionLocal() as session:
+        assert await security_modes.get_mode(session) == before
+        await _clear_schedules(session)
+
+    assert len((await client.get(audit_url, params=params)).json()) == entries_before
 
 
 @pytest.mark.asyncio

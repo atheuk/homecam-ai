@@ -34,6 +34,57 @@ def _next_timestamp() -> datetime:
     return now
 
 
+def _entry(
+    action: str,
+    *,
+    actor_user_id: str | None = None,
+    actor_label: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    details: dict | None = None,
+) -> AuditLog:
+    return AuditLog(
+        id=str(uuid.uuid4()),
+        actor_user_id=actor_user_id,
+        actor_label=actor_label,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        details=details or {},
+        created_at=_next_timestamp(),
+    )
+
+
+def stage(
+    session: AsyncSession,
+    action: str,
+    *,
+    actor_user_id: str | None = None,
+    actor_label: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    details: dict | None = None,
+) -> AuditLog:
+    """Add an audit entry without committing.
+
+    For actions whose own write is already part of an open transaction (the
+    scheduler's atomic mode claim, for instance), committing the audit entry
+    separately would leave a window where the action is durable but its audit
+    record is not — and the claim can never be retried. Such callers stage the
+    entry and let the single commit cover both.
+    """
+    entry = _entry(
+        action,
+        actor_user_id=actor_user_id,
+        actor_label=actor_label,
+        target_type=target_type,
+        target_id=target_id,
+        details=details,
+    )
+    session.add(entry)
+    return entry
+
+
 async def record(
     session: AsyncSession,
     action: str,
@@ -44,15 +95,13 @@ async def record(
     target_id: str | None = None,
     details: dict | None = None,
 ) -> AuditLog:
-    entry = AuditLog(
-        id=str(uuid.uuid4()),
+    entry = _entry(
+        action,
         actor_user_id=actor_user_id,
         actor_label=actor_label,
-        action=action,
         target_type=target_type,
         target_id=target_id,
-        details=details or {},
-        created_at=_next_timestamp(),
+        details=details,
     )
     session.add(entry)
     await session.commit()

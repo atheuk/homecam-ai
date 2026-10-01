@@ -124,6 +124,20 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
                 // protected details - never ethnicity or gender.
                 { name: 'ANIMAL_IDENTIFICATION_ENABLED', value: 'true' }
                 { name: 'APPEARANCE_ANALYSIS_ENABLED', value: 'true' }
+                // Automatic arming schedules. The schedules themselves live in
+                // the database (Security tab); these only decide how they are
+                // applied. Wall-clock times are resolved in this timezone so
+                // 23:00 stays 23:00 across DST.
+                { name: 'ARMING_SCHEDULER_ENABLED', value: 'true' }
+                { name: 'ARMING_SCHEDULE_TIMEZONE', value: 'Europe/Amsterdam' }
+                { name: 'ARMING_SCHEDULE_DEFAULT_MODE', value: 'disarmed' }
+                // Retention is deliberately enabled in dry-run mode: each run
+                // logs what it would delete and deletes nothing, so the counts
+                // can be reviewed before enforcement is turned on. Deletion is
+                // irreversible; flip RETENTION_DRY_RUN to 'false' only after
+                // checking GET /api/v1/admin/retention. See docs/retention.md.
+                { name: 'RETENTION_ENABLED', value: 'true' }
+                { name: 'RETENTION_DRY_RUN', value: 'true' }
               ],
               isPlaceholder ? [] : [
                 { name: 'DATABASE_URL', secretRef: 'database-url' }

@@ -111,6 +111,47 @@ async def test_held_events_outrank_every_cutoff(api_transport):
 
 
 @pytest.mark.asyncio
+async def test_a_hold_placed_mid_purge_still_wins(api_transport, monkeypatch):
+    """Candidates are selected and deleted in separate statements.
+
+    Under READ COMMITTED a concurrent ``PUT /retention-hold`` can land in
+    between, so the purge re-checks the flag under a row lock before it
+    deletes. Here the hold is written from another session at exactly that
+    moment, mimicking the race.
+    """
+    async with SessionLocal() as session:
+        doomed = await _make_event(session, age_days=5000)
+        original = retention._purgeable_event_ids
+
+        async def hold_then_return(inner_session, cutoff, protected, limit):
+            ids = await original(inner_session, cutoff, protected, limit)
+            if doomed in ids:
+                async with SessionLocal() as other:
+                    event = await other.get(Event, doomed)
+                    event.retention_hold = True
+                    await other.commit()
+            return ids
+
+        monkeypatch.setattr(retention, "_purgeable_event_ids", hold_then_return)
+        report = await retention.run(session, dry_run=False)
+
+        session.expire_all()
+        assert await session.get(Event, doomed) is not None, "the late hold must still protect the event"
+        assert doomed not in report.counts  # counts are per category, not per id
+        await _cleanup(session, [doomed])
+
+
+@pytest.mark.asyncio
+async def test_lock_unheld_drops_rows_whose_hold_was_set(api_transport):
+    async with SessionLocal() as session:
+        free = await _make_event(session, age_days=5000)
+        held = await _make_event(session, age_days=5000, hold=True)
+        assert await retention._lock_unheld(session, [free, held]) == [free]
+        assert await retention._lock_unheld(session, []) == []
+        await _cleanup(session, [free, held])
+
+
+@pytest.mark.asyncio
 async def test_evidence_of_an_unresolved_incident_is_never_purged(api_transport):
     async with SessionLocal() as session:
         event_id = await _make_event(session, age_days=400)
