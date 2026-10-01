@@ -34,7 +34,7 @@ To run what Azure runs — real RT-DETR detection against your Dahua NVR — lay
 Things that surprise people:
 
 - **No Tailscale, edge connector or HLS proxy needed on the LAN.** That chain (`DAHUA_MODE=edge`, `docs/edge-connector.md`, `PUBLIC_API_BASE_URL`) exists only because Azure sits outside the home network. On the same LAN as the NVR, `DAHUA_MODE=direct` just works.
-- **Person identity needs Azure Foundry; detection does not.** Object detection is fully local and offline. Appearance captions, a coarse apparent age band, clothing/carried items, face-visible and automatic re-identification of returning visitors call Azure AI Foundry and need `FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY` in `.env`. Without them these features switch off cleanly (every sighting is a new unknown person; nothing crashes). Gender and ethnicity are deliberately never inferred (see `apps/api/app/ai/appearance.py`), and a person's trust status is only ever set by a human via the API — never inferred, and no Foundry needed.
+- **Appearance matching needs Azure Foundry; detection does not.** Object detection is fully local and offline. Clothing/carried-item captions and automatic appearance matching call Azure AI Foundry and need `FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY` in `.env`. Without them matching is unavailable (every sighting is a new unknown person). No face recognition or age, gender, ethnicity or identity inference is performed. Trust status is only set by a human.
 - **Don't run local and Azure against the NVR at the same time.** The NVR sustains only ~1–2 concurrent CGI sessions; two HomeCam instances polling it cause snapshot `503`s on both. Pause one (e.g. scale the Azure API to zero) while testing locally.
 
 ## Local development
@@ -118,6 +118,25 @@ With several API replicas, each camera is ingested by exactly one replica at a t
 | `INGESTION_LEASE_ENABLED` | `true` | Only the lease holder ingests a camera. |
 | `INGESTION_LEASE_TTL_SECONDS` | `30` | Failover time after the holder stops renewing (renewed every TTL/2). A clean shutdown hands over at once. |
 | `INGESTION_REPLICA_ID` | `<host>-<pid>-<random>` | Name of this replica in the lease table. |
+
+### Behaviour, vehicle and wildlife recognition
+
+The existing `FOUNDRY_VISION_DEPLOYMENT` must support image inputs and strict JSON-schema chat completions (for example a vision-capable GPT-4o deployment). Without it, vehicle fields remain `unknown` and animal species fall back to detector groups; neither produces invented identifications. No licence plates are read. See [AI features](docs/ai-features.md).
+
+| Environment variable | Recommended production value | Meaning |
+| --- | --- | --- |
+| `SUSPICIOUS_ENABLED` | `true` | Explainable behaviour assessment; clothing alone never alerts. |
+| `SUSPICIOUS_VEHICLE_DWELL_SECONDS` | `45` | Dwell beside a parked vehicle. |
+| `SUSPICIOUS_MAILBOX_DWELL_SECONDS` | `60` | Dwell at a mailbox with no delivery/retrieval. |
+| `SUSPICIOUS_PROPERTY_DWELL_SECONDS` | `90` | Dwell in a driveway/street-facing zone. |
+| `SUSPICIOUS_GAP_SECONDS` / `SUSPICIOUS_DEDUPE_SECONDS` | `20` / `900` | Visit continuity and per-track alert window. |
+| `SUSPICIOUS_VISIT_GAP_SECONDS` | `300` | Minimum absence between separately counted return visits. |
+| `SUSPICIOUS_ELEVATED_SCORE` / `SUSPICIOUS_INCIDENT_SCORE` | `3` / `5` | Tag versus armed incident threshold. |
+| `SUSPICIOUS_CLOTHING_WEIGHT` | `0.5` | Small contributing weight only after a behaviour signal. |
+| `SUSPICIOUS_RETURN_VISITS` / `SUSPICIOUS_RETURN_WINDOW_HOURS` | `3` / `24` | Appearance-matched visits for daytime return signal. |
+| `SUSPICIOUS_NIGHT_RETURN_VISITS` / `SUSPICIOUS_NIGHT_RETURN_WINDOW_HOURS` | `2` / `2` | Night-time return signal. |
+| `HOME_REGION` / `HOME_TIMEZONE` | `Netherlands, Northern Europe` / `Europe/Amsterdam` | Regional species prior and local night hours. |
+| `ANIMAL_BIRD_CONFIDENCE_THRESHOLD` | `0.25` | Bird-specific RT-DETR/ONNX threshold; no CPU-expensive tiled pass. |
 
 Generate an event:
 ```bash

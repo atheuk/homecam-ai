@@ -73,6 +73,11 @@ async def collect_stats(session: AsyncSession, day: date_type) -> dict:
     priorities = Counter(
         (event.event_metadata or {}).get("notification_priority") or "normal" for event in events
     )
+    bird_species = sorted({
+        animal["common_name"] for event in events
+        if (animal := (event.event_metadata or {}).get("animal"))
+        and animal.get("taxonomic_group") == "bird" and animal.get("common_name")
+    })
 
     notable = [
         {
@@ -97,6 +102,7 @@ async def collect_stats(session: AsyncSession, day: date_type) -> dict:
         "by_type": dict(by_type),
         "by_priority": dict(priorities),
         "tags": dict(tags),
+        "bird_species": bird_species,
         "loitering_count": tags.get("loitering", 0),
         "unusual_count": tags.get("unusual_activity", 0),
         "package_removed_count": tags.get("package_removed", 0),
@@ -127,6 +133,8 @@ def build_summary(day: date_type, stats: dict) -> str:
         extras.append(f"{stats['package_removed_count']} package removals")
     if stats["unusual_count"]:
         extras.append(f"{stats['unusual_count']} events at unusual times")
+    if stats.get("bird_species"):
+        extras.append(f"{len(stats['bird_species'])} bird species seen: {', '.join(stats['bird_species'])}")
     if extras:
         sentence += " " + ", ".join(extras).capitalize() + "."
     return sentence

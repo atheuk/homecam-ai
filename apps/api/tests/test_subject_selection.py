@@ -215,7 +215,7 @@ async def test_animal_is_not_suppressed_by_a_more_confident_car(client, scene):
     assert set(events) >= {"animal", "vehicle"}
     assert events["animal"]["metadata"]["best_photo"]["detection"]["label"] == "dog"
     assert events["vehicle"]["metadata"]["best_photo"]["detection"]["label"] == "car"
-    [identified] = seen["animal"]
+    identified = seen["animal"][0]
     assert _close(_dominant(identified), DOG_RGB)
 
 

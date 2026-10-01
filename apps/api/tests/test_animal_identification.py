@@ -6,12 +6,18 @@ honest -- a confidently wrong breed is worse than no breed at all.
 """
 from __future__ import annotations
 
+import pytest
+
 from app.ai.animals import (
     ANIMAL_SPECIES,
+    TAXONOMIC_GROUPS,
     AnimalIdentity,
     describe_animal,
+    identify_animal_frames,
     normalize_species,
     parse_animal_reply,
+    prepare_animal_crop,
+    vote_animal_identities,
 )
 from app.ai.detector import ANIMAL_CLASSES, COCO_CLASS_NAMES
 
@@ -109,3 +115,59 @@ def test_description_falls_back_to_species_then_to_plain_animal():
     assert describe_animal(AnimalIdentity(species="other"), "Back Yard") == (
         "An animal was seen at Back Yard."
     )
+
+
+def test_taxonomy_accepts_common_scientific_and_group_names_with_safe_fallback():
+    identity = parse_animal_reply(
+        '{"species":"other","common_name":null,"scientific_name":null,'
+        '"genus":null,"family":"Ranidae","taxonomic_group":"amphibian",'
+        '"confidence":0.61}'
+    )
+    assert identity is not None
+    assert identity.taxonomic_group in TAXONOMIC_GROUPS
+    assert identity.kind == "Ranidae"
+    assert identity.confidence == 0.61
+
+
+def test_vote_prefers_consensus_over_a_single_stronger_but_weakly_supported_name():
+    result = vote_animal_identities(
+        [
+            AnimalIdentity("other", common_name="red fox", confidence=0.65),
+            AnimalIdentity("other", common_name="red fox", confidence=0.58),
+            AnimalIdentity("other", common_name="grey fox", confidence=0.99),
+        ]
+    )
+    assert result is not None
+    assert result.common_name == "red fox"
+
+
+def test_animal_crop_is_padded_and_upscaled():
+    from PIL import Image
+    from io import BytesIO
+
+    source = BytesIO()
+    Image.new("RGB", (100, 80), "white").save(source, format="JPEG")
+    cropped = prepare_animal_crop(source.getvalue(), (0.4, 0.4, 0.5, 0.5), min_pixels=256)
+    with Image.open(BytesIO(cropped)) as image:
+        assert image.width >= 256
+        assert image.height >= 256
+
+
+@pytest.mark.asyncio
+async def test_multi_frame_identification_votes_deterministically():
+    class Stub:
+        def __init__(self):
+            self.results = iter(
+                [
+                    AnimalIdentity("dog", breed="Beagle", confidence=0.4),
+                    AnimalIdentity("dog", breed="Beagle", confidence=0.7),
+                    AnimalIdentity("dog", breed="Poodle", confidence=0.99),
+                ]
+            )
+
+        async def identify_animal(self, image, content_type):
+            return next(self.results)
+
+    result = await identify_animal_frames(Stub(), [b"1", b"2", b"3"])
+    assert result is not None
+    assert result.breed == "Beagle"

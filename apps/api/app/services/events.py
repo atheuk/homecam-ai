@@ -21,6 +21,8 @@ from . import ai_pipeline
 from . import incidents as incident_service
 from . import security_modes
 from . import signals as signal_service
+from . import scene_dedup
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,29 @@ async def create_and_broadcast_event(
         logger.exception("signal evaluation failed for %s", row.id)
         await session.rollback()
         await session.refresh(row)
+    if row.type == "person" and (row.event_metadata or {}).get("suspicious", {}).get("level"):
+        claim_key = f"suspicious-person:{row.camera_id}:{row.person_id or row.id}"
+        try:
+            won = await scene_dedup.claim(
+                session, claim_key, row.start_time.timestamp(),
+                settings.suspicious_dedupe_seconds, row.id,
+            )
+            if not won:
+                metadata = dict(row.event_metadata or {})
+                verdict = dict(metadata["suspicious"])
+                verdict["deduplicated"] = True
+                verdict["level"] = None
+                metadata["suspicious"] = verdict
+                metadata["notification_priority"] = "low"
+                metadata["priority_reasons"] = ["repeat of a recent appearance alert"]
+                row.event_metadata = metadata
+                row.tags = [tag for tag in row.tags or [] if tag not in {"elevated", "suspicious"}]
+                await session.commit()
+                await session.refresh(row)
+        except Exception:  # noqa: BLE001 - alert dedup cannot discard an event
+            logger.exception("suspicious alert claim failed for %s", row.id)
+            await session.rollback()
+            await session.refresh(row)
     enriched = {**enriched, "activity_id": row.activity_id}
     if signal_result is not None:
         enriched = {
@@ -243,6 +268,8 @@ def to_dict(row: Event) -> dict:
         # clothing, carried items, whether the face is visible.
         "appearance": metadata.get("appearance"),
         "animal": metadata.get("animal"),
+        "suspicious": metadata.get("suspicious"),
+        "vehicle": metadata.get("vehicle"),
         # What changed, for scene transitions (vehicle arrived/parked/moved/
         # departed/returned, mailbox delivery, bin put out/emptied). The UI
         # renders this instead of the raw tracker state.

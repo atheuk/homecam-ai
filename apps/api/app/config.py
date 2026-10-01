@@ -364,6 +364,24 @@ class Settings(BaseSettings):
     # Once flagged, the same zone is not flagged again for this long.
     loitering_repeat_seconds: float = Field(default=300.0, ge=0.0)
 
+    suspicious_enabled: bool = True
+    suspicious_vehicle_dwell_seconds: float = Field(default=45.0, gt=0)
+    suspicious_mailbox_dwell_seconds: float = Field(default=60.0, gt=0)
+    suspicious_property_dwell_seconds: float = Field(default=90.0, gt=0)
+    suspicious_gap_seconds: float = Field(default=20.0, gt=0)
+    suspicious_visit_gap_seconds: float = Field(default=300.0, gt=0)
+    suspicious_dedupe_seconds: float = Field(default=900.0, gt=0)
+    suspicious_elevated_score: float = Field(default=3.0, gt=0)
+    suspicious_incident_score: float = Field(default=5.0, gt=0)
+    suspicious_clothing_weight: float = Field(default=0.5, ge=0, le=1)
+    suspicious_return_visits: int = Field(default=3, ge=2)
+    suspicious_return_window_hours: float = Field(default=24.0, gt=0)
+    suspicious_night_return_visits: int = Field(default=2, ge=2)
+    suspicious_night_return_window_hours: float = Field(default=2.0, gt=0)
+    home_region: str = "Netherlands, Northern Europe"
+    home_timezone: str = "Europe/Amsterdam"
+    animal_bird_confidence_threshold: float = Field(default=0.25, ge=0, le=1)
+
     # Package theft: a package that was present in a mailbox/porch zone
     # before a visit and gone after it, escalated to an incident while the
     # household is armed away/night.

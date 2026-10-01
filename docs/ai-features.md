@@ -303,3 +303,62 @@ Digest card inside the signed-in **Security** tab, not on the public Overview.
 Notification priority and the unusual-activity baseline have no endpoints of
 their own. They are the `notification_priority`/`priority_reasons` fields and
 the `unusual_activity` tag on the existing `/api/v1/events` payload.
+## Suspicious behaviour
+
+`services/suspicious.py` scores observable conduct, never a person's identity or
+demographics. A lease-fenced `scene_states` record holds each spatial person's
+dwell clock and last alert across restarts; `scene_dedup_claims` atomically
+limits emitted alerts per track/window across replicas. Vehicle proximity
+requires a tracked parked vehicle; mailbox dwell excludes known delivery or
+retrieval outcomes. Property dwell uses driveway/street/perimeter/entry zones.
+The Foundry vision deployment can report only a fixed vocabulary of visible
+actions (looking into windows/cars, facing property, pacing, taking photos,
+trying handles, hands near vehicle doors/windows); model prose is never used
+as an alert reason. A photo alone cannot establish intent.
+
+| Evidence | Score |
+| --- | ---: |
+| Parked vehicle proximity >= 45s | 3 |
+| Moved to multiple sides of vehicle | +1 |
+| Mailbox >= 60s, no known outcome | +3 |
+| Driveway/street-facing property zone >= 90s | +2 |
+| Visibly trying handle / hands at vehicle | +1.5 each |
+| Other allowlisted visible action | +0.75 each |
+| Similar unrecognised appearance, 3 visits/24h or 2 visits/2h at night | +3 |
+| Visible hood up / face covered / balaclava | +0.5, **only with behaviour** |
+| Night / armed away or night | ×1.25 each, **only with behaviour** |
+| Historically unusual time | +0.75, **only with behaviour** |
+
+Scores >= 3 are `elevated`; >= 5 are `suspicious` and can open a
+`suspicious_activity` incident while armed away/night. While home or disarmed
+there is only an event/notification, never an incident. Every verdict stores
+reasons, score and linked visit event IDs. Repeat visits use the existing
+appearance embedding and exclude named or human-trusted people; all behaviour
+signals also skip a confidently matched human-trusted person. The wording says
+**a person with a similar appearance**, never asserts identity. Clothing
+contributes only weak context because hoodies are normal attire, not evidence
+of intent; it cannot alert by itself. No autonomous deterrence or dispatch.
+Sampling at the mailbox or beside a tracked parked vehicle reuses the
+existing stream-only mailbox boost (never extra NVR snapshots).
+
+## Vehicles and wildlife
+
+The existing vision-capable `FOUNDRY_VISION_DEPLOYMENT` must support strict
+JSON-schema chat completions. `ai/vehicles.py` returns independently
+confidence-rated make, model, generation/year range, colour, body type and
+optional trim; `unknown` is preferable to an unsupported guess. The pipeline
+sends up to three tight full-resolution crops from the available stream
+frames, votes for consensus, keeps the best photo and stores attributes in
+event/track JSON (the existing tables need no migration). Track caching
+avoids re-querying on unchanged scene transitions. A matching known
+make/model/colour strengthens the colour-signature return match. The mock
+identifier deterministically returns unknown. No licence-plate recognition.
+
+`ai/animals.py` similarly uses a padded, upscaled crop and up to three
+frames, voting by species without replacing a strong result with a weak one.
+It reports common/scientific name, taxonomic group and confidence; uncertain
+species fall back to genus, family or group. `HOME_REGION` defaults to the
+Netherlands/Northern Europe as a **prior**, not proof of a species. The
+bird-specific detector threshold defaults to `0.25`; a tiled second pass was
+not added because it doubles RT-DETR CPU work per camera frame and would
+compete with live ingestion. The digest lists distinct bird species.

@@ -18,13 +18,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..models.db import CameraZone, Event
-from . import activity_baseline, loitering, priority
+from . import activity_baseline, loitering, priority, suspicious
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,30 @@ async def apply_signals(session: AsyncSession, row: Event, *, mode: str | None =
         unusual_hit = unusual.unusual
         if unusual_hit and UNUSUAL_TAG not in tags:
             tags.append(UNUSUAL_TAG)
+
+    if settings.suspicious_enabled and (row.type in {"person", "suspicious_activity"}
+                                        or "mailbox_visit" in tags):
+        trusted = await suspicious.is_trusted_event(session, row)
+        at = row.start_time or datetime.now(timezone.utc)
+        at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+        hour = at.astimezone(ZoneInfo(settings.home_timezone)).hour
+        night = mode == "night" or hour >= 22 or hour < 6
+        evidence = dict(metadata.get("suspicious_signals") or {})
+        evidence["behaviours"] = metadata.get("behaviours") or []
+        if row.type == "person":
+            evidence.update(await suspicious.returning_visits(session, row, at, night))
+        appearance = metadata.get("appearance") or {}
+        verdict = ({"level": None} if trusted else suspicious.score(
+            evidence, clothing=appearance.get("clothing"), mode=mode,
+            night=night, unusual=unusual_hit,
+        ))
+        if verdict["level"]:
+            metadata["suspicious"] = verdict
+            if verdict["level"] not in tags:
+                tags.append(verdict["level"])
+            details["suspicious"] = verdict
+            if row.type == "suspicious_activity":
+                row.description = "; ".join(verdict["reasons"])[:500]
 
     scored = priority.score_event(
         event_type=row.type,

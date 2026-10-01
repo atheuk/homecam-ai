@@ -22,7 +22,7 @@ PRIORITIES = ("low", "normal", "high", "critical")
 PRIORITY_RANK = {name: index for index, name in enumerate(PRIORITIES)}
 
 #: Base weight per event type. Absent types score 0 and rely on signals.
-_BASE_BY_TYPE = {"person": 2, "vehicle": 1, "package": 1, "animal": 0}
+_BASE_BY_TYPE = {"person": 2, "vehicle": 1, "package": 1, "animal": 0, "suspicious_activity": 3}
 #: Zone kinds that make any detection more significant.
 _ZONE_BONUS = {"entry": 1, "restricted": 2, "perimeter": 1}
 
@@ -89,6 +89,12 @@ def score_event(
     if unusual or "unusual_activity" in tag_set:
         score += 1
         reasons.append("unusual for this time")
+    if "suspicious" in tag_set:
+        score += 2
+        reasons.append("suspicious behaviour")
+    elif "elevated" in tag_set:
+        score += 1
+        reasons.append("elevated behaviour score")
 
     if mode in {"away", "night"}:
         score += 1

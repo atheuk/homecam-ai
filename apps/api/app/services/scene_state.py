@@ -149,6 +149,7 @@ class Track:
             "stationary_since": _iso(self.stationary_since),
             "transition": transition,
             "box": self.box.as_dict(),
+            "vehicle": self.data.get("vehicle"),
         }
 
 
@@ -170,6 +171,7 @@ class CameraScene:
     deleted_tracks: set[str] = field(default_factory=set)
     dirty_tracks: set[str] = field(default_factory=set)
     dirty_zones: set[str] = field(default_factory=set)
+    deleted_zones: set[str] = field(default_factory=set)
     # Frame continuity, in memory: a restart is itself an outage.
     observed_since: float | None = None
     last_frame_at: float | None = None
@@ -329,6 +331,12 @@ async def _save(session: AsyncSession, scene: CameraScene) -> None:
         row.last_event_id = track.last_event_id
         row.updated_at = now
     scene.dirty_tracks.clear()
+    for zone_id in scene.deleted_zones:
+        record_id = f"{scene.camera_id}|{zone_id}"
+        row = await session.get(SceneState, record_id)
+        if row is not None:
+            await session.delete(row)
+    scene.deleted_zones.clear()
     for zone_id in scene.dirty_zones:
         record = scene.zones.get(zone_id)
         if record is None:
@@ -453,8 +461,10 @@ async def _process(
     transitions: list[SceneTransition] = []
     if settings.vehicle_tracking_enabled:
         transitions += await _vehicle_step(
-            session, scene, camera_name, detections, [z for _, z in zones], image, now
+            session, scene, camera_name, detections, [z for _, z in zones], image, now, frame
         )
+    from . import suspicious
+    transitions += await suspicious.observe(session, scene, detections, [z for _, z in zones], now)
     for zone_id, zone in zones:
         kind = zone.kind.casefold()
         if kind == "mailbox" and settings.mailbox_delivery_enabled:
@@ -483,6 +493,10 @@ async def note_event(session: AsyncSession, transition: SceneTransition, event_i
     if track is None:
         return
     track.last_event_id = event_id
+    row = await session.get(Event, event_id)
+    identified = (row.event_metadata or {}).get("vehicle") if row else None
+    if identified:
+        track.data["vehicle"] = identified
     scene.dirty_tracks.add(track.id)
     await _save(session, scene)
 
@@ -507,7 +521,7 @@ async def snapshot(session: AsyncSession, camera_id: str) -> dict:
         "zones": [
             {"zone_id": record.zone_id, "kind": record.kind, "state": record.state,
              "data": {k: v for k, v in record.data.items() if k not in {"baseline", "pending_sig", "ref_sig", "global_ref"}}}
-            for record in scene.zones.values()
+            for record in scene.zones.values() if record.kind != "suspicious"
         ],
     }
 
@@ -529,6 +543,8 @@ def _vehicle_transition(
     }
     if extra:
         scene_meta.update(extra)
+    if track.data.get("vehicle"):
+        scene_meta["vehicle"] = track.data["vehicle"]
     return SceneTransition(
         camera_id=track.camera_id,
         kind="vehicle",
@@ -554,8 +570,16 @@ async def _vehicle_step(
     zones: list[Zone],
     image: _LazyImage,
     now: float,
+    frame: bytes | None = None,
 ) -> list[SceneTransition]:
     s = settings
+    for track in list(scene.tracks.values()):
+        key = f"vehicle:{track.id}"
+        finished, answer, _ = _take_answer(scene, key)
+        if finished:
+            track.data["vehicle"] = answer.as_dict() if answer is not None else {}
+            track.data["identified_at"] = now
+            scene.dirty_tracks.add(track.id)
     vehicles = [d for d in detections if d.label in VEHICLE_CLASSES]
     persons = [d for d in detections if d.label == "person"]
     active = [t for t in scene.tracks.values() if t.state != DEPARTED]
@@ -587,6 +611,7 @@ async def _vehicle_step(
         used_tracks.add(ti)
         used_dets.add(di)
         out += _continue_track(scene, track, det, signature, zones, camera_name, now)
+        _schedule_vehicle_id(scene, track, frame, det, now)
 
     for di, det in enumerate(vehicles):
         if di in used_dets or det.confidence < s.vehicle_new_track_min_confidence:
@@ -613,6 +638,7 @@ async def _vehicle_step(
         )
         scene.tracks[track.id] = track
         scene.dirty_tracks.add(track.id)
+        _schedule_vehicle_id(scene, track, frame, det, now)
         active.append(track)
         used_tracks.add(len(active) - 1)
         confirmed = _maybe_confirm(scene, track, camera_name, now)
@@ -665,6 +691,27 @@ def _zone_name(det: Detection, zones: list[Zone]) -> str | None:
     return zone.name if zone else None
 
 
+def _schedule_vehicle_id(
+    scene: CameraScene, track: Track, frame: bytes | None, det: Detection, now: float
+) -> None:
+    if not frame or not settings.foundry_endpoint or not settings.foundry_api_key:
+        return
+    key = f"vehicle:{track.id}"
+    if key in scene.pending or track.data.get("vehicle"):
+        return
+    last = float(track.data.get("identified_at") or 0)
+    if last and now - last < settings.scene_verifier_min_interval_seconds:
+        return
+    from ..ai.vehicles import build_vehicle_identifier, crop_vehicle
+
+    crop = crop_vehicle(frame, det.bbox)
+    identifier = build_vehicle_identifier(settings)
+    scene.pending[key] = (
+        asyncio.create_task(_verify(identifier.identify_vehicle_frames([crop]), scene.camera_id, "vehicle")),
+        {},
+    )
+
+
 def _continue_track(
     scene: CameraScene,
     track: Track,
@@ -700,6 +747,7 @@ def _continue_track(
         track.stationary_since = None
         track.data["interacted"] = False
         track.data["parked_noted"] = False
+        track.data.pop("vehicle", None)
         if track.reported:
             track.state = TRACKING
         if was_parked and track.reported:
@@ -730,6 +778,8 @@ def _continue_track(
 def _maybe_confirm(scene: CameraScene, track: Track, camera_name: str, now: float) -> SceneTransition | None:
     s = settings
     if track.reported or track.observation_count < s.vehicle_confirm_observations:
+        return None
+    if f"vehicle:{track.id}" in scene.pending:
         return None
     track.data["reported"] = True
     track.state = TRACKING
@@ -774,6 +824,13 @@ def _returning_track(scene: CameraScene, track: Track, now: float) -> Track | No
         # signature it is just an arrival.
         if similarity is None or similarity < s.vehicle_appearance_min_similarity:
             continue
+        current = track.data.get("vehicle") or {}
+        previous = other.data.get("vehicle") or {}
+        if all(current.get(key) and current[key] != "unknown" and
+               previous.get(key) and previous[key] != "unknown" and
+               current[key].casefold() == previous[key].casefold()
+               for key in ("make", "model", "colour")):
+            similarity = min(1.0, similarity + 0.2)
         if best is None or similarity > best[0]:
             best = (similarity, other)
     return best[1] if best else None
@@ -1234,6 +1291,7 @@ async def _finish_visit(
 
     context = {
         "visit_id": data.get("visit_id"),
+        "visit_seconds": max(0.0, now - float(data.get("visit_started") or now)),
         "observations": observations,
         "max_cover": round(float(data.get("max_cover") or 0.0), 3),
         "diff_score": round(float(data.get("max_diff") or 0.0), 3),
@@ -1371,6 +1429,7 @@ def _mailbox_result(
     source = verdict.get("source")
     evidence = {
         "visit_id": context["visit_id"],
+        "visit_seconds": context.get("visit_seconds", 0.0),
         "zone": zone.name,
         "observations": context["observations"],
         "max_cover": context.get("max_cover"),
@@ -1404,6 +1463,8 @@ def _mailbox_result(
         tags=tags,
         metadata={
             "mailbox": evidence,
+            "suspicious_signals": {"mailbox_seconds": context.get("visit_seconds", 0.0)}
+            if transition == "mailbox_visit" else {},
             "scene": {
                 "kind": "mailbox",
                 "transition": transition,

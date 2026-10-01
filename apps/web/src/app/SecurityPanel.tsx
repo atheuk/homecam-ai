@@ -32,6 +32,7 @@ type Incident = {
   escalation_level: number;
   summary: string;
   ai_summary: string | null;
+  evidence?:{score?:number;reasons?:string[];event_ids?:string[]}|null;
 };
 
 type IncidentEvent = {
@@ -58,6 +59,7 @@ const KIND_LABELS: Record<string, string> = {
   camera_offline: "Camera offline",
   camera_obstruction: "Camera obstructed",
   camera_frozen: "Camera feed frozen",
+  suspicious_activity: "Suspicious activity",
 };
 
 const STATUS_LABELS: Record<string, string> = { open: "Open", acknowledged: "Acknowledged", resolved: "Resolved" };
@@ -154,6 +156,13 @@ function IncidentCard({
       </div>
       <h4>{KIND_LABELS[incident.kind] || incident.kind}</h4>
       <p className="incident-summary">{incident.summary}</p>
+      {incident.kind==="suspicious_activity"&&incident.evidence&&(
+        <div aria-label="Suspicious activity evidence">
+          <strong>Score {incident.evidence.score}</strong>
+          <ul>{incident.evidence.reasons?.map(reason=><li key={reason}>{reason}</li>)}</ul>
+          {incident.evidence.event_ids?.map(id=><span key={id} className="badge">{id} </span>)}
+        </div>
+      )}
       {incident.ai_summary && (
         <p className="ai-summary"><span className="badge ai">AI summary</span>{incident.ai_summary}</p>
       )}
