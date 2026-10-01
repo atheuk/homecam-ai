@@ -520,6 +520,59 @@ COCO_CLASS_NAMES: dict[int, str] = {
 }
 
 
+def _cgroup_cpu_limit() -> float | None:
+    """CPU quota in cores from cgroup v2/v1, or ``None`` when unlimited."""
+    try:
+        with open("/sys/fs/cgroup/cpu.max", encoding="ascii") as handle:
+            quota, period = handle.read().split()[:2]
+        if quota != "max":
+            return int(quota) / int(period)
+        return None
+    except (OSError, ValueError):
+        pass
+    try:
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", encoding="ascii") as handle:
+            quota_us = int(handle.read().strip())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", encoding="ascii") as handle:
+            period_us = int(handle.read().strip())
+        return quota_us / period_us if quota_us > 0 and period_us > 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def detector_thread_count(configured: int = 0) -> int:
+    """Intra-op threads for ONNX Runtime.
+
+    ONNX Runtime defaults to one thread per *host* core. In a container with
+    a fractional CPU quota (0.5-1 vCPU on a many-core host) that spawns a
+    dozen spinning threads competing for the quota, so every inference is
+    CFS-throttled and the rest of the API starves with it. Size the pool to
+    the quota instead; ``AI_DETECTOR_THREADS`` overrides.
+    """
+    if configured > 0:
+        return configured
+    host = os.cpu_count() or 1
+    limit = _cgroup_cpu_limit()
+    if limit is None:
+        return max(1, min(host, 4))
+    return max(1, min(host, int(limit)))
+
+
+def _onnx_session(onnxruntime, model_path: str):  # pragma: no cover - opt-in path
+    from ..config import settings
+
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = detector_thread_count(settings.ai_detector_threads)
+    options.inter_op_num_threads = 1
+    options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+    # Spin-waiting burns the CPU quota between frames for no throughput gain.
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return onnxruntime.InferenceSession(
+        model_path, sess_options=options, providers=["CPUExecutionProvider"]
+    )
+
+
 class OnnxDetector:
     """Opt-in ONNX Runtime YOLO backend (SPEC section 13).
 
@@ -540,7 +593,7 @@ class OnnxDetector:
         except ImportError as exc:  # pragma: no cover - depends on opt-in extras
             raise DetectorUnavailableError(f"onnx detector dependencies unavailable: {exc}") from exc
         try:
-            self._session = onnxruntime.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            self._session = _onnx_session(onnxruntime, model_path)
         except Exception as exc:  # noqa: BLE001 - any runtime/model failure degrades to mock
             raise DetectorUnavailableError(f"could not load ONNX model '{model_path}': {exc}") from exc
         self._input_size = input_size
@@ -640,7 +693,7 @@ class RtDetrDetector:
         except ImportError as exc:  # pragma: no cover - depends on opt-in extras
             raise DetectorUnavailableError(f"rtdetr detector dependencies unavailable: {exc}") from exc
         try:
-            self._session = onnxruntime.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            self._session = _onnx_session(onnxruntime, model_path)
         except Exception as exc:  # noqa: BLE001 - any runtime/model failure degrades to mock
             raise DetectorUnavailableError(f"could not load RT-DETR model '{model_path}': {exc}") from exc
         self._input_name = self._session.get_inputs()[0].name

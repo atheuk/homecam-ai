@@ -31,7 +31,7 @@ services:
       - mediamtx
 
   mediamtx:
-    image: bluenviron/mediamtx:latest
+    image: bluenviron/mediamtx:1.21.1
     restart: unless-stopped
     env_file:
       - .env

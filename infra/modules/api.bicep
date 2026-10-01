@@ -77,7 +77,7 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
           {
             name: 'api'
             image: effectiveImage
-            resources: { cpu: isPlaceholder ? '0.25' : '0.5', memory: isPlaceholder ? '0.5Gi' : '1Gi' }
+            resources: { cpu: isPlaceholder ? '0.25' : '1', memory: isPlaceholder ? '0.5Gi' : '2Gi' }
             probes: isPlaceholder ? [] : [
               { type: 'Liveness', httpGet: { path: '/health', port: 8000 }, initialDelaySeconds: 10, periodSeconds: 30 }
               { type: 'Readiness', httpGet: { path: '/health', port: 8000 }, initialDelaySeconds: 10, periodSeconds: 30 }
@@ -182,7 +182,8 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
           }
         ]
       )
-      scale: { minReplicas: 0, maxReplicas: 2 }
+      // Always on: event ingestion and alerting run in-process.
+      scale: { minReplicas: isPlaceholder ? 0 : 1, maxReplicas: 2 }
     }
   }
 }

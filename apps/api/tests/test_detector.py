@@ -207,3 +207,21 @@ def test_bounding_box_area_and_center():
     box = BoundingBox(0.2, 0.2, 0.6, 0.4)
     assert box.area == pytest.approx(0.08)
     assert box.center == pytest.approx((0.4, 0.3))
+
+
+def test_detector_thread_count_respects_override():
+    from app.ai import detector as det
+
+    assert det.detector_thread_count(3) == 3
+
+
+def test_detector_thread_count_sizes_to_cpu_quota(monkeypatch):
+    from app.ai import detector as det
+
+    monkeypatch.setattr(det.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(det, "_cgroup_cpu_limit", lambda: 0.5)
+    assert det.detector_thread_count() == 1
+    monkeypatch.setattr(det, "_cgroup_cpu_limit", lambda: 2.0)
+    assert det.detector_thread_count() == 2
+    monkeypatch.setattr(det, "_cgroup_cpu_limit", lambda: None)
+    assert det.detector_thread_count() == 4

@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # security system protects nobody; when off, the degradation is still
     # reported loudly (ERROR log, /ready, /api/v1/system/status).
     ai_detector_strict: bool = False
+    # ONNX Runtime intra-op threads; 0 sizes the pool to the container's
+    # CPU quota (see app.ai.detector.detector_thread_count).
+    ai_detector_threads: int = Field(default=0, ge=0, le=64)
     # Zero-detection watchdog (incident 2026-09-30). Frames were ingested at
     # 100% success for three hours while the detector - silently replaced by
     # the mock - produced literally nothing, and no signal said so. Keyed on

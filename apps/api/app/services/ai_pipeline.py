@@ -276,7 +276,8 @@ async def enrich_event(
     detections: list[Detection] = []
     if frames:
         try:
-            detections = detector.detect(frames[0], context)
+            # Off the event loop: CPU inference would stall every request.
+            detections = await asyncio.to_thread(detector.detect, frames[0], context)
         except Exception as exc:  # noqa: BLE001
             logger.warning("local detector failed for %s: %s", row.camera_id, exc)
 
