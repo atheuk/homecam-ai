@@ -60,10 +60,23 @@ describe("live stream playback errors",()=>{
     const setHeader=vi.spyOn(xhr,"setRequestHeader");
 
     instances[0].xhrSetup(xhr,`${apiOrigin}/hls/index.m3u8`);
+    expect(xhr.withCredentials).toBe(true);
     instances[0].xhrSetup(xhr,"https://attacker.example/segment.ts");
+    expect(xhr.withCredentials).toBe(false);
 
     expect(setHeader).toHaveBeenCalledTimes(1);
     expect(setHeader).toHaveBeenCalledWith("Authorization","Bearer private-session-token");
+  });
+
+  it("uses the restored browser session cookie for API-origin HLS requests",()=>{
+    const apiOrigin=new URL(process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000").origin;
+    render(<HlsVideo src={`${apiOrigin}/hls/index.m3u8`}/>);
+    const xhr=new XMLHttpRequest();
+    xhr.open("GET",`${apiOrigin}/hls/index.m3u8`);
+
+    instances[0].xhrSetup(xhr,`${apiOrigin}/hls/index.m3u8`);
+
+    expect(xhr.withCredentials).toBe(true);
   });
 
   it("explains an undecodable HEVC stream instead of showing an empty player",()=>{

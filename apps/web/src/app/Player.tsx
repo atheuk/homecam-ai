@@ -80,7 +80,11 @@ export function HlsVideo({src,token}:{src:string;token?:string|null}){
       return;
     }
     const hls=new Hls({
-      xhrSetup:(xhr,url)=>{if(token&&isApiRequest(url)) xhr.setRequestHeader("Authorization",`Bearer ${token}`);},
+      xhrSetup:(xhr,url)=>{
+        const apiRequest=isApiRequest(url);
+        xhr.withCredentials=apiRequest;
+        if(token&&apiRequest) xhr.setRequestHeader("Authorization",`Bearer ${token}`);
+      },
     });
     let recoveries=0;
     let destroyed=false;
