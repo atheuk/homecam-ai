@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from ..models.db import Event, EventEvidence
 from . import activities as activity_service
@@ -111,12 +112,18 @@ async def _recover(session: AsyncSession, row: Event, event_id: str) -> None:
     turned one failed stage into a failure of everything downstream,
     including the caller's own logging: a failed incident routing took the
     scene-transition caller down with it.
+
+    If even the reload fails the row stays expired, so restore its identity
+    from the id captured before enrichment. Callers are promised ``row.id``
+    (scene ingestion links the event to its track with it); that promise has
+    to hold without touching the database, however badly the stage failed.
     """
     await session.rollback()
     try:
         await session.refresh(row)
     except Exception:  # noqa: BLE001 - recovery must never raise
         logger.exception("could not reload event %s after a failed stage", event_id)
+        set_committed_value(row, "id", event_id)
 
 
 async def create_and_broadcast_event(
@@ -197,6 +204,11 @@ async def create_and_broadcast_event(
                 settings.suspicious_dedupe_seconds, row.id,
             )
             if not won:
+                # A lost claim rolls the session back, expiring the row. The
+                # de-duplicated verdict below is written from the row's own
+                # metadata, so reload it first - otherwise the read raises and
+                # the repeat appearance keeps its full-priority alert.
+                await session.refresh(row)
                 metadata = dict(row.event_metadata or {})
                 verdict = dict(metadata["suspicious"])
                 verdict["deduplicated"] = True

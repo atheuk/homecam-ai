@@ -145,6 +145,60 @@ async def test_event_row_stays_usable_after_incident_routing_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_event_id_survives_a_failed_reload(monkeypatch):
+    """Recovery itself can fail (the row is gone, or the session is unusable).
+    Callers are still promised ``row.id`` - scene ingestion links the event to
+    its track with it - so it must resolve without touching the database."""
+
+    async def _refresh_boom(*args, **kwargs):
+        raise RuntimeError("cannot reload")
+
+    async def _boom(*args, **kwargs):
+        # Only break the reload once recovery is the thing being tested;
+        # persisting the event legitimately refreshes first.
+        monkeypatch.setattr(type(args[0]), "refresh", _refresh_boom)
+        raise RuntimeError("routing exploded")
+
+    monkeypatch.setattr(incident_service, "route_event", _boom)
+
+    async with SessionLocal() as session:
+        row = await event_service.create_and_broadcast_event(session, _event_payload("evt-gone"))
+        assert row.id == "evt-gone"
+
+
+@pytest.mark.asyncio
+async def test_repeat_suspicious_person_is_deduplicated_to_low_priority(monkeypatch):
+    """A lost dedup claim rolls the session back, expiring the row. The
+    de-duplicated verdict is written from the row's own metadata, so if the
+    row is not reloaded first the repeat appearance keeps its full-priority
+    alert and the household gets spammed."""
+
+    async def _enrich(session, row, event, *args, **kwargs):
+        metadata = dict(row.event_metadata or {})
+        metadata["suspicious"] = {"level": "high", "reasons": ["loitering"]}
+        row.event_metadata = metadata
+        row.type = "person"
+        row.person_id = "person-1"
+        return {**event, "metadata": metadata}
+
+    monkeypatch.setattr(event_service.ai_pipeline, "enrich_event", _enrich)
+
+    payload = {**_event_payload("evt-dup-1"), "type": "person"}
+    async with SessionLocal() as session:
+        first = await event_service.create_and_broadcast_event(session, payload)
+        assert (first.event_metadata or {}).get("suspicious", {}).get("level") == "high"
+
+    async with SessionLocal() as session:
+        second = await event_service.create_and_broadcast_event(
+            session, {**payload, "id": "evt-dup-2", "type": "person"}
+        )
+        metadata = second.event_metadata or {}
+        assert metadata.get("suspicious", {}).get("deduplicated") is True
+        assert metadata.get("suspicious", {}).get("level") is None
+        assert metadata.get("notification_priority") == "low"
+
+
+@pytest.mark.asyncio
 async def test_zone_names_must_be_unique_per_camera(client):
     base = f"/api/v1/admin/cameras/{CAMERA}/zones"
     payload = {"name": "driveway", "kind": "driveway", "x1": 0.1, "y1": 0.1, "x2": 0.9, "y2": 0.9}
