@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, Float, JSON, Integer, ForeignKey, LargeBinary, Text
+from sqlalchemy import String, DateTime, Boolean, Float, JSON, Integer, ForeignKey, LargeBinary, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase): pass
@@ -562,3 +562,113 @@ class AuditLog(Base):
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
+
+
+class NotificationChannel(Base):
+    """One configured outbound alert destination (SPEC follow-up: instant
+    incident alerts).
+
+    Every channel is strictly opt-in: a row only exists because an
+    authenticated human created it, and it only sends while ``enabled``.
+    ``config`` holds the non-secret addressing fields for the channel type
+    (ntfy server/topic, Telegram chat id, webhook URL); the one secret per
+    channel (ntfy token, bot token, webhook signing secret) lives in
+    ``secret_encrypted`` using the same reversible local encryption as
+    ``ProviderConfig.secret_encrypted`` and is never logged or returned by
+    the API.
+
+    ``attach_images`` is deliberately per channel and defaults to off:
+    a snapshot may only ride along on a channel whose delivery is
+    authenticated/private (Telegram, or ntfy with a token). Web push never
+    carries imagery at all - it carries text and a deep link, so pictures
+    stay behind the app's own authentication.
+    """
+
+    __tablename__ = "notification_channels"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # "webpush" | "ntfy" | "telegram" | "webhook"
+    type: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    secret_encrypted: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    attach_images: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Lowest incident severity this channel is willing to carry.
+    min_severity: Mapped[str] = mapped_column(String(16), default="low")
+    last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Failure reason text, scrubbed of secrets before it is ever stored.
+    last_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PushSubscription(Base):
+    """A browser/PWA Web Push subscription belonging to one signed-in user.
+
+    The endpoint plus its two keys are supplied by the browser's push
+    service; they are capability URLs, so they are only ever returned to
+    their owner (truncated) and never broadcast. A subscription is removed
+    automatically when its push service reports it gone (404/410).
+    """
+
+    __tablename__ = "push_subscriptions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
+    endpoint: Mapped[str] = mapped_column(String(500), unique=True)
+    p256dh: Mapped[str] = mapped_column(String(255))
+    auth: Mapped[str] = mapped_column(String(255))
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class NotificationDelivery(Base):
+    """One attempted send, and the cross-replica dedupe record behind it.
+
+    The unique ``(channel_id, dedupe_key)`` constraint is the dedupe: the
+    insert happens *before* the send, so two API replicas racing on the
+    same incident produce exactly one notification. The same rows are the
+    per-channel rate-limit window (count rows in the last hour), so neither
+    mechanism needs in-process state that a second replica cannot see.
+    """
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (UniqueConstraint("channel_id", "dedupe_key", name="uq_notification_delivery"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(String(64), index=True)
+    # "<incident_id>:<reason>" - one notification per incident per reason.
+    dedupe_key: Mapped[str] = mapped_column(String(160))
+    incident_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    reason: Mapped[str] = mapped_column(String(32), default="created")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class NotificationSetting(Base):
+    """Household-wide notification policy (single row, ``id="default"``,
+    same single-household assumption as ``SecurityState``).
+
+    Quiet hours suppress non-critical notifications between
+    ``quiet_hours_start`` and ``quiet_hours_end`` (local ``HH:MM`` in the
+    configured home timezone, wrapping across midnight). Critical incidents
+    always break through: a quiet-hours setting that can silence a
+    break-in is a safety bug, not a feature.
+    """
+
+    __tablename__ = "notification_settings"
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="default")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    quiet_hours_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    quiet_hours_start: Mapped[str] = mapped_column(String(5), default="22:00")
+    quiet_hours_end: Mapped[str] = mapped_column(String(5), default="07:00")
+    # Severity that ignores quiet hours entirely.
+    quiet_hours_override_severity: Mapped[str] = mapped_column(String(16), default="critical")
+    # Lowest severity that notifies at all, before per-channel filtering.
+    min_severity: Mapped[str] = mapped_column(String(16), default="low")
+    # Per-channel cap; further sends inside the hour are dropped and logged.
+    max_per_hour: Mapped[int] = mapped_column(Integer, default=20)
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

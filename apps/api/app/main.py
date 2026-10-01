@@ -9,6 +9,7 @@ from .ai.detector import detector_status
 from .api.admin_routes import router as admin_router
 from .api.admin_routes import zones_router as admin_zones_router
 from .api.auth_routes import router as auth_router
+from .api.notification_routes import router as notification_router
 from .api.retention_routes import router as retention_router
 from .api.routes import router
 from .api.security_routes import router as security_router
@@ -88,6 +89,7 @@ app.include_router(admin_router)
 app.include_router(admin_zones_router)
 app.include_router(security_router)
 app.include_router(retention_router)
+app.include_router(notification_router)
 
 
 @app.get("/health")
