@@ -116,3 +116,54 @@ class TokenOut(BaseModel):
     expires_at:datetime
     user:UserOut
 
+
+class SecurityModeIn(BaseModel):
+    mode: Literal["disarmed", "home", "away", "night"]
+
+
+class SecurityModeOut(BaseModel):
+    mode: str
+    changed_by: str | None = None
+    changed_at: datetime
+
+
+class IncidentOut(BaseModel):
+    id: str
+    kind: str
+    status: str
+    severity: str
+    camera_id: str
+    zone: str | None = None
+    mode_at_creation: str
+    event_ids: list[str]
+    event_count: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+    acknowledged_by: str | None = None
+    acknowledged_at: datetime | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+    escalation_level: int
+    last_escalated_at: datetime | None = None
+    summary: str
+    ai_summary: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IncidentExportOut(BaseModel):
+    incident: IncidentOut
+    events: list[EventOut]
+    exported_at: datetime
+
+
+class AuditLogOut(BaseModel):
+    id: str
+    actor_user_id: str | None = None
+    actor_label: str | None = None
+    action: str
+    target_type: str | None = None
+    target_id: str | None = None
+    details: dict
+    created_at: datetime
+

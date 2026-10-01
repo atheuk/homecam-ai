@@ -9,6 +9,8 @@ from .api.admin_routes import router as admin_router
 from .api.admin_routes import zones_router as admin_zones_router
 from .api.auth_routes import router as auth_router
 from .api.routes import router
+from .api.security_routes import router as security_router
+from .ai import camera_health
 from .config import settings
 from .db import SessionLocal, init_db
 from .services.cameras import sync_cameras
@@ -37,6 +39,7 @@ async def lifespan(app: FastAPI):
         )
     async with SessionLocal() as session:
         await sync_cameras(session, await discover_all_cameras())
+    await camera_health.seed_from_open_incidents(SessionLocal)
     if settings.event_ingestion_enabled:
         ingestion_service.start()
     try:
@@ -56,6 +59,7 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(admin_zones_router)
+app.include_router(security_router)
 
 
 @app.get("/health")

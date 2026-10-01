@@ -4,13 +4,14 @@ import {useCallback,useEffect,useMemo,useState} from "react";
 import {useRouter,useSearchParams} from "next/navigation";
 import AdminPanel from "./AdminPanel";
 import EventsPanel from "./EventsPanel";
+import SecurityPanel from "./SecurityPanel";
 import {HlsVideo} from "./Player";
 import {EventCard,PeoplePanel,type EventItem,type Person} from "./People";
 
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
 const EVENT_LIMIT=50;
 const ACTIVITY_WINDOW_MS=10*60*1000;
-const TABS=["Overview","Live","Events","People","System","Settings"] as const;
+const TABS=["Overview","Live","Events","People","Security","System","Settings"] as const;
 type Tab=typeof TABS[number];
 
 export type Camera={
@@ -268,6 +269,7 @@ export default function Dashboard(){
         {tab==="Events"&&<EventsPanel events={events} persons={persons} cameras={cameras}
           newEventIds={newEventIds} onChanged={refreshEvents} onAcknowledgeNew={()=>setNewEventIds(new Set())}/>}
         {tab==="People"&&<div id="panel-people" role="tabpanel" aria-labelledby="tab-people"><PeoplePanel/></div>}
+        {tab==="Security"&&<div id="panel-security" role="tabpanel" aria-labelledby="tab-security"><SecurityPanel cameras={cameras}/></div>}
         {tab==="System"&&<section className="panel system-panel" id="panel-system" role="tabpanel" aria-labelledby="tab-system">
           <div className="panel-heading"><div><span className="eyebrow">SYSTEM HEALTH</span><h3>Camera connections</h3></div></div>
           <p className={offlineCount?"error":"success"}>{status}</p>

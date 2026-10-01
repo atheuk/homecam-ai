@@ -774,6 +774,27 @@ async def get_settings():
     }
 
 
+def sse_frame(event: object) -> tuple[str, object]:
+    """Compute the SSE event name and JSON-safe payload for one bus message.
+
+    Every publisher other than the original event pipeline (incidents /
+    security-mode broadcasts) tags its payload with ``_sse_event``; absent,
+    this defaults to the original ``event.created`` name so every existing
+    SSE consumer (Dashboard.tsx's EventSource listener) is unaffected.
+
+    The same dict instance is broadcast to every subscriber (see
+    ``EventBus.publish``), so this must never mutate it in place: popping
+    the key would remove it before other concurrently-connected
+    tabs/subscribers see it, corrupting their event name to the default.
+    Returns a copy instead.
+    """
+    if isinstance(event, dict):
+        sse_event = event.get("_sse_event", "event.created")
+        payload = {k: v for k, v in event.items() if k != "_sse_event"}
+        return sse_event, payload
+    return "event.created", event
+
+
 @router.get("/ws")
 async def sse():
     async def stream():
@@ -782,7 +803,8 @@ async def sse():
             yield "event: ready\ndata: {}\n\n"
             while True:
                 event = await queue.get()
-                yield f"event: event.created\ndata: {json.dumps(event)}\n\n"
+                sse_event, payload = sse_frame(event)
+                yield f"event: {sse_event}\ndata: {json.dumps(payload)}\n\n"
         finally:
             event_service.event_bus.unsubscribe(queue)
 
