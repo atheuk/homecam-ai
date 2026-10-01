@@ -395,7 +395,7 @@ function AddChannelForm({ token, onAdded }: { token: string | null; onAdded: () 
       </label>
       <p className="muted">{TYPE_HINTS[type]}</p>
       <label>
-        Name
+        Channel name
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder={TYPE_LABELS[type]} />
       </label>
       {type === "ntfy" && (

@@ -8,8 +8,8 @@ same incident, and the household-wide notification policy row.
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0013_notifications"
-down_revision = "0012_ingestion_leases"
+revision = "0014_notifications"
+down_revision = "0013_arming_schedules_and_retention"
 
 
 def upgrade():
