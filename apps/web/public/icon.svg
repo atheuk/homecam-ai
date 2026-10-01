@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="HomeCam AI">
+  <rect width="192" height="192" rx="36" fill="#0b0f14"/>
+  <path d="M40 72l64-28 48 20v56l-48 20-64-28z" fill="none" stroke="#4fd1c5" stroke-width="10" stroke-linejoin="round"/>
+  <circle cx="96" cy="100" r="18" fill="#4fd1c5"/>
+</svg>

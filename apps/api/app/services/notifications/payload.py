@@ -93,7 +93,9 @@ def deep_link(incident_id: str) -> str | None:
     base = (settings.web_app_base_url or "").strip().rstrip("/")
     if not base or not incident_id:
         return None
-    return f"{base}/?incident={incident_id}"
+    # ``tab=security`` is what the web app routes on; ``incident`` selects
+    # the one that triggered the alert.
+    return f"{base}/?tab=security&incident={incident_id}"
 
 
 def _parse_time(raw) -> datetime:

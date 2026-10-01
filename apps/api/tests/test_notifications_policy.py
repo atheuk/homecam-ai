@@ -90,7 +90,10 @@ def test_payload_deep_link_is_absent_without_a_configured_base_url(monkeypatch):
     monkeypatch.setattr(settings, "web_app_base_url", None)
     assert build_payload({"id": "inc-1"}, camera_name="Cam").url is None
     monkeypatch.setattr(settings, "web_app_base_url", "https://home.example.com/")
-    assert build_payload({"id": "inc-1"}, camera_name="Cam").url == "https://home.example.com/?incident=inc-1"
+    assert (
+        build_payload({"id": "inc-1"}, camera_name="Cam").url
+        == "https://home.example.com/?tab=security&incident=inc-1"
+    )
 
 
 def test_payload_survives_a_malformed_timestamp():
