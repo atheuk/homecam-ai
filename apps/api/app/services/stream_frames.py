@@ -264,7 +264,7 @@ class StreamFrameReader:
         client = self._client_factory()
         try:
             while not self.hub.idle(self.camera_id):
-                delay = settings.stream_sample_interval_seconds
+                delay = self.hub.sample_interval(self.camera_id)
                 try:
                     await self.fetch_once(client)
                     self._failures = 0
@@ -372,6 +372,39 @@ class StreamFrameHub:
         self._aspect: dict[str, float] = {}
         self._unsupported_at: dict[str, float] = {}
         self._stats_logged_at: dict[str, float] = {}
+        self._boost_until: dict[str, float] = {}
+
+    def boost(self, camera_id: str, seconds: float) -> bool:
+        """Sample ``camera_id`` every ``mailbox_boost_interval_seconds`` for
+        ``seconds`` (e.g. while a person is at the mailbox).
+
+        Only a camera with a working relayed-stream reader is boosted: that
+        costs the NVR nothing extra. Snapshot-only cameras keep their
+        ``event_poll_interval_seconds`` budget. Returns whether it applied.
+        """
+        reader = self._readers.get(camera_id)
+        if seconds <= 0 or reader is None or getattr(reader, "unsupported", False):
+            return False
+        until = time.monotonic() + seconds
+        if until > self._boost_until.get(camera_id, 0.0):
+            self._boost_until[camera_id] = until
+        return True
+
+    def clear_boosts(self) -> None:
+        self._boost_until.clear()
+
+    def boosted(self, camera_id: str | None = None) -> bool:
+        """Whether ``camera_id`` (or, with ``None``, any camera) is boosted."""
+        now = time.monotonic()
+        if camera_id is not None:
+            return self._boost_until.get(camera_id, 0.0) > now
+        return any(until > now for until in self._boost_until.values())
+
+    def sample_interval(self, camera_id: str) -> float:
+        base = settings.stream_sample_interval_seconds
+        if self.boosted(camera_id):
+            return min(base, settings.mailbox_boost_interval_seconds)
+        return base
 
     def ensure(self, camera_id: str) -> None:
         """Start a reader for ``camera_id`` unless one is already running."""
@@ -453,6 +486,7 @@ class StreamFrameHub:
         self._tasks.clear()
         self._readers.clear()
         self._touched.clear()
+        self._boost_until.clear()
 
 
 class _QuietStreamPolling(logging.Filter):

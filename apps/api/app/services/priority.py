@@ -74,6 +74,13 @@ def score_event(
     if package_theft or "package_removed" in tag_set:
         score += 3
         reasons.append("package removed")
+    elif "mailbox_retrieval" in tag_set:
+        score += 1
+        reasons.append("item taken from mailbox")
+
+    if "mailbox_visit" in tag_set:
+        score -= 1
+        reasons.append("mailbox visit, outcome unknown")
 
     if loitering or "loitering" in tag_set:
         score += 1
@@ -95,6 +102,10 @@ def score_event(
         reasons.append("low confidence")
 
     score = max(0, score)
+    if tag_set & {"mailbox_delivery", "mailbox_retrieval"}:
+        # A delivery or retrieval is always worth a normal notification,
+        # even disarmed or with a low-confidence classification.
+        score = max(score, 1)
     return PriorityResult(_bucket(score), score, tuple(reasons))
 
 

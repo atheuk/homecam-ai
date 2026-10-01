@@ -185,8 +185,8 @@ class SceneDedupClaim(Base):
 
     Both API replicas run ingestion against the same cameras, so an
     in-process "last emitted at" timestamp lets each replica emit its own
-    copy of the same package removal. One row per dedup key (for example
-    ``package_removed:<camera>:<zone>``) is claimed with a conditional
+    copy of the same mailbox event. One row per dedup key (for example
+    ``mailbox_retrieval:<camera>:<zone>``) is claimed with a conditional
     UPDATE/INSERT, which the database serializes - see
     :mod:`app.services.scene_dedup`. ``last_at`` is epoch seconds so the
     window comparison is plain arithmetic on SQLite and Postgres alike.

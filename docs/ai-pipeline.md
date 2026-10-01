@@ -311,21 +311,64 @@ low-confidence boxes (`VEHICLE_NEW_TRACK_MIN_CONFIDENCE`) do not create
 tracks. After parking, a vehicle costs no events and no Foundry calls.
 `GET /api/v1/admin/cameras/{id}/scene-state` shows the tracks and zone states.
 
-**Mailbox delivery** — add a zone of kind `mailbox` (off until you do).
-A person covering ≥ `MAILBOX_MIN_ZONE_OVERLAP` of the zone for ≥
-`MAILBOX_MIN_OBSERVATIONS` samples is a visit (fewer is a walk-by). When the
-person has left, the before/during/after evidence decides: a `package`
-detected in the zone after but not before is a deposit; a package seen only
-during the visit was carried past (no event). Otherwise (RT-DETR cannot see
-envelopes) the Foundry vision deployment is asked one closed JSON question
-about the BEFORE/DURING/AFTER crops of that zone — "was an item deposited:
-yes/no/unknown?" — rate-limited by `SCENE_VERIFIER_MIN_INTERVAL_SECONDS`.
-Only `yes` emits one `package` event tagged `mailbox`, `mailbox_delivery`
-and `parcel`/`mail` when stated, with `metadata.mailbox` (visit id,
-confidence, source `local`/`foundry`, before/after evidence). `unknown` is
-recorded on the zone state, not reported. Deliveries are deduplicated for
-`MAILBOX_DEDUPE_SECONDS`. The pre-existing "person at the mailbox" event
-from zone semantics is unchanged.
+**Mailbox** — add a zone of kind `mailbox` (off until you do). Every
+qualifying mailbox interaction emits exactly one `package` event (subject to
+dedup) whose tags start with `mailbox` plus one of:
+
+| Transition / tag | When | Priority |
+| --- | --- | --- |
+| `mailbox_delivery` | an item was put in (package appeared, or Foundry `action=deposited`) | normal (never lower) |
+| `mailbox_retrieval` | an item was taken out (package present before and gone after, or Foundry `action=retrieved`) | normal; high while armed away/night; a locally seen parcel removal also carries `package_removed` (high/critical) |
+| `mailbox_opened` | the mailbox was opened/checked with no item change, including with nobody in view | normal |
+| `mailbox_visit` | a person was at the mailbox but the outcome is unknown | low |
+
+*Opening detection (no person needed).* The tracker keeps a rolling
+reference crop of the idle mailbox (zone expanded slightly), updated only
+when it is stable and nobody is near. Each frame's crop is compared with a
+brightness/contrast-normalised grid signature (the same helper as the bin
+detector, `region_signature`); a difference ≥ `MAILBOX_OPEN_THRESHOLD` for
+`MAILBOX_OPEN_MIN_FRAMES` frames is an opening (one frame is enough while a
+person is near), and dropping below 70 % of the threshold is closed. A
+4×4 grid of context tiles away from the mailbox guards against whole-frame
+changes (IR switch, auto exposure): when more than half of them change too,
+the reference is rebased instead of reporting an opening. Frames where a
+person or vehicle covers the mailbox are skipped. Standalone openings are
+rate-limited by `MAILBOX_OPEN_COOLDOWN_SECONDS`.
+
+*Visits.* A person is "near" when their box covers ≥
+`MAILBOX_MIN_ZONE_OVERLAP` of the zone expanded by
+`MAILBOX_PROXIMITY_MARGIN` (so reaching in from the side counts). A single
+near frame counts as a visit when the lid or a package changed; otherwise at
+least `MAILBOX_MIN_OBSERVATIONS` (default 1) near frames are needed, or it
+is a walk-by (logged, no event). When the person has left, the
+before/during/after evidence decides: a local package change classifies
+immediately; otherwise the Foundry vision deployment answers one closed
+JSON question about the BEFORE/DURING/AFTER crops (`action:
+deposited|retrieved|opened_only|none`, plus `item_deposited`, `item_type`,
+`person_interacted`, `confidence`), rate-limited by
+`SCENE_VERIFIER_MIN_INTERVAL_SECONDS`. Without Foundry the deterministic
+fallback reports `mailbox_opened` when the lid changed and `mailbox_visit`
+otherwise. A package seen only during the visit was carried past
+(`mailbox_visit`). Identity is never inferred: descriptions say "someone".
+
+*Sampling boost.* With stream frames enabled, a person near a mailbox zone
+asks the relayed stream for one sample every
+`MAILBOX_BOOST_INTERVAL_SECONDS` for `MAILBOX_BOOST_SECONDS`, so a 3–6 s
+mail drop is seen in several frames. Snapshot-only cameras are not boosted
+(the NVR CGI budget is fixed); for those, the single-frame rules above apply.
+
+*Diagnostics.* Each finished visit logs one INFO line
+`mailbox <camera>/<zone>: visit <id> observations=… cover=… diff=…
+package_before=… package_after=… lid_changed=… outcome=…`, and lid
+open/close changes are logged too. The periodic `ingestion frames` stats
+line adds `boosted=yes|no` and `mailbox_visits`, `mailbox_walk_by`,
+`mailbox_events`, `mailbox_opened`, `mailbox_deduped` for the window.
+
+*Dedup.* Each transition is deduplicated per zone in memory and, across
+replicas, by a DB claim on `<transition>:<camera>:<zone>` (window
+`MAILBOX_DEDUPE_SECONDS` for deliveries/retrievals, the open cooldown for
+openings/visits). The pre-existing "person at the mailbox" event from zone
+semantics is unchanged.
 
 **Bins** — add a zone of kind `bin` around the curb spot (off until you do).
 Every `BIN_CHECK_INTERVAL_SECONDS`, when no person/vehicle occludes it, the
@@ -523,8 +566,12 @@ request.
 | `VEHICLE_ABSENCE_SECONDS` | `180` | Unseen (with frames arriving) before a vehicle has departed. |
 | `VEHICLE_RETURN_WINDOW_SECONDS` | `86400` | How long a departed vehicle can be recognised as returned. |
 | `SCENE_OUTAGE_SECONDS` | `60` | A frame gap longer than this is a camera outage. |
-| `MAILBOX_DELIVERY_ENABLED` | `true` | Mailbox delivery detection (only acts on `mailbox` zones). |
-| `MAILBOX_MIN_OBSERVATIONS` / `MAILBOX_DEDUPE_SECONDS` | `2` / `900` | Walk-by threshold / one delivery per window. |
+| `MAILBOX_DELIVERY_ENABLED` | `true` | Mailbox detection (only acts on `mailbox` zones). |
+| `MAILBOX_MIN_OBSERVATIONS` / `MAILBOX_DEDUPE_SECONDS` | `1` / `900` | Near frames for a visit without a lid/package change / one delivery or retrieval per window. |
+| `MAILBOX_MIN_ZONE_OVERLAP` / `MAILBOX_PROXIMITY_MARGIN` | `0.2` / `0.1` | Person cover needed over the zone expanded by the margin (normalised). |
+| `MAILBOX_OPEN_DETECTION_ENABLED` / `MAILBOX_OPEN_THRESHOLD` | `true` / `0.4` | Lid/door change detection / normalised crop difference that means open. |
+| `MAILBOX_OPEN_MIN_FRAMES` / `MAILBOX_OPEN_COOLDOWN_SECONDS` | `2` / `300` | Frames an opening must persist with nobody near / one opened (or visit) event per window. |
+| `MAILBOX_BOOST_SECONDS` / `MAILBOX_BOOST_INTERVAL_SECONDS` | `60` / `1.0` | Faster stream sampling while someone is at the mailbox (stream cameras only; `0` disables). |
 | `BIN_DETECTION_ENABLED` | `true` | Bin detection (only acts on `bin` zones). |
 | `BIN_CHECK_INTERVAL_SECONDS` / `BIN_CHANGE_CONFIRM_CHECKS` | `20` / `3` | Region check cadence / checks a change must persist. |
 | `BIN_REMOVAL_COUNTS_AS_EMPTIED` | `false` | Explicit rule: a bin removed right after a collection vehicle counts as emptied. |
@@ -556,10 +603,12 @@ request.
   bin states are persisted; only frame continuity is in memory, so a restart
   counts as an outage. In-flight Foundry checks are also memory-only: a
   restart during one drops that candidate.)
-- **Mailbox and bin detection depend on Foundry in practice.** RT-DETR (COCO)
-  has no envelope or wheelie-bin class, so without Foundry mailbox events only
-  come from a locally detected package and bins stay `unknown`. Verification
-  runs only on candidate sequences, never per frame.
+- **Mailbox contents depend on Foundry in practice.** RT-DETR (COCO)
+  has no envelope or wheelie-bin class, so without Foundry mail deliveries and
+  retrievals are only recognised from a locally detected package; otherwise a
+  visit is reported as `mailbox_opened` (lid change) or `mailbox_visit`, and
+  bins stay `unknown`. Verification runs only on candidate sequences, never
+  per frame. Opening detection is local and needs no Foundry.
 - **Vehicle identity is colour-based only.** "Returned" means a compatible
   colour signature in the same place, not a recognised vehicle; greyscale
   (night IR) crops compare brightness only. There is no make/model or plate

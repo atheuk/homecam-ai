@@ -95,6 +95,22 @@ done
 
 Run the smoke test against a running API with `python scripts/smoke.py`.
 
+### Mailbox detection settings
+
+A `mailbox` zone reports `mailbox_delivery`, `mailbox_retrieval`, `mailbox_opened` (lid change, even with nobody in view) and low-priority `mailbox_visit` events. The main settings are below; the full list is in `docs/ai-pipeline.md`.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `MAILBOX_MIN_OBSERVATIONS` | `1` | Near frames for a visit with no lid/package change (was `2`). |
+| `MAILBOX_MIN_ZONE_OVERLAP` | `0.2` | Person cover of the expanded zone that counts as "near" (was `0.3`). |
+| `MAILBOX_PROXIMITY_MARGIN` | `0.1` | Zone expansion (normalised) so reaching in from the side counts. |
+| `MAILBOX_OPEN_DETECTION_ENABLED` | `true` | Detect the mailbox opening from a reference crop. |
+| `MAILBOX_OPEN_THRESHOLD` | `0.4` | Normalised crop difference that means open; tune from `diff=` in the logs. |
+| `MAILBOX_OPEN_MIN_FRAMES` | `2` | Frames an opening must persist when nobody is near. |
+| `MAILBOX_OPEN_COOLDOWN_SECONDS` | `300` | One opened/visit event per zone per window. |
+| `MAILBOX_DEDUPE_SECONDS` | `900` | One delivery/retrieval per zone per window (also the cross-replica claim). |
+| `MAILBOX_BOOST_SECONDS` / `MAILBOX_BOOST_INTERVAL_SECONDS` | `60` / `1.0` | Faster stream sampling while someone is at the mailbox (stream cameras only). |
+
 Generate an event:
 ```bash
 curl -X POST http://localhost:8000/api/v1/mock/events -H "Content-Type: application/json" -d "{\"camera_id\":\"mock-eufy-doorbell\",\"type\":\"doorbell\"}"

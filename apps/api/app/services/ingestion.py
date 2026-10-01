@@ -465,12 +465,13 @@ def _maybe_log_stats(camera_id: str) -> None:
     if window < settings.ingestion_stats_log_seconds:
         return
     stats = _frame_stats.get(camera_id) or dict.fromkeys(_STAT_KEYS, 0)
+    mailbox = scene_state.drain_mailbox_stats(camera_id)
     frames = stats["stream"] + stats["snapshot"]
     attempts = frames + stats["no_frame"]
     logger.info(
         "ingestion frames %s: window=%.0fs frames=%d success=%s%% cadence=%s stream=%d "
         "stream_repeat=%d stream_missing=%d snapshot=%d snapshot_failed=%d no_frame=%d "
-        "stationary_suppressed=%d scene_events=%d events=%d",
+        "stationary_suppressed=%d scene_events=%d events=%d boosted=%s%s",
         camera_id,
         window,
         frames,
@@ -485,6 +486,8 @@ def _maybe_log_stats(camera_id: str) -> None:
         stats["stationary_suppressed"],
         stats["scene_events"],
         stats["events"],
+        "yes" if stream_hub.boosted(camera_id) else "no",
+        "".join(f" {key}={value}" for key, value in mailbox.items()),
     )
     _frame_stats[camera_id] = dict.fromkeys(_STAT_KEYS, 0)
     _stats_since[camera_id] = now
@@ -498,6 +501,7 @@ def reset_cooldowns() -> None:
     _last_stream_seq.clear()
     _frame_stats.clear()
     _stats_since.clear()
+    stream_hub.clear_boosts()
     scene_state.reset_memory()
 
 
@@ -550,10 +554,15 @@ def tick_seconds() -> float:
 
     With stream frames the loop runs at the stream sampling interval;
     snapshot-only cameras are still rate limited per camera to
-    ``event_poll_interval_seconds`` inside :func:`_acquire_frame`.
+    ``event_poll_interval_seconds`` inside :func:`_acquire_frame`. While a
+    stream camera is boosted (a person at a mailbox) the loop follows its
+    faster ``mailbox_boost_interval_seconds``.
     """
     if settings.stream_frames_enabled:
-        return min(settings.stream_sample_interval_seconds, settings.event_poll_interval_seconds)
+        tick = min(settings.stream_sample_interval_seconds, settings.event_poll_interval_seconds)
+        if stream_hub.boosted():
+            tick = min(tick, settings.mailbox_boost_interval_seconds)
+        return tick
     return settings.event_poll_interval_seconds
 
 
