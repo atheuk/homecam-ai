@@ -306,3 +306,20 @@ async def test_a_correct_guess_verified_before_a_concurrent_lockout_cannot_still
         user = await session.get(User, user_id_2)
         assert user.failed_attempts == 0
         assert user.locked_until is None
+
+
+@pytest.mark.asyncio
+async def test_login_lock_cache_stays_bounded_for_many_distinct_emails(client):
+    from app.api.auth_routes import _lock_for_email
+
+    _lock_for_email.cache_clear()
+    for index in range(300):
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": f"unknown-{index}@example.com", "password": "not-a-valid-account"},
+        )
+        assert response.status_code == 401
+
+    info = _lock_for_email.cache_info()
+    assert info.maxsize == 256
+    assert info.currsize <= info.maxsize

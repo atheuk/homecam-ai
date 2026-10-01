@@ -223,8 +223,8 @@ async def test_rectangle_zones_still_have_no_points(client):
 # --- still endpoint ---------------------------------------------------------
 
 
-async def test_still_requires_authentication(client):
-    response = await client.get("/api/v1/admin/cameras/mock-front-door/still")
+async def test_still_requires_authentication(anonymous_client):
+    response = await anonymous_client.get("/api/v1/admin/cameras/mock-front-door/still")
     assert response.status_code == 401
 
 

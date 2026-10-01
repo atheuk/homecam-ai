@@ -65,8 +65,8 @@ async def test_crypto_roundtrip_and_tamper_detection():
 
 
 @pytest.mark.asyncio
-async def test_admin_endpoints_require_authentication(client):
-    r = await client.get("/api/v1/admin/providers")
+async def test_admin_endpoints_require_authentication(anonymous_client):
+    r = await anonymous_client.get("/api/v1/admin/providers")
     assert r.status_code == 401
 
 

@@ -72,7 +72,7 @@ async def _make_event(camera_id="mock-front-door", *, with_photo=True, when=None
     return event_id
 
 
-async def test_event_photo_is_served_as_real_image_bytes(client):
+async def test_event_photo_is_served_as_real_image_bytes(client, anonymous_client):
     """The photo must come back as renderable bytes, not a server-side path.
 
     This is the bug the feature exists to fix: photos used to be written to
@@ -82,7 +82,7 @@ async def test_event_photo_is_served_as_real_image_bytes(client):
     event_id = await _make_event()
 
     url = f"/api/v1/events/{event_id}/photo"
-    assert (await client.get(url)).status_code == 401
+    assert (await anonymous_client.get(url)).status_code == 401
     response = await client.get(url, headers=await auth_headers(client))
 
     assert response.status_code == 200
@@ -192,14 +192,14 @@ async def test_renaming_a_person_relabels_their_history(client):
     assert all(event["person_name"] == "Alex" for event in detail["events"])
 
 
-async def test_person_photo_serves_their_cover_image(client):
+async def test_person_photo_serves_their_cover_image(client, anonymous_client):
     event_id = await _make_event()
     person_id = (
         await client.post(f"/api/v1/events/{event_id}/person", json={"name": "Jo"})
     ).json()["id"]
 
     url = f"/api/v1/persons/{person_id}/photo"
-    assert (await client.get(url)).status_code == 401
+    assert (await anonymous_client.get(url)).status_code == 401
     response = await client.get(url, headers=await auth_headers(client))
 
     assert response.status_code == 200

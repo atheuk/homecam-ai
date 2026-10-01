@@ -51,10 +51,10 @@ MAILBOX = {"name": "mailbox", "kind": "mailbox", "x1": 0.7, "y1": 0.3, "x2": 0.9
 # --- admin plane ------------------------------------------------------------
 
 
-async def test_zone_routes_require_authentication(client):
-    assert (await client.get("/api/v1/admin/cameras/mock-front-door/zones")).status_code == 401
+async def test_zone_routes_require_authentication(anonymous_client):
+    assert (await anonymous_client.get("/api/v1/admin/cameras/mock-front-door/zones")).status_code == 401
     assert (
-        await client.post("/api/v1/admin/cameras/mock-front-door/zones", json=DRIVEWAY)
+        await anonymous_client.post("/api/v1/admin/cameras/mock-front-door/zones", json=DRIVEWAY)
     ).status_code == 401
 
 
@@ -109,7 +109,7 @@ async def _add_zone(client, camera_id: str, zone: dict) -> None:
     assert created.status_code == 201, created.text
 
 
-async def test_person_event_gets_ai_analysis_and_best_photo(client):
+async def test_person_event_gets_ai_analysis_and_best_photo(client, anonymous_client):
     created = await client.post("/api/v1/mock/events", json={"camera_id": "mock-front-door", "type": "person"})
     assert created.status_code == 200, created.text
     event_id = created.json()["id"]
@@ -125,7 +125,7 @@ async def test_person_event_gets_ai_analysis_and_best_photo(client):
     assert body["best_photo_path"]
     assert body["full_photo_url"] == f"/api/v1/events/{event_id}/photo/full"
     assert body["full_photo_boxes"] == body["metadata"]["best_photo"]["frame_boxes"]
-    assert (await client.get(body["full_photo_url"])).status_code == 401
+    assert (await anonymous_client.get(body["full_photo_url"])).status_code == 401
     assert (await client.get(body["full_photo_url"], headers=await _headers(client))).status_code == 200
 
     async with SessionLocal() as session:
@@ -135,7 +135,7 @@ async def test_person_event_gets_ai_analysis_and_best_photo(client):
         assert rows[0].detections[0]["label"] == "person"
 
 
-async def test_detected_event_regrabs_high_resolution_and_serves_original(client, monkeypatch):
+async def test_detected_event_regrabs_high_resolution_and_serves_original(client, anonymous_client, monkeypatch):
     def jpeg(size):
         output = io.BytesIO()
         Image.new("RGB", size, (80, 60, 50)).save(output, "JPEG")
@@ -168,7 +168,7 @@ async def test_detected_event_regrabs_high_resolution_and_serves_original(client
     assert calls == ["mock-front-door"]
     assert (body["full_photo_width"], body["full_photo_height"]) == (1920, 1080)
     assert body["photo_width"] >= 720 and body["photo_height"] >= 720
-    assert (await client.get(body["full_photo_url"])).status_code == 401
+    assert (await anonymous_client.get(body["full_photo_url"])).status_code == 401
     full = await client.get(body["full_photo_url"], headers=await _headers(client))
     assert full.status_code == 200
     assert full.headers["cache-control"] == "private, no-store"
@@ -177,7 +177,7 @@ async def test_detected_event_regrabs_high_resolution_and_serves_original(client
 
 
 @pytest.mark.parametrize("failure", ["overflow", "timeout"])
-async def test_failed_high_resolution_capture_keeps_detected_frame(client, monkeypatch, failure):
+async def test_failed_high_resolution_capture_keeps_detected_frame(client, anonymous_client, monkeypatch, failure):
     class BusyProvider:
         async def get_evidence_snapshot(self, _camera_id):
             if failure == "timeout":
@@ -204,7 +204,7 @@ async def test_failed_high_resolution_capture_keeps_detected_frame(client, monke
         await event_service.create_and_broadcast_event(session, event, trigger_frame=low, frames=[low])
     body = (await client.get(f"/api/v1/events/{event_id}")).json()
     assert (body["full_photo_width"], body["full_photo_height"]) == (640, 480)
-    assert (await client.get(body["full_photo_url"])).status_code == 401
+    assert (await anonymous_client.get(body["full_photo_url"])).status_code == 401
     full = await client.get(body["full_photo_url"], headers=await _headers(client))
     assert full.status_code == 200
     assert full.content == low

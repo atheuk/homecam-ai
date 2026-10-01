@@ -52,10 +52,9 @@ async def _clean():
         ("POST", "/api/v1/security/deterrence/actions/act-x/cancel"),
     ],
 )
-async def test_new_endpoints_reject_unauthenticated_requests(client, method, path):
+async def test_new_endpoints_reject_unauthenticated_requests(anonymous_client, method, path):
     body = {"camera_id": "mock-front-door", "action": "light"} if method == "POST" else None
-    client.cookies.clear()
-    r = await client.request(method, path, json=body)
+    r = await anonymous_client.request(method, path, json=body)
     assert r.status_code == 401, (path, r.status_code, r.text)
 
 
@@ -110,7 +109,7 @@ async def _run_ingestion() -> int:
 
 
 @pytest.mark.asyncio
-async def test_package_theft_evidence_is_stored_and_retrievable(client, monkeypatch):
+async def test_package_theft_evidence_is_stored_and_retrievable(client, anonymous_client, monkeypatch):
     headers = await auth_headers(client)
     async with SessionLocal() as session:
         await security_modes.set_mode(session, "away", None)
@@ -132,10 +131,7 @@ async def test_package_theft_evidence_is_stored_and_retrievable(client, monkeypa
         assert image.headers["cache-control"] == "private, no-store"
         assert image.content == expected
         # Evidence is incident material: never public.
-        saved = dict(client.cookies)
-        client.cookies.clear()
-        assert (await client.get(url)).status_code == 401
-        client.cookies.update(saved)
+        assert (await anonymous_client.get(url)).status_code == 401
 
 
 @pytest.mark.asyncio

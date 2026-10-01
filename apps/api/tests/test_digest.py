@@ -168,9 +168,9 @@ async def test_digest_endpoint_rejects_bad_date(client):
 
 
 @pytest.mark.asyncio
-async def test_digest_endpoint_requires_auth(client):
+async def test_digest_endpoint_requires_auth(anonymous_client, client):
     """The digest exposes incident ids and summaries, so it is never public."""
-    r = await client.get("/api/v1/digest")
+    r = await anonymous_client.get("/api/v1/digest")
     assert r.status_code == 401
     r = await client.get("/api/v1/digest", headers={"Authorization": "Bearer not-a-real-token"})
     assert r.status_code == 401

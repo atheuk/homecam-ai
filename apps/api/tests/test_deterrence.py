@@ -191,9 +191,9 @@ async def _headers(client) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_deterrence_routes_require_auth(client):
-    assert (await client.get("/api/v1/security/deterrence/capabilities")).status_code == 401
-    r = await client.post(
+async def test_deterrence_routes_require_auth(anonymous_client):
+    assert (await anonymous_client.get("/api/v1/security/deterrence/capabilities")).status_code == 401
+    r = await anonymous_client.post(
         "/api/v1/security/deterrence/actions",
         json={"camera_id": "mock-front-door", "action": "siren"},
     )

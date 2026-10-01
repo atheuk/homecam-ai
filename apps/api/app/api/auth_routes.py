@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -50,15 +51,23 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 # concurrent, independently-arriving failed attempt has committed the
 # lockout, because the success path's ``UPDATE`` re-checks ``locked_until``
 # against the database's current value, not a stale in-memory read.
-_login_locks: dict[str, asyncio.Lock] = {}
-
-
+@lru_cache(maxsize=256)
 def _lock_for_email(email: str) -> asyncio.Lock:
-    lock = _login_locks.get(email)
-    if lock is None:
-        lock = asyncio.Lock()
-        _login_locks[email] = lock
-    return lock
+    return asyncio.Lock()
+
+
+async def _lock_initial_registration(session: AsyncSession) -> None:
+    """Serialize production bootstrap across API replicas using the database."""
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": "homecam-ai:initial-account"},
+        )
+    elif dialect == "sqlite":
+        await session.execute(text("BEGIN IMMEDIATE"))
+    else:
+        raise HTTPException(status_code=503, detail="Initial account setup is unavailable for this database")
 
 
 async def _register_failed_attempt(session: AsyncSession, user_id: str, now: datetime) -> tuple[int, datetime | None]:
@@ -159,6 +168,12 @@ def _is_locked(user: User, now: datetime) -> bool:
 
 @router.post("/register", response_model=UserOut, status_code=201)
 async def register(payload: RegisterIn, session: AsyncSession = Depends(get_db)):
+    if settings.app_env.lower() == "production":
+        await _lock_initial_registration(session)
+        first_user = await session.execute(select(User.id).limit(1))
+        if first_user.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=403, detail="Initial account setup is already complete")
+
     existing = await session.execute(select(User).where(User.email == payload.email))
     if existing.scalars().first() is not None:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
@@ -220,7 +235,14 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
         ))
         await audit_service.record(session, "auth.login", actor_user_id=user.id, target_type="user", target_id=user.id)
         await session.commit()
-    response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", expires=int(expires_at.timestamp()))
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=settings.app_env.lower() == "production",
+        samesite="lax",
+        expires=int(expires_at.timestamp()),
+    )
     return TokenOut(access_token=token, expires_at=expires_at, user=UserOut.model_validate(user))
 
 

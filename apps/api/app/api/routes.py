@@ -59,7 +59,9 @@ from ..services.provider_registry import (
     hidden_provider_ids,
 )
 
-router = APIRouter(prefix="/api/v1")
+# Every API-v1 route in this router exposes household state or can mutate it.
+# Keep authentication at the router boundary so new routes fail closed too.
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(get_current_user)])
 
 
 async def find_mock_provider_for_camera(camera_id: str):
