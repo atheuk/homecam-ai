@@ -23,6 +23,7 @@ import tempfile
 _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
 os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db_path}"
+os.environ.setdefault("APP_ENV", "development")
 # Best-photo files must land in a throwaway directory, never the repo.
 _media_root = tempfile.mkdtemp(prefix="homecam-media-")
 os.environ["MEDIA_ROOT"] = _media_root
@@ -87,15 +88,17 @@ async def _reset_scene_state():
 
     from app.ai.scene_verifier import reset_scene_verifier, set_scene_verifier
     from app.db import SessionLocal
-    from app.models.db import SceneState, VehicleTrack
-    from app.services import scene_state
+    from app.models.db import IngestionLease, SceneState, VehicleTrack
+    from app.services import ingestion_lease, scene_state
 
     async def _clear():
         scene_state.reset_memory()
+        ingestion_lease.keeper.reset()
         try:
             async with SessionLocal() as session:
                 await session.execute(delete(VehicleTrack))
                 await session.execute(delete(SceneState))
+                await session.execute(delete(IngestionLease))
                 await session.commit()
         except OperationalError:
             pass  # tables not created yet (no client fixture used so far)
@@ -107,13 +110,36 @@ async def _reset_scene_state():
     reset_scene_verifier()
 
 
+_test_authorization: str | None = None
+
+
 @pytest.fixture
-async def client():
+async def api_transport():
     from app.main import app
 
     async with app.router.lifespan_context(app):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            yield c
+        yield ASGITransport(app=app)
+
+
+@pytest.fixture
+async def anonymous_client(api_transport):
+    async with AsyncClient(transport=api_transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+async def client(api_transport):
+    global _test_authorization
+    async with AsyncClient(transport=api_transport, base_url="http://test") as c:
+        if _test_authorization is None:
+            payload = {"email": "pytest-default@homecam.test", "password": "pytest-password-123"}
+            registration = await c.post("/api/v1/auth/register", json=payload)
+            assert registration.status_code in (201, 409)
+            login = await c.post("/api/v1/auth/login", json=payload)
+            assert login.status_code == 200
+            _test_authorization = f"Bearer {login.json()['access_token']}"
+        c.headers["Authorization"] = _test_authorization
+        yield c
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -122,5 +148,4 @@ def pytest_sessionfinish(session, exitstatus):
     except OSError:
         pass
     shutil.rmtree(_media_root, ignore_errors=True)
-
 

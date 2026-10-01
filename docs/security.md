@@ -7,10 +7,10 @@ now*, *does this event deserve a human's attention as one incident, not N
 duplicate notifications*, *can each camera currently be trusted*, and *who
 did what, when*.
 
-All of it is additive and backward compatible: existing camera/event/AI
-endpoints, payloads, and behavior are unchanged. Every new capability is
-reachable only via new `/api/v1/security/*` routes and a new "Security" tab
-in the dashboard.
+Security features are additive, but access to household API data is not
+public: every `/api/v1` route requires authentication except login and
+initial account registration. The root health and readiness probes remain
+public.
 
 ## Design boundary: deterministic safety vs. AI assistance
 
@@ -42,6 +42,33 @@ code comments and the UI:
   adds no new person-identification capability. Zone `kind` (e.g.
   `driveway` vs `entry`) is a property of a *camera zone an admin drew*,
   not of a detected person.
+
+## API access and account bootstrap
+
+Every `/api/v1` route requires a valid bearer token or the `homecam_session`
+HttpOnly cookie, including camera snapshots/live streams, event and person
+data, photos, activity, settings, security, and the SSE event stream. The
+only unauthenticated versioned endpoints are `POST /api/v1/auth/login` and
+`POST /api/v1/auth/register`; `/health` and `/ready` remain public for
+platform probes. Browser fetches use an in-memory bearer token, which the
+HLS player sends only to URLs on the configured API origin, never to
+provider-supplied cross-origin manifests or segments. The dashboard does
+not persist bearer tokens: on reload it restores the login from the
+`HttpOnly` session cookie and sends authenticated requests with browser
+credentials. The cookie is `Secure; SameSite=None` in production to support
+separate web/API origins; unsafe cookie-authenticated requests require the
+`X-HomeCam-Request: 1` header and are CORS-restricted to configured origins.
+
+Production registration requires the out-of-band `AUTH_BOOTSTRAP_SECRET`
+environment setting and a matching `X-HomeCam-Bootstrap-Secret` request
+header. If the setting is absent, registration is disabled. When configured,
+the first account is created under a database lock; later attempts return
+`403`. No public endpoint reveals whether an account exists. The deployed
+environment already has an owner account, so normal release rollout neither
+requires nor attempts account creation. Development keeps registration
+available without a bootstrap secret. The per-email login-lock map is capped
+at 256 cached locks; database lockout updates remain the correctness boundary
+across replicas.
 
 ## Arming modes
 
@@ -155,7 +182,9 @@ has two layers:
 1. **In-process `asyncio.Lock`** keyed by the same tuple the dedup/lockout
    logic groups on -- `(camera_id, zone, kind)` for intrusion incidents,
    `(camera_id, kind)` for camera-health incidents, and the normalized
-   email for login attempts. This serializes same-process concurrent
+   email for login attempts. The login lock cache is capped at 256 entries
+   so distinct unknown login names cannot grow it without limit. This
+   serializes same-process concurrent
    requests for the *same* key with no database round-trip, and is a fast
    path only -- it does nothing across replicas.
 2. **A database-level guarantee that holds even across replicas:**
@@ -205,35 +234,17 @@ fast path, including a test that reproduces the correct-guess-vs-lockout
 race at `failed_attempts == threshold - 1` and confirms the correct guess
 is rejected once the lockout commits first.
 
-## Known accepted risks
+## Remaining gaps
 
-A few findings surfaced during review are deliberately left as-is rather
-than changed, because closing them would either be a larger architectural
-change out of this scope or would slightly weaken debuggability without
-meaningfully changing the actual risk:
-
-- **`/ws` realtime stream has no auth requirement.** This is a pre-existing
-  gap (not introduced by this feature set) that now also carries incident
-  and security-mode broadcasts. It never carries camera credentials/RTSP
-  URLs/secrets, and HomeCam AI's threat model is a trusted local network
-  (see main `README.md`); tracked as a follow-up to require the same
-  bearer/cookie auth as the REST API before any internet-facing/multi-user
-  deployment.
 - **Lockout responses use distinct status codes (`401` vs `423`).** This
-  intentionally tells a caller *that* an account exists and is locked
-  (rather than merging both cases into a generic `401`) so a legitimate
-  user gets a clear "come back later" message instead of repeatedly
-  retrying a correct password. The trade-off is a minor account-enumeration
-  signal, accepted because the response never reveals whether the *current*
-  password attempt would have succeeded.
-- **The dev-only `POST /mock/events` endpoint has no auth and can create
-  real incidents.** It always existed to let a developer/tester manually
-  inject synthetic detections without a real camera; incidents/escalation
-  now build on the same event pipeline, so a manually-injected mock event
-  can now also produce a "real" incident. This is unchanged behavior for a
-  developer convenience endpoint that should never be exposed outside a
-  trusted local dev environment, and is documented here rather than gated,
-  to avoid adding auth friction to local testing.
+  intentionally tells a caller that an account is locked so a legitimate
+  user gets a clear "come back later" message. The trade-off is a minor
+  account-enumeration signal; the response does not reveal whether the
+  current password attempt would have succeeded.
+- **Authentication is still a minimal local account system.** It has no
+  MFA, email verification, password recovery, or external identity
+  provider. Production bootstrap is an operator-controlled one-time process,
+  but these controls remain separate production-hardening work.
 
 ## Audit trail (`app/services/audit.py`)
 

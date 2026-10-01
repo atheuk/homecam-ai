@@ -1,11 +1,12 @@
 import {describe,it,expect,vi,beforeEach} from "vitest";import {render,screen,fireEvent,waitFor} from "@testing-library/react";import SecurityPanel from "./SecurityPanel";
-import {MockEventSource} from "../test-setup";
+import {MockSseStream} from "../test-setup";
 
 function jsonResponse(body:unknown,status=200){return new Response(JSON.stringify(body),{status});}
 
 function mockFetch(handlers:Record<string,(init?:RequestInit)=>Response>){
   global.fetch=vi.fn(async(url:string,init?:RequestInit)=>{
     const path=String(url);
+    if(path.includes("/ws")) return MockSseStream.response();
     for(const [key,handler] of Object.entries(handlers)){
       if(path.includes(key)) return handler(init);
     }
@@ -32,7 +33,7 @@ async function signIn(){
 
 describe("SecurityPanel",()=>{
   beforeEach(()=>{
-    MockEventSource.instances.length=0;
+    MockSseStream.instances.length=0;
     mockFetch({
       "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"user@example.com",created_at:new Date().toISOString()}}),
       "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
@@ -135,10 +136,11 @@ describe("SecurityPanel",()=>{
       "/security/audit-log":()=>jsonResponse([]),
     });
     await signIn();
+    await screen.findByText("Nothing needs attention right now.");
     expect(screen.queryByText("Motion detected at Driveway")).not.toBeInTheDocument();
     expect(screen.getByText("0 open")).toBeInTheDocument();
 
-    const source=MockEventSource.instances.at(-1);
+    const source=MockSseStream.instances.at(-1);
     expect(source).toBeDefined();
     source!.dispatch("incident.created",{...baseIncident});
 
@@ -158,7 +160,7 @@ describe("SecurityPanel",()=>{
       "/security/audit-log":()=>jsonResponse([]),
     });
     await signIn();
-    const source=MockEventSource.instances.at(-1);
+    const source=MockSseStream.instances.at(-1);
     expect(source).toBeDefined();
 
     source!.dispatch("incident.updated",{...baseIncident});

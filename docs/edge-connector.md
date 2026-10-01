@@ -66,7 +66,9 @@ repository's managed **HomeCam Dahua edge connector** add-on instead:
    `https://github.com/atheuk/homecam-ai`.
 2. Install **HomeCam Dahua edge connector**.
 3. Configure its Dahua settings, connector token, and Tailscale HLS base URL
-   in the add-on UI; then start it.
+   in the add-on UI; then start it. The add-on's
+   `dahua_evidence_snapshot_timeout_seconds` option defaults to 3 seconds
+   and bounds the one-off full-resolution snapshot requested after a detection.
 
 The add-on is in `homecam-edge/` and runs the same connector/MediaMTX design
 as the Compose deployment. Use `apps/edge/docker-compose.yml` only on
@@ -108,6 +110,11 @@ curl -H "Authorization: Bearer $HOME_CAM_EDGE_TOKEN" http://127.0.0.1:8443/healt
 the edge connector is up but cannot reach the Dahua NVR — check
 `DAHUA_HOST`/credentials and that this host is actually on the same LAN
 as the NVR.
+
+`DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS` in the Compose `.env` and the
+`dahua_evidence_snapshot_timeout_seconds` Home Assistant add-on option both
+default to 3 seconds. They bound the main-stream evidence snapshot attempt;
+routine polling continues to use `DAHUA_TIMEOUT_SECONDS`.
 
 ## 4. Point Azure at it (no redeploy needed)
 

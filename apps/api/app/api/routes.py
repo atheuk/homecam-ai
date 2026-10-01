@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
 import ipaddress
 import json
 import os
@@ -21,9 +22,10 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth.dependencies import get_current_auth_session, get_current_user
 from ..config import settings
-from ..db import get_db
-from ..models.db import AIAnalysis, Event, EventPhoto, Person
+from ..db import SessionLocal, get_db
+from ..models.db import AIAnalysis, AuthSession, Event, EventEvidence, EventPhoto, Person, User
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
 from ..providers.capabilities import AUDIO_DETECTION
 from ..schemas import (
@@ -44,8 +46,10 @@ from ..ai.vision import get_image_embedder
 from ..services import activities as activity_service
 from ..services import cameras as camera_service
 from ..services import detector_watchdog
+from ..services import digest as digest_service
 from ..services import events as event_service
 from ..services import persons as person_service
+from ..services import search as search_service
 from ..services.ingestion import frame_stats as ingestion_service_stats
 from ..services.stream_frames import stream_hub
 from ..services.provider_registry import (
@@ -56,7 +60,10 @@ from ..services.provider_registry import (
     hidden_provider_ids,
 )
 
-router = APIRouter(prefix="/api/v1")
+# Every API-v1 route in this router exposes household state or can mutate it.
+# Keep authentication at the router boundary so new routes fail closed too.
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(get_current_user)])
+SSE_AUTH_RECHECK_INTERVAL_SECONDS = 15
 
 
 async def find_mock_provider_for_camera(camera_id: str):
@@ -355,11 +362,89 @@ async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dic
         )
         payload["has_photo"] = row.id in photo_ids
         payload["photo_url"] = f"/api/v1/events/{row.id}/photo" if row.id in photo_ids else None
+        payload["full_photo_url"] = (
+            f"/api/v1/events/{row.id}/photo/full"
+            if row.id in photo_ids and (row.event_metadata or {}).get("best_photo", {}).get("full_frame")
+            else None
+        )
     return payloads
 
 
+@router.get("/search")
+async def search(
+    q: str,
+    camera_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 20,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Natural-language event search ("blue van in the driveway last night").
+
+    Requires sign-in: results carry AI descriptions, priority reasons and
+    loitering/package-theft signals, the same class of data the incident
+    endpoints protect. Queries asking *who* someone is are refused or
+    stripped first - see :mod:`app.ai.query_moderation`.
+    """
+    if not settings.search_enabled:
+        raise HTTPException(status_code=503, detail="Search is disabled")
+    moderation, hits = await search_service.search_events(
+        session, q, camera_id=camera_id, since=since, until=until, limit=limit
+    )
+    if moderation.refused:
+        return {
+            "query": q,
+            "refused": True,
+            "notice": moderation.message,
+            "blocked_categories": list(moderation.categories),
+            "results": [],
+        }
+    payloads = await _decorate_events(session, [hit.row for hit in hits])
+    for payload, hit in zip(payloads, hits):
+        payload["score"] = round(hit.score, 4)
+        payload["semantic_score"] = round(hit.semantic_score, 4)
+        payload["keyword_score"] = round(hit.keyword_score, 4)
+    return {
+        "query": moderation.query,
+        "refused": False,
+        "notice": moderation.message,
+        "blocked_categories": list(moderation.categories),
+        "results": payloads,
+    }
+
+
+@router.get("/digest")
+async def digest(
+    date: str | None = None,
+    refresh: bool = False,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """The day-in-review digest. Defaults to today (UTC).
+
+    Requires sign-in, like the incident endpoints: the digest exposes
+    incident ids and summaries.
+    """
+    if not settings.digest_enabled:
+        raise HTTPException(status_code=503, detail="Digest is disabled")
+    if date:
+        try:
+            day = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from None
+    else:
+        day = datetime.now(timezone.utc).date()
+    result = await digest_service.generate(session, day, refresh=refresh)
+    return result.as_dict()
+
+
 @router.get("/events/{event_id}/photo")
-async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
+async def event_photo(
+    event_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
     """The stored best photo for an event, as real renderable image bytes.
 
     Served from the database rather than ``media_root`` because the deployed
@@ -373,9 +458,54 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
         content=photo.image,
         media_type=photo.content_type or "image/jpeg",
         headers={
-            # Photos are immutable once captured, so let the browser keep them.
-            "Cache-Control": "public, max-age=86400",
+            "Cache-Control": "private, no-store",
             "Content-Disposition": f'inline; filename="{event_id}.jpg"',
+        },
+    )
+
+
+@router.get("/events/{event_id}/photo/full")
+async def event_full_photo(
+    event_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Original full-frame bytes corresponding to the selected event photo."""
+    photo = await session.get(EventEvidence, (event_id, "full"))
+    if photo is None:
+        raise HTTPException(404, "No full-frame photo stored for this event")
+    return Response(
+        content=photo.image,
+        media_type=photo.content_type or "image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{event_id}-full.jpg"',
+        },
+    )
+
+
+@router.get("/events/{event_id}/evidence/{label}")
+async def event_evidence(
+    event_id: str,
+    label: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """A stored labelled evidence image for an event (e.g. package
+    ``before``/``after`` crops referenced by ``Incident.evidence``).
+
+    Authenticated because it is incident evidence, and served from the
+    database so any replica can return it. See ``app.models.db.EventEvidence``.
+    """
+    row = await session.get(EventEvidence, (event_id, label))
+    if row is None:
+        raise HTTPException(404, "No evidence stored for this event and label")
+    return Response(
+        content=row.image,
+        media_type=row.content_type or "image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{event_id}-{label}.jpg"',
         },
     )
 
@@ -526,7 +656,11 @@ async def merge_persons(
 
 
 @router.get("/persons/{person_id}/photo")
-async def person_photo(person_id: str, session: AsyncSession = Depends(get_db)):
+async def person_photo(
+    person_id: str,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
     """Representative photo for an identity (their best-rated sighting)."""
     person = await person_service.get_person(session, person_id)
     if person is None:
@@ -539,7 +673,7 @@ async def person_photo(person_id: str, session: AsyncSession = Depends(get_db)):
     return Response(
         content=photo.image,
         media_type=photo.content_type or "image/jpeg",
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
@@ -796,13 +930,33 @@ def sse_frame(event: object) -> tuple[str, object]:
 
 
 @router.get("/ws")
-async def sse():
+async def sse(auth_session: AuthSession = Depends(get_current_auth_session)):
     async def stream():
         queue = event_service.event_bus.subscribe()
+        next_auth_check = asyncio.get_running_loop().time() + SSE_AUTH_RECHECK_INTERVAL_SECONDS
         try:
             yield "event: ready\ndata: {}\n\n"
             while True:
-                event = await queue.get()
+                timeout = max(0, next_auth_check - asyncio.get_running_loop().time())
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except TimeoutError:
+                    event = None
+
+                if asyncio.get_running_loop().time() >= next_auth_check:
+                    async with SessionLocal() as session:
+                        active_session = await session.get(AuthSession, auth_session.token_hash)
+                    expires_at = active_session.expires_at if active_session else None
+                    if expires_at is not None:
+                        if expires_at.tzinfo is None:
+                            expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    if active_session is None or expires_at <= datetime.now(timezone.utc):
+                        return
+                    next_auth_check = asyncio.get_running_loop().time() + SSE_AUTH_RECHECK_INTERVAL_SECONDS
+
+                if event is None:
+                    yield ": keep-alive\n\n"
+                    continue
                 sse_event, payload = sse_frame(event)
                 yield f"event: {sse_event}\ndata: {json.dumps(payload)}\n\n"
         finally:

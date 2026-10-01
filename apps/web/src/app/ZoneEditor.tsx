@@ -12,6 +12,7 @@ export type CameraZoneShape = {
   x2: number;
   y2: number;
   points?: number[][] | null;
+  dwell_seconds?: number | null;
 };
 
 type Still = {
@@ -24,7 +25,7 @@ type Still = {
 
 type Props = {
   apiBase: string;
-  token: string;
+  token: string | null;
   cameraId: string;
   zoneKinds: readonly string[];
   kindHints: Record<string, string>;
@@ -75,6 +76,7 @@ export default function ZoneEditor({
   const [points, setPoints] = useState<number[][]>([]);
   const [name, setName] = useState("mailbox");
   const [kind, setKind] = useState("mailbox");
+  const [dwellSeconds, setDwellSeconds] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +92,7 @@ export default function ZoneEditor({
 
   const loadStill = useCallback(
     async (force: boolean) => {
-      if (!cameraId || !token) return;
+      if (!cameraId) return;
       const requestId = ++stillRequestId.current;
       const isCurrent = () => stillRequestId.current === requestId;
       const previousFailure = failures.current[cameraId];
@@ -104,7 +106,8 @@ export default function ZoneEditor({
       setStillError(null);
       try {
         const r = await fetch(`${apiBase}/api/v1/admin/cameras/${cameraId}/still`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: "include",
         });
         if (!isCurrent()) return;
         if (!r.ok) {
@@ -193,6 +196,7 @@ export default function ZoneEditor({
     setEditingId(zone.id);
     setName(zone.name);
     setKind(zone.kind);
+    setDwellSeconds(zone.dwell_seconds == null ? "" : String(zone.dwell_seconds));
     setPoints(zoneOutline(zone).map(([x, y]) => [x, y]));
     setStatus(`Editing “${zone.name}”. Redraw the shape, then save.`);
     setError(null);
@@ -201,6 +205,7 @@ export default function ZoneEditor({
   function stopEditing() {
     setEditingId(null);
     setPoints([]);
+    setDwellSeconds("");
     setStatus(null);
     setError(null);
   }
@@ -218,14 +223,33 @@ export default function ZoneEditor({
     setBusy(true);
     setError(null);
     setStatus(null);
+    // Only sent when the household actually typed a threshold: an empty field
+    // means "inherit the server default", which the API models as null.
+    const dwell = dwellSeconds.trim();
+    let dwellValue: number | null = null;
+    if (dwell) {
+      dwellValue = Number(dwell);
+      if (!Number.isFinite(dwellValue) || dwellValue <= 0) {
+        setError("Loitering seconds must be a positive number.");
+        setBusy(false);
+        return;
+      }
+    }
     try {
       const url = editingId
         ? `${apiBase}/api/v1/admin/cameras/${cameraId}/zones/${editingId}`
         : `${apiBase}/api/v1/admin/cameras/${cameraId}/zones`;
+      const body: Record<string, unknown> = { name: name.trim(), kind, points };
+      if (dwellValue !== null) body.dwell_seconds = dwellValue;
       const r = await fetch(url, {
         method: editingId ? "PUT" : "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), kind, points }),
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          "Content-Type": "application/json",
+          "X-HomeCam-Request": "1",
+        },
+        credentials: "include",
+        body: JSON.stringify(body),
       });
       if (!r.ok) {
         setError(
@@ -236,6 +260,7 @@ export default function ZoneEditor({
       setStatus(editingId ? "Zone updated." : "Zone saved.");
       setEditingId(null);
       setPoints([]);
+      setDwellSeconds("");
       await onSaved();
     } catch {
       setError("Could not reach the API to save the zone.");
@@ -374,6 +399,22 @@ export default function ZoneEditor({
           </select>
         </label>
         {kindHints[kind] && <p className="muted zone-kind-hint">{kindHints[kind]}</p>}
+        <label>
+          Loitering seconds (optional)
+          <input
+            type="number"
+            min={1}
+            step="1"
+            placeholder="server default"
+            value={dwellSeconds}
+            onChange={(e) => setDwellSeconds(e.target.value)}
+            aria-label="Loitering seconds"
+          />
+        </label>
+        <p className="muted">
+          How long a person may stay in this zone before it counts as loitering. Leave blank to use the
+          system default.
+        </p>
 
         <div className="admin-actions">
           <button type="button" onClick={save} disabled={busy || !cameraId}>

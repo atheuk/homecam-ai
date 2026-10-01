@@ -41,6 +41,7 @@ async def create_zone(session: AsyncSession, camera_id: str, payload) -> CameraZ
         x2=payload.x2,
         y2=payload.y2,
         points=getattr(payload, "points", None) or None,
+        dwell_seconds=getattr(payload, "dwell_seconds", None),
         created_at=now,
         updated_at=now,
     )
@@ -59,7 +60,7 @@ def _invalidate(camera_id: str) -> None:
 
 async def update_zone(session: AsyncSession, zone: CameraZone, payload) -> CameraZone:
     points = getattr(payload, "points", None)
-    for field in ("name", "kind", "x1", "y1", "x2", "y2"):
+    for field in ("name", "kind", "x1", "y1", "x2", "y2", "dwell_seconds"):
         value = getattr(payload, field, None)
         if value is not None:
             setattr(zone, field, value)

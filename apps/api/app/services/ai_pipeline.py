@@ -17,6 +17,7 @@ must never break ingestion.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import best_photo as best_photo_module
-from ..ai.animals import describe_animal, get_animal_identifier
+from ..ai.animals import describe_animal, get_animal_identifier, identify_animal_frames, prepare_animal_crop
 from ..ai.appearance import get_appearance_analyzer
 from ..ai.detector import (
     ANIMAL_CLASSES,
@@ -41,10 +42,12 @@ from ..ai.provider import AnalysisContext, get_ai_provider
 from ..ai.schemas import GroundingError
 from ..ai.semantics import derive_semantics
 from ..ai.vision import caption_confirms_person, get_image_captioner, get_image_embedder
+from ..ai.vehicles import build_vehicle_identifier, crop_vehicle
 from ..config import settings
-from ..models.db import AIAnalysis, Event, EventPhoto
+from ..models.db import AIAnalysis, Event, EventEvidence, EventPhoto
 from ..providers.base import CameraOfflineError, CameraNotFoundError, ProviderUnavailableError
 from . import persons as person_service
+from . import suspicious
 from . import zones as zone_service
 
 logger = logging.getLogger(__name__)
@@ -84,6 +87,20 @@ async def _sample_frames(
             logger.warning("snapshot failed for %s: %s", camera_id, exc)
             break
     return frames
+
+
+async def _evidence_snapshot(provider, camera_id: str) -> bytes | None:
+    if provider is None:
+        from .provider_registry import find_provider_for_camera
+
+        provider = await find_provider_for_camera(camera_id)
+    capture = getattr(provider, "get_evidence_snapshot", None)
+    if capture is None:
+        return None
+    image = await capture(camera_id)
+    if not image:
+        raise ValueError(f"empty high-resolution evidence snapshot for {camera_id}")
+    return image
 
 
 def _store_best_photo(event_id: str, image: bytes) -> str | None:
@@ -233,11 +250,11 @@ async def enrich_event(
     camera_name = str(event.get("camera_name") or row.camera_id)
     now = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
 
+    provider = None
     if frames:
         frames = list(frames)
     else:
         frames = []
-        provider = None
         try:
             provider = await find_provider_for_camera(row.camera_id)
         except Exception as exc:  # noqa: BLE001
@@ -290,6 +307,10 @@ async def enrich_event(
         row.description = str(event["description"])[:500]
         merged = list(event.get("tags") or [])
         row.tags = merged + [tag for tag in semantics.tags if tag not in merged]
+        if scene.get("kind") == "vehicle":
+            known = scene.get("vehicle") or (row.event_metadata or {}).get("vehicle_track", {}).get("vehicle")
+            if known:
+                row.event_metadata = {**(row.event_metadata or {}), "vehicle": known}
     row.source = "local-ai" if detections else row.source
 
     person_match = None
@@ -298,11 +319,26 @@ async def enrich_event(
     photo_boxes: list[dict] = []
     photo_verified: bool | None = None
     if frames and settings.best_photo_enabled and detections:
+        # The detected polling frame may be a low-resolution substream. Ask
+        # for the main stream only for an actual event, with a hard deadline;
+        # the seed remains usable when the NVR is busy or its JPEG overflows.
+        try:
+            full_image = await asyncio.wait_for(
+                _evidence_snapshot(provider, row.camera_id), settings.best_photo_snapshot_timeout_seconds
+            )
+            if full_image is not None:
+                frames.append(full_image)
+        except Exception as exc:  # noqa: BLE001 - keep the detected frame
+            logger.warning("high-resolution evidence snapshot failed for %s: %s", row.camera_id, exc)
         # Photograph the subject this event is about. A person event must
         # never be illustrated - or re-identified - from a higher-confidence
         # car in the same frame; other classes are only a fallback when the
         # event's own subject is genuinely absent from every sampled frame.
-        subject = subject_for_label(semantics.primary_detection.label) if semantics.primary_detection else None
+        subject = (
+            "person" if row.type == "suspicious_activity"
+            else subject_for_label(semantics.primary_detection.label)
+            if semantics.primary_detection else None
+        )
         photo_targets = SUBJECT_LABELS.get(subject or "", BEST_PHOTO_TARGETS)
         try:
             photo = best_photo_module.select_best_photo(
@@ -336,8 +372,22 @@ async def enrich_event(
             else:
                 caption = None
             await _persist_event_photo(session, row.id, photo, caption)
+            full = await session.get(EventEvidence, (row.id, "full"))
+            if full is None:
+                session.add(EventEvidence(
+                    event_id=row.id, label="full", image=photo.full_image,
+                    content_type=photo.full_content_type, created_at=datetime.now(timezone.utc),
+                ))
+            else:
+                full.image = photo.full_image
+                full.content_type = photo.full_content_type
 
-            animal = await _identify_animal(photo) if is_animal_photo else None
+            animal = None
+            if is_animal_photo:
+                identifier = get_animal_identifier()
+                if identifier is not None:
+                    crops = [prepare_animal_crop(frame, photo.detection.bbox) for frame in frames[:3]]
+                    animal = await identify_animal_frames(identifier, crops)
             if animal is not None:
                 # The identifier returns species "none" when it looks at the
                 # crop and sees no animal - the same false-positive check the
@@ -350,12 +400,17 @@ async def enrich_event(
                 list(metadata["best_photo"].get("boxes") or []), photo_verified
             )
             metadata["best_photo"]["boxes"] = photo_boxes
+            metadata["best_photo"]["frame_boxes"] = _mark_verification(
+                list(metadata["best_photo"]["frame_boxes"]), photo_verified
+            )
             if photo_verified is not None:
                 metadata["photo_verified"] = photo_verified
             if caption:
                 metadata["photo_caption"] = caption
             if appearance is not None:
                 metadata["appearance"] = appearance.as_dict()
+            if is_person_photo and settings.suspicious_enabled:
+                metadata["behaviours"] = await suspicious.assess_behaviour(photo.image)
             if animal is not None:
                 metadata["animal"] = animal.as_dict()
             row.event_metadata = metadata
@@ -369,6 +424,35 @@ async def enrich_event(
                     if tag and tag not in tags:
                         tags.append(tag)
                 row.tags = tags
+            if photo.detection is not None and photo.detection.label in VEHICLE_CLASSES:
+                metadata = dict(row.event_metadata or {})
+                existing_vehicle = metadata.get("vehicle") or (metadata.get("scene") or {}).get("vehicle") or (
+                    (metadata.get("vehicle_track") or {}).get("vehicle")
+                )
+                if existing_vehicle:
+                    metadata["vehicle"] = existing_vehicle
+                else:
+                    crops = [crop_vehicle(frame, photo.detection.bbox) for frame in frames[:3]]
+                    vehicle = await build_vehicle_identifier(settings).identify_vehicle_frames(crops)
+                    if vehicle is not None:
+                        metadata["vehicle"] = vehicle.as_dict()
+                if metadata.get("vehicle"):
+                    row.event_metadata = metadata
+                    vehicle = metadata["vehicle"]
+                    parts = [vehicle.get("colour"), vehicle.get("make"), vehicle.get("model")]
+                    name = " ".join(part for part in parts if part and part != "unknown") or photo.detection.label
+                    body = vehicle.get("body_type")
+                    if body and body != "unknown":
+                        name += f" ({body})"
+                    scene_meta = metadata.get("scene") or {}
+                    action = scene_meta.get("transition")
+                    if action in {"arrived", "returned", "first_seen", "moved", "departed"}:
+                        verb = {"first_seen": "was seen", "moved": "moved", "departed": "departed",
+                                "arrived": "arrived", "returned": "returned"}[action]
+                        where = f" in the {row.zone}" if row.zone else f" at {camera_name}"
+                        row.description = f"A {name} {verb}{where}."[:500]
+                    row.tags = list(dict.fromkeys([*(row.tags or []),
+                        *(part.casefold() for part in parts if part and part != "unknown")]))
 
             # Don't teach the matcher from a frame the vision model says has
             # nobody in it: a fence post absorbed as a reference vector
@@ -420,6 +504,7 @@ async def enrich_event(
             "photo_verified": photo_verified,
             "appearance": appearance.as_dict() if appearance else None,
             "animal": animal.as_dict() if animal else None,
+            "vehicle": (row.event_metadata or {}).get("vehicle"),
         }
     )
     return enriched

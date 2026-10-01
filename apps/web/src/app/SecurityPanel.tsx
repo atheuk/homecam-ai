@@ -1,5 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { DigestCard, SearchCard } from "./Insights";
+import { consumeSse, SseResponseError } from "./sse";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -31,6 +33,7 @@ type Incident = {
   escalation_level: number;
   summary: string;
   ai_summary: string | null;
+  evidence?:{score?:number;reasons?:string[];event_ids?:string[]}|null;
 };
 
 type IncidentEvent = {
@@ -57,12 +60,17 @@ const KIND_LABELS: Record<string, string> = {
   camera_offline: "Camera offline",
   camera_obstruction: "Camera obstructed",
   camera_frozen: "Camera feed frozen",
+  suspicious_activity: "Suspicious activity",
 };
 
 const STATUS_LABELS: Record<string, string> = { open: "Open", acknowledged: "Acknowledged", resolved: "Resolved" };
 
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+function authHeaders(token: string | null): Record<string, string> {
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    "Content-Type": "application/json",
+    "X-HomeCam-Request": "1",
+  };
 }
 
 function timeAgo(value: string): string {
@@ -81,7 +89,7 @@ function timeAgo(value: string): string {
  * kind/severity/status fields above it. */
 function IncidentCard({
   incident, token, cameraName, onChanged,
-}: { incident: Incident; token: string; cameraName: string; onChanged: () => void }) {
+}: { incident: Incident; token: string | null; cameraName: string; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -94,6 +102,7 @@ function IncidentCard({
       const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/${action}`, {
         method: "POST",
         headers: authHeaders(token),
+        credentials: "include",
       });
       if (!r.ok) {
         setError(`Could not ${action} this incident.`);
@@ -112,7 +121,10 @@ function IncidentCard({
     }
     setExpanded(true);
     if (events) return;
-    const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, { headers: authHeaders(token) });
+    const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, {
+      headers: authHeaders(token),
+      credentials: "include",
+    });
     if (r.ok) {
       const body = await r.json();
       setEvents(body.events as IncidentEvent[]);
@@ -123,7 +135,10 @@ function IncidentCard({
     setBusy(true);
     setError(null);
     try {
-      const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, { headers: authHeaders(token) });
+      const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/export`, {
+        headers: authHeaders(token),
+        credentials: "include",
+      });
       if (!r.ok) {
         setError("Could not export this incident.");
         return;
@@ -153,6 +168,13 @@ function IncidentCard({
       </div>
       <h4>{KIND_LABELS[incident.kind] || incident.kind}</h4>
       <p className="incident-summary">{incident.summary}</p>
+      {incident.kind==="suspicious_activity"&&incident.evidence&&(
+        <div aria-label="Suspicious activity evidence">
+          <strong>Score {incident.evidence.score}</strong>
+          <ul>{incident.evidence.reasons?.map(reason=><li key={reason}>{reason}</li>)}</ul>
+          {incident.evidence.event_ids?.map(id=><span key={id} className="badge">{id} </span>)}
+        </div>
+      )}
       {incident.ai_summary && (
         <p className="ai-summary"><span className="badge ai">AI summary</span>{incident.ai_summary}</p>
       )}
@@ -184,11 +206,20 @@ function IncidentCard({
 }
 
 /** Security & incidents: arming modes, incident acknowledge/resolve/export,
- * and the audit trail. Requires its own sign-in, same single-user-is-admin
- * scope as AdminPanel - see that component's docstring. Every write here is
- * a human action; nothing on this panel is triggered autonomously by AI. */
-export default function SecurityPanel({ cameras }: { cameras: { id: string; name: string }[] }) {
-  const [token, setToken] = useState<string | null>(null);
+ * and the audit trail. Every write here is a human action; nothing on this
+ * panel is triggered autonomously by AI. */
+export default function SecurityPanel({
+  cameras,
+  authToken,
+  authenticated,
+  onUnauthorized,
+}: {
+  cameras: { id: string; name: string }[];
+  authToken?: string | null;
+  authenticated?: boolean;
+  onUnauthorized?: () => void;
+}) {
+  const [token, setToken] = useState<string | null>(authToken ?? null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -203,23 +234,36 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
 
   const [auditLog, setAuditLog] = useState<AuditEntry[] | null>(null);
 
+  useEffect(() => {
+    if (authenticated !== undefined) setToken(authToken ?? null);
+    else if (authToken) setToken(authToken);
+  }, [authToken, authenticated]);
+  const hasSession = token !== null || authenticated === true;
+
   const cameraName = useCallback(
     (id: string) => cameras.find((camera) => camera.id === id)?.name || id,
     [cameras],
   );
 
-  const loadMode = useCallback(async (activeToken: string) => {
-    const r = await fetch(`${API}/api/v1/security/mode`, { headers: authHeaders(activeToken) });
+  const loadMode = useCallback(async (activeToken: string | null) => {
+    const r = await fetch(`${API}/api/v1/security/mode`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (r.status === 401) {
       setToken(null);
+      onUnauthorized?.();
       return;
     }
     if (r.ok) setModeState(await r.json());
-  }, []);
+  }, [onUnauthorized]);
 
-  const loadIncidents = useCallback(async (activeToken: string, filter: "open" | "all") => {
+  const loadIncidents = useCallback(async (activeToken: string | null, filter: "open" | "all") => {
     const query = filter === "open" ? "?status=open" : "";
-    const r = await fetch(`${API}/api/v1/security/incidents${query}`, { headers: authHeaders(activeToken) });
+    const r = await fetch(`${API}/api/v1/security/incidents${query}`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (!r.ok) {
       setIncidentsError("Could not load incidents.");
       return;
@@ -228,23 +272,25 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
     setIncidents(await r.json());
   }, []);
 
-  const loadAuditLog = useCallback(async (activeToken: string) => {
-    const r = await fetch(`${API}/api/v1/security/audit-log?limit=50`, { headers: authHeaders(activeToken) });
+  const loadAuditLog = useCallback(async (activeToken: string | null) => {
+    const r = await fetch(`${API}/api/v1/security/audit-log?limit=50`, {
+      headers: authHeaders(activeToken),
+      credentials: "include",
+    });
     if (r.ok) setAuditLog(await r.json());
   }, []);
 
   useEffect(() => {
-    if (!token) return;
+    if (!hasSession) return;
     loadMode(token);
-    loadIncidents(token, incidentFilter);
     loadAuditLog(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, hasSession]);
 
   useEffect(() => {
-    if (token) loadIncidents(token, incidentFilter);
+    if (hasSession) loadIncidents(token, incidentFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [incidentFilter]);
+  }, [incidentFilter, hasSession, token]);
 
   // `incidentFilter` is read from a ref (not a hook dep) so an open/all
   // toggle doesn't tear down and reopen the SSE connection.
@@ -261,18 +307,24 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
   // (see IncidentCard's docstring), so re-fetching on any of these three
   // events is always safe, never AI-triggered.
   useEffect(() => {
-    if (!token) return;
-    const source = new EventSource(`${API}/api/v1/ws`);
-    const refresh = () => {
+    if (!hasSession) return;
+    const controller = new AbortController();
+    void consumeSse(`${API}/api/v1/ws`, token, controller.signal, (type) => {
+      if (!["incident.created", "incident.updated", "incident.escalated"].includes(type)) return;
       loadIncidents(token, incidentFilterRef.current);
       loadAuditLog(token);
-    };
-    source.addEventListener("incident.created", refresh);
-    source.addEventListener("incident.updated", refresh);
-    source.addEventListener("incident.escalated", refresh);
-    return () => source.close();
+    }).catch((error) => {
+      if (controller.signal.aborted) return;
+      if (error instanceof SseResponseError && error.status === 401) {
+        setToken(null);
+        onUnauthorized?.();
+      } else {
+        setIncidentsError("Live incident updates are temporarily unavailable.");
+      }
+    });
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, hasSession]);
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -280,6 +332,7 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
     const r = await fetch(`${API}/api/v1/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ email: loginEmail, password: loginPassword }),
     });
     if (!r.ok) {
@@ -291,13 +344,14 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
   }
 
   async function changeMode(next: Mode) {
-    if (!token || modeBusy) return;
+    if (!hasSession || modeBusy) return;
     setModeBusy(true);
     setModeError(null);
     try {
       const r = await fetch(`${API}/api/v1/security/mode`, {
         method: "PUT",
         headers: authHeaders(token),
+        credentials: "include",
         body: JSON.stringify({ mode: next }),
       });
       if (!r.ok) {
@@ -319,7 +373,7 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
     [incidents],
   );
 
-  if (!token) {
+  if (!hasSession) {
     return (
       <section className="panel admin-panel">
         <h3>Security sign-in</h3>
@@ -374,6 +428,9 @@ export default function SecurityPanel({ cameras }: { cameras: { id: string; name
           </p>
         )}
       </section>
+
+      <SearchCard token={token} />
+      <DigestCard token={token} />
 
       <section className="panel admin-panel incidents-panel">
         <div className="panel-heading">

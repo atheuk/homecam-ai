@@ -1,14 +1,22 @@
 """End-to-end AI pipeline tests: zones admin CRUD, semantic enrichment,
 AI analysis persistence, activity correlation and audio capability."""
+import asyncio
+import io
+import uuid
+from datetime import datetime, timezone
+from io import BytesIO
+
 import pytest
+from PIL import Image
 from sqlalchemy import delete, select
 
 from app.ai.animals import AnimalIdentity
 from app.ai.appearance import Appearance
 from app.ai.detector import BoundingBox, Detection, mock_detector
+from app.ai.vehicles import VehicleIdentity
 from app.db import SessionLocal
 from app.models.db import Activity, AIAnalysis, CameraZone, Event
-from app.services import ai_pipeline
+from app.services import ai_pipeline, events as event_service, provider_registry
 
 
 @pytest.fixture(autouse=True)
@@ -43,10 +51,10 @@ MAILBOX = {"name": "mailbox", "kind": "mailbox", "x1": 0.7, "y1": 0.3, "x2": 0.9
 # --- admin plane ------------------------------------------------------------
 
 
-async def test_zone_routes_require_authentication(client):
-    assert (await client.get("/api/v1/admin/cameras/mock-front-door/zones")).status_code == 401
+async def test_zone_routes_require_authentication(anonymous_client):
+    assert (await anonymous_client.get("/api/v1/admin/cameras/mock-front-door/zones")).status_code == 401
     assert (
-        await client.post("/api/v1/admin/cameras/mock-front-door/zones", json=DRIVEWAY)
+        await anonymous_client.post("/api/v1/admin/cameras/mock-front-door/zones", json=DRIVEWAY)
     ).status_code == 401
 
 
@@ -101,7 +109,7 @@ async def _add_zone(client, camera_id: str, zone: dict) -> None:
     assert created.status_code == 201, created.text
 
 
-async def test_person_event_gets_ai_analysis_and_best_photo(client):
+async def test_person_event_gets_ai_analysis_and_best_photo(client, anonymous_client):
     created = await client.post("/api/v1/mock/events", json={"camera_id": "mock-front-door", "type": "person"})
     assert created.status_code == 200, created.text
     event_id = created.json()["id"]
@@ -115,12 +123,91 @@ async def test_person_event_gets_ai_analysis_and_best_photo(client):
     assert body["ai_analysis"]["objects"] == ["person"]
     assert body["ai_analysis"]["provider"] == "mock"
     assert body["best_photo_path"]
+    assert body["full_photo_url"] == f"/api/v1/events/{event_id}/photo/full"
+    assert body["full_photo_boxes"] == body["metadata"]["best_photo"]["frame_boxes"]
+    assert (await anonymous_client.get(body["full_photo_url"])).status_code == 401
+    assert (await client.get(body["full_photo_url"], headers=await _headers(client))).status_code == 200
 
     async with SessionLocal() as session:
         rows = (await session.execute(select(AIAnalysis).where(AIAnalysis.event_id == event_id))).scalars().all()
         assert len(rows) == 1
         assert rows[0].embedding_dimensions == len(rows[0].embedding) > 0
         assert rows[0].detections[0]["label"] == "person"
+
+
+async def test_detected_event_regrabs_high_resolution_and_serves_original(client, anonymous_client, monkeypatch):
+    def jpeg(size):
+        output = io.BytesIO()
+        Image.new("RGB", size, (80, 60, 50)).save(output, "JPEG")
+        return output.getvalue()
+
+    low = jpeg((640, 480))
+    high = jpeg((1920, 1080))
+    calls = []
+
+    class EvidenceProvider:
+        async def get_evidence_snapshot(self, camera_id):
+            calls.append(camera_id)
+            return high
+
+    async def find_provider(_camera_id):
+        return EvidenceProvider()
+
+    monkeypatch.setattr(provider_registry, "find_provider_for_camera", find_provider)
+    mock_detector().set_script("mock-front-door", [Detection("person", 0.9, BoundingBox(0.3, 0.3, 0.5, 0.8))])
+    event_id = "evt-" + uuid.uuid4().hex[:16]
+    event = {
+        "id": event_id, "camera_id": "mock-front-door", "camera_name": "Front Door",
+        "type": "person", "priority": "normal", "source": "local-ai",
+        "start_time": datetime.now(timezone.utc).isoformat(), "description": "Person detected",
+    }
+    async with SessionLocal() as session:
+        await event_service.create_and_broadcast_event(session, event, trigger_frame=low, frames=[low])
+
+    body = (await client.get(f"/api/v1/events/{event_id}")).json()
+    assert calls == ["mock-front-door"]
+    assert (body["full_photo_width"], body["full_photo_height"]) == (1920, 1080)
+    assert body["photo_width"] >= 720 and body["photo_height"] >= 720
+    assert (await anonymous_client.get(body["full_photo_url"])).status_code == 401
+    full = await client.get(body["full_photo_url"], headers=await _headers(client))
+    assert full.status_code == 200
+    assert full.headers["cache-control"] == "private, no-store"
+    assert full.headers["content-type"].startswith("image/jpeg")
+    assert full.content == high
+
+
+@pytest.mark.parametrize("failure", ["overflow", "timeout"])
+async def test_failed_high_resolution_capture_keeps_detected_frame(client, anonymous_client, monkeypatch, failure):
+    class BusyProvider:
+        async def get_evidence_snapshot(self, _camera_id):
+            if failure == "timeout":
+                await asyncio.sleep(0.02)
+            raise ValueError("NVR snapshot buffer overflow")
+
+    async def find_provider(_camera_id):
+        return BusyProvider()
+
+    monkeypatch.setattr(provider_registry, "find_provider_for_camera", find_provider)
+    if failure == "timeout":
+        monkeypatch.setattr(ai_pipeline.settings, "best_photo_snapshot_timeout_seconds", 0.001)
+    mock_detector().set_script("mock-front-door", [Detection("person", 0.9, BoundingBox(0.3, 0.3, 0.5, 0.8))])
+    output = io.BytesIO()
+    Image.new("RGB", (640, 480), (80, 60, 50)).save(output, "JPEG")
+    low = output.getvalue()
+    event_id = "evt-" + uuid.uuid4().hex[:16]
+    event = {
+        "id": event_id, "camera_id": "mock-front-door", "camera_name": "Front Door",
+        "type": "person", "priority": "normal", "source": "local-ai",
+        "start_time": datetime.now(timezone.utc).isoformat(), "description": "Person detected",
+    }
+    async with SessionLocal() as session:
+        await event_service.create_and_broadcast_event(session, event, trigger_frame=low, frames=[low])
+    body = (await client.get(f"/api/v1/events/{event_id}")).json()
+    assert (body["full_photo_width"], body["full_photo_height"]) == (640, 480)
+    assert (await anonymous_client.get(body["full_photo_url"])).status_code == 401
+    full = await client.get(body["full_photo_url"], headers=await _headers(client))
+    assert full.status_code == 200
+    assert full.content == low
 
 
 async def test_person_in_driveway_zone_is_tagged(client):
@@ -189,6 +276,11 @@ async def test_animal_event_reports_species_and_breed(client, monkeypatch):
         "breed": "Border Collie",
         "confidence": 0.83,
         "description": None,
+        "common_name": None,
+        "scientific_name": None,
+        "genus": None,
+        "family": None,
+        "taxonomic_group": None,
     }
     assert "Border Collie" in body["tags"]
     assert "Border Collie" in body["description"]
@@ -208,6 +300,52 @@ async def test_unnamed_species_still_produces_an_animal_event(client, monkeypatc
     assert body["animal"]["species"] == "other"
     assert body["animal"]["breed"] is None
     assert "An animal was seen" in body["description"]
+
+
+async def test_vehicle_identity_cached_on_scene_track_avoids_second_vision_call(client, monkeypatch):
+    class Identifier:
+        def __init__(self):
+            self.calls = 0
+
+        async def identify_vehicle_frames(self, crops):
+            self.calls += 1
+            return VehicleIdentity(vehicle_present="yes", make="Volkswagen",
+                                   model="Golf", colour="dark blue", body_type="hatchback")
+
+    identifier = Identifier()
+    monkeypatch.setattr(ai_pipeline, "build_vehicle_identifier", lambda _settings: identifier)
+    mock_detector().set_script(
+        "mock-garden", [Detection("car", .95, BoundingBox(.15, .2, .85, .8))]
+    )
+    image = BytesIO()
+    Image.new("RGB", (640, 480), (45, 60, 90)).save(image, format="JPEG")
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as session:
+        first = Event(id="vehicle-cache-first", camera_id="mock-garden", type="vehicle",
+                      priority="normal", source="local-ai", start_time=now,
+                      description="vehicle arrived", event_metadata={"scene": {
+                          "kind": "vehicle", "transition": "arrived", "track_id": "track-1",
+                      }})
+        session.add(first)
+        await session.flush()
+        await ai_pipeline.enrich_event(session, first, {"type": "vehicle",
+            "description": "vehicle arrived", "camera_name": "garden"}, frames=[image.getvalue()])
+        assert identifier.calls == 1
+        identity = first.event_metadata["vehicle"]
+        second = Event(id="vehicle-cache-second", camera_id="mock-garden", type="vehicle",
+                       priority="normal", source="local-ai", start_time=now,
+                       description="vehicle returned", event_metadata={"scene": {
+                           "kind": "vehicle", "transition": "returned",
+                           "track_id": "track-1", "vehicle": identity,
+                       }})
+        session.add(second)
+        await session.flush()
+        await ai_pipeline.enrich_event(session, second, {"type": "vehicle",
+            "description": "vehicle returned", "camera_name": "garden"}, frames=[image.getvalue()])
+        assert identifier.calls == 1
+        assert second.event_metadata["vehicle"] == identity
+        assert "Volkswagen Golf" in second.description
+        await session.rollback()
 
 
 async def test_identification_failure_never_breaks_the_event(client, monkeypatch):

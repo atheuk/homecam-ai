@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./homecam.db"
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "development-only"
+    auth_bootstrap_secret: str | None = None
     media_root: str = "./media"
     cors_origins: str = "http://localhost:3000"
     ai_provider: str = "mock"
@@ -40,6 +41,9 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=384, ge=8, le=4096)
     best_photo_frames: int = Field(default=3, ge=1, le=10)
     best_photo_enabled: bool = True
+    best_photo_snapshot_timeout_seconds: float = Field(default=4.0, gt=0, le=30)
+    best_photo_min_crop_pixels: int = Field(default=720, ge=224, le=4096)
+    best_photo_jpeg_quality: int = Field(default=94, ge=85, le=100)
     # Person identity / re-identification (Azure AI Foundry backed).
     #
     # ``foundry_endpoint``/``foundry_api_key`` point at an Azure AI Services
@@ -206,16 +210,40 @@ class Settings(BaseSettings):
     # No frame from a camera for this long is an outage: absence timers and
     # zone comparisons restart instead of treating the gap as evidence.
     scene_outage_seconds: float = Field(default=60.0, gt=0.0)
-    # Mailbox delivery (zones of kind "mailbox"; nothing happens without one).
+    # Mailbox activity (zones of kind "mailbox"; nothing happens without one):
+    # deliveries, retrievals, the mailbox being opened, and other visits.
     mailbox_delivery_enabled: bool = True
-    # Samples a person must overlap the mailbox for; a walk-by is one.
-    mailbox_min_observations: int = Field(default=2, ge=1, le=20)
-    # Share of the mailbox rectangle a person box must cover.
-    mailbox_min_zone_overlap: float = Field(default=0.3, gt=0.0, le=1.0)
+    # Samples a person must be near the mailbox for a visit with no visible
+    # change (no lid/door change, no package change) to count. A visit with
+    # such a change always counts from a single sample: at the production
+    # 5-23s cadence a real 3-6s mail drop is often seen in only one frame.
+    mailbox_min_observations: int = Field(default=1, ge=1, le=20)
+    # Share of the proximity region (the mailbox zone grown by
+    # mailbox_proximity_margin on every side) a person box must cover.
+    mailbox_min_zone_overlap: float = Field(default=0.2, gt=0.0, le=1.0)
+    # Margin (normalized frame units) around the mailbox zone that still
+    # counts as "at the mailbox": someone reaching in from the side.
+    mailbox_proximity_margin: float = Field(default=0.1, ge=0.0, le=0.5)
     # Samples without the person before a visit is over.
     mailbox_end_after_misses: int = Field(default=2, ge=1, le=20)
-    # One delivery event per this window, however many visits.
+    # One delivery / retrieval event per this window, however many visits.
     mailbox_dedupe_seconds: float = Field(default=900.0, ge=0.0)
+    # Mailbox opened detection, independent of people: the zone is compared
+    # with a rolling brightness-normalized reference of the closed mailbox.
+    mailbox_open_detection_enabled: bool = True
+    # Normalized region difference counted as "open" (returning below 70%
+    # of it is "closed" again).
+    mailbox_open_threshold: float = Field(default=0.4, gt=0.0)
+    # Consecutive unoccluded samples above the threshold before an opening
+    # with nobody detected nearby is reported (1 during a person's visit).
+    mailbox_open_min_frames: int = Field(default=2, ge=1, le=20)
+    # At most one mailbox_opened and one mailbox_visit event per this window.
+    mailbox_open_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    # While a person is near a mailbox, sample that camera's relayed stream
+    # every mailbox_boost_interval_seconds for mailbox_boost_seconds.
+    # Snapshot-only cameras are never boosted (NVR session budget).
+    mailbox_boost_seconds: float = Field(default=60.0, ge=0.0)
+    mailbox_boost_interval_seconds: float = Field(default=1.0, gt=0.0)
     # Bins placed out / emptied (zones of kind "bin"; nothing without one).
     bin_detection_enabled: bool = True
     # Seconds between region comparisons (a bin does not move quickly).
@@ -318,6 +346,102 @@ class Settings(BaseSettings):
     # correct.
     auth_max_failed_attempts: int = Field(default=5, ge=1, le=100)
     auth_lockout_minutes: float = Field(default=15.0, gt=0.0)
+
+    # --- Modern AI security features (see docs/ai-features.md) -------------
+    # Natural-language event search. The query is embedded with the active
+    # AI provider and cosine-ranked against the per-event embeddings the AI
+    # pipeline already stores, then *blended* with a plain keyword match so
+    # the feature degrades to keyword search (rather than to nothing) on
+    # events that were never embedded.
+    search_enabled: bool = True
+    # How much of the blended score comes from the embedding. 0 = pure
+    # keyword search, 1 = pure semantic search.
+    search_embedding_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Results scoring below this are dropped rather than padded out.
+    search_min_score: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Newest N events considered before ranking. Ranking happens in Python
+    # so the same code path works on SQLite (tests) and PostgreSQL, which
+    # means the candidate set has to stay bounded.
+    search_candidate_limit: int = Field(default=500, ge=1, le=5000)
+    search_default_limit: int = Field(default=20, ge=1, le=200)
+
+    # Per-camera ingestion leader lease. With several API replicas only the
+    # lease holder samples a camera and advances its scene state; the others
+    # stand by and take over once the lease is TTL seconds stale.
+    ingestion_lease_enabled: bool = True
+    ingestion_lease_ttl_seconds: float = Field(default=30.0, gt=0.0)
+    # Stable name for this replica in the lease table. Empty means
+    # "<hostname>-<pid>-<random>", which is unique per process.
+    ingestion_replica_id: str = ""
+
+    # Loitering: a person continuously present in one zone for longer than
+    # that zone's dwell threshold. Per-zone ``dwell_seconds`` overrides this
+    # default. Presence is tracked in the database, not in memory, because
+    # the API can run as two replicas.
+    loitering_detection_enabled: bool = True
+    zone_default_dwell_seconds: float = Field(default=60.0, gt=0.0)
+    # A gap longer than this between two sightings ends the visit and
+    # restarts the dwell clock: "came back twice" is not "stayed".
+    loitering_gap_seconds: float = Field(default=45.0, gt=0.0)
+    # Once flagged, the same zone is not flagged again for this long.
+    loitering_repeat_seconds: float = Field(default=300.0, ge=0.0)
+
+    suspicious_enabled: bool = True
+    suspicious_vehicle_dwell_seconds: float = Field(default=45.0, gt=0)
+    suspicious_mailbox_dwell_seconds: float = Field(default=60.0, gt=0)
+    suspicious_property_dwell_seconds: float = Field(default=90.0, gt=0)
+    suspicious_gap_seconds: float = Field(default=20.0, gt=0)
+    suspicious_visit_gap_seconds: float = Field(default=300.0, gt=0)
+    suspicious_dedupe_seconds: float = Field(default=900.0, gt=0)
+    suspicious_elevated_score: float = Field(default=3.0, gt=0)
+    suspicious_incident_score: float = Field(default=5.0, gt=0)
+    suspicious_clothing_weight: float = Field(default=0.5, ge=0, le=1)
+    suspicious_return_visits: int = Field(default=3, ge=2)
+    suspicious_return_window_hours: float = Field(default=24.0, gt=0)
+    suspicious_night_return_visits: int = Field(default=2, ge=2)
+    suspicious_night_return_window_hours: float = Field(default=2.0, gt=0)
+    home_region: str = "Netherlands, Northern Europe"
+    home_timezone: str = "Europe/Amsterdam"
+    animal_bird_confidence_threshold: float = Field(default=0.25, ge=0, le=1)
+
+    # Package theft: a package that was present in a mailbox/porch zone
+    # before a visit and gone after it, escalated to an incident while the
+    # household is armed away/night.
+    package_theft_detection_enabled: bool = True
+
+    # Unusual activity: per-camera hour-of-week baseline learned from the
+    # event history. Purely a *timing* signal - it never involves identity.
+    unusual_activity_enabled: bool = True
+    unusual_activity_window_days: int = Field(default=28, ge=1, le=365)
+    # Below this many historical events for a camera there is no baseline
+    # worth trusting, so nothing is ever flagged.
+    unusual_activity_min_history: int = Field(default=50, ge=1)
+    # How far below the mean an hour-of-week slot has to be to count as
+    # "historically quiet".
+    unusual_activity_z_threshold: float = Field(default=1.5, ge=0.0)
+    unusual_activity_max_samples: int = Field(default=5000, ge=1)
+
+    # Daily home digest. Always available on demand; the background
+    # generator is opt-in so tests and dev runs do not spin a timer.
+    digest_enabled: bool = True
+    digest_scheduler_enabled: bool = False
+    digest_scheduler_interval_seconds: float = Field(default=3600.0, gt=0.0)
+    digest_max_notable_items: int = Field(default=8, ge=1, le=50)
+
+    # Smart notification priority (critical/high/normal/low) computed from
+    # event type, arming mode, zone, loitering/unusual/theft flags and
+    # detector confidence.
+    notification_priority_enabled: bool = True
+    # Events below this priority never open an incident, so the incident
+    # feed stays actionable. "low" disables the suppression entirely.
+    incident_min_priority: str = "normal"
+
+    # Deterrence (siren/light/voice). Off by default, and *never*
+    # autonomous: a request is only ever executed after an explicit,
+    # authenticated human confirmation. See docs/ai-features.md.
+    deterrence_enabled: bool = False
+    deterrence_confirmation_ttl_seconds: float = Field(default=300.0, gt=0.0)
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()

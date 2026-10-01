@@ -8,6 +8,7 @@ border floating in empty grass), so it is pinned down here.
 from __future__ import annotations
 
 import io
+from PIL import Image
 
 from app.ai.best_photo import (
     MIN_VISIBLE_FRACTION,
@@ -126,6 +127,36 @@ def test_selected_photo_publishes_its_boxes():
     assert photo is not None
     assert photo.as_dict()["boxes"], "a detected person must publish a drawable border"
     assert photo.as_dict()["boxes"][0]["label"] == "person"
+    assert photo.as_dict()["full_width"] == 640
+    assert photo.as_dict()["full_height"] == 480
+    assert photo.full_image == frame
+    assert photo.as_dict()["frame_boxes"][0]["box"]["x1"] == 0.3
+    assert photo.width >= 720 and photo.height >= 720
+    with Image.open(io.BytesIO(photo.image)) as stored:
+        assert stored.size == (photo.width, photo.height)
+
+
+def test_high_resolution_frame_wins_over_sharper_substream_for_the_same_subject():
+    small = _jpeg((640, 480), (0, 0, 0))
+    large = _jpeg((2560, 1440), (60, 90, 140))
+    detector = MockDetector({"cam-1": [_person(0.3, 0.3, 0.5, 0.8)]})
+    photo = select_best_photo([small, large], detector, DetectionContext(camera_id="cam-1"), {"person"})
+    assert photo is not None
+    assert photo.frame_index == 1
+    assert photo.full_image == large
+    assert photo.as_dict()["full_width"] == 2560
+
+
+def test_crop_floor_is_configurable_without_downscaling_the_source(monkeypatch):
+    from app.ai import best_photo
+
+    monkeypatch.setattr(best_photo.settings, "best_photo_min_crop_pixels", 900)
+    frame = _jpeg((640, 480))
+    image, cropped, width, height = crop_to_detection(frame, _person(0.3, 0.3, 0.5, 0.8))
+    assert cropped
+    assert min(width, height) >= 900
+    with Image.open(io.BytesIO(image)) as stored:
+        assert stored.size == (width, height)
 
 
 def test_photo_without_detections_publishes_no_boxes():

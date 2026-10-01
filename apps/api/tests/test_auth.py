@@ -2,7 +2,8 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_register_login_me_logout_flow(client):
+async def test_register_login_me_logout_flow(anonymous_client):
+    client = anonymous_client
     me_unauthenticated = await client.get("/api/v1/auth/me")
     assert me_unauthenticated.status_code == 401
 

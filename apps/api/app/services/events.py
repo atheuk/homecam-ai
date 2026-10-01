@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.db import Event
+from ..models.db import Event, EventEvidence
 from . import activities as activity_service
 from . import ai_pipeline
 from . import incidents as incident_service
 from . import security_modes
+from . import signals as signal_service
+from . import scene_dedup
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +71,43 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
     return row
 
 
+async def _attach_evidence(session: AsyncSession, row: Event, images: dict[str, bytes]) -> None:
+    """Store evidence rows and advertise their URLs in one transaction.
+
+    The ``image_url`` metadata and the :class:`EventEvidence` rows commit
+    together, so an event never advertises evidence URLs that would 404. On
+    failure the caller rolls back and the event keeps its URL-free metadata.
+    """
+    now = datetime.now(timezone.utc)
+    for label, image in images.items():
+        session.add(EventEvidence(event_id=row.id, label=label, image=image, content_type="image/jpeg", created_at=now))
+    row.event_metadata = _with_evidence_urls(row.id, dict(row.event_metadata or {}), images)
+    await session.commit()
+    await session.refresh(row)
+
+
+def evidence_url(event_id: str, label: str) -> str:
+    return f"/api/v1/events/{event_id}/evidence/{label}"
+
+
+def _with_evidence_urls(event_id: str, metadata: dict, images: dict[str, bytes]) -> dict:
+    metadata = dict(metadata)
+    mailbox = dict(metadata.get("mailbox") or {})
+    for label in images:
+        entry = dict(mailbox.get(label) or {})
+        entry["image"] = True
+        entry["image_url"] = evidence_url(event_id, label)
+        mailbox[label] = entry
+    metadata["mailbox"] = mailbox
+    return metadata
+
+
 async def create_and_broadcast_event(
     session: AsyncSession,
     event: dict,
     trigger_frame: bytes | None = None,
     frames: list[bytes] | None = None,
+    evidence_images: dict[str, bytes] | None = None,
 ) -> Event:
     """Run the SPEC section 12 ingestion pipeline for one normalized event.
 
@@ -86,8 +121,23 @@ async def create_and_broadcast_event(
     second race for a scarce NVR session just to look at the same moment.
     ``frames`` is an already-sampled set shared by several events raised from
     the same moment (see :func:`ai_pipeline.enrich_event`).
+
+    ``evidence_images`` are labelled JPEGs (e.g. package ``before``/``after``
+    crops) stored as :class:`EventEvidence` rows. Only once those rows are
+    committed does each matching ``metadata["mailbox"][label]`` entry get an
+    ``image_url`` pointing at ``GET /api/v1/events/{id}/evidence/{label}``
+    (same transaction), which incident routing copies into
+    ``Incident.evidence``.
     """
     row = await persist_event(session, event)
+    if evidence_images:
+        try:
+            await _attach_evidence(session, row, evidence_images)
+        except Exception:  # noqa: BLE001 - evidence must never break ingestion
+            logger.exception("evidence storage failed for %s", event["id"])
+            await session.rollback()
+            await session.refresh(row)
+        event = {**event, "metadata": dict(row.event_metadata or {})}
     # Snapshot the arming mode immediately, before the (potentially slow,
     # AI-backed) enrichment awaits below. Incident routing runs after
     # enrichment completes; without this snapshot, a mode change that
@@ -100,6 +150,7 @@ async def create_and_broadcast_event(
     # the point-in-time human arming decision needs to be frozen.
     mode_at_detection = await security_modes.get_mode(session)
     enriched = event
+    signal_result = None
     try:
         enriched = await ai_pipeline.enrich_event(session, row, event, trigger_frame, frames)
         await activity_service.correlate_event(session, row)
@@ -111,7 +162,49 @@ async def create_and_broadcast_event(
         # The rollback expires the already-committed row; reload it here so
         # callers never trigger an implicit (sync) load outside the greenlet.
         await session.refresh(row)
+    try:
+        # Loitering / unusual-activity / notification-priority run after the
+        # AI pipeline has settled row.type and row.zone, but strictly before
+        # the broadcast below, so SSE clients and the incident router see the
+        # same tags and priority the REST API will later return.
+        signal_result = await signal_service.apply_signals(session, row, mode=mode_at_detection)
+        await session.commit()
+        await session.refresh(row)
+    except Exception:  # noqa: BLE001 - signals must never break ingestion
+        logger.exception("signal evaluation failed for %s", row.id)
+        await session.rollback()
+        await session.refresh(row)
+    if row.type == "person" and (row.event_metadata or {}).get("suspicious", {}).get("level"):
+        claim_key = f"suspicious-person:{row.camera_id}:{row.person_id or row.id}"
+        try:
+            won = await scene_dedup.claim(
+                session, claim_key, row.start_time.timestamp(),
+                settings.suspicious_dedupe_seconds, row.id,
+            )
+            if not won:
+                metadata = dict(row.event_metadata or {})
+                verdict = dict(metadata["suspicious"])
+                verdict["deduplicated"] = True
+                verdict["level"] = None
+                metadata["suspicious"] = verdict
+                metadata["notification_priority"] = "low"
+                metadata["priority_reasons"] = ["repeat of a recent appearance alert"]
+                row.event_metadata = metadata
+                row.tags = [tag for tag in row.tags or [] if tag not in {"elevated", "suspicious"}]
+                await session.commit()
+                await session.refresh(row)
+        except Exception:  # noqa: BLE001 - alert dedup cannot discard an event
+            logger.exception("suspicious alert claim failed for %s", row.id)
+            await session.rollback()
+            await session.refresh(row)
     enriched = {**enriched, "activity_id": row.activity_id}
+    if signal_result is not None:
+        enriched = {
+            **enriched,
+            "tags": list(row.tags or []),
+            "notification_priority": signal_result.priority,
+            "metadata": dict(row.event_metadata or {}),
+        }
     await event_bus.publish(enriched)
     try:
         # Incident routing happens after the event is fully enriched/final
@@ -141,6 +234,14 @@ def to_dict(row: Event) -> dict:
         "camera_id": row.camera_id,
         "type": row.type,
         "priority": row.priority,
+        # Smart notification priority (low/normal/high/critical) computed by
+        # ``app.services.priority`` from type, zone, arming mode and signals.
+        # Distinct from ``priority`` above, which is the source's own level.
+        "notification_priority": metadata.get("notification_priority"),
+        "priority_reasons": list(metadata.get("priority_reasons") or []),
+        # Loitering dwell / activity-baseline details behind the
+        # ``loitering`` and ``unusual_activity`` tags.
+        "signals": metadata.get("signals"),
         "source": row.source,
         "start_time": row.start_time.isoformat(),
         "description": row.description,
@@ -159,6 +260,11 @@ def to_dict(row: Event) -> dict:
         # coordinates by the AI pipeline, so the UI can draw them directly
         # without knowing anything about how the photo was cropped.
         "photo_boxes": list((metadata.get("best_photo") or {}).get("boxes") or []),
+        "full_photo_boxes": list((metadata.get("best_photo") or {}).get("frame_boxes") or []),
+        "photo_width": (metadata.get("best_photo") or {}).get("width"),
+        "photo_height": (metadata.get("best_photo") or {}).get("height"),
+        "full_photo_width": (metadata.get("best_photo") or {}).get("full_width"),
+        "full_photo_height": (metadata.get("best_photo") or {}).get("full_height"),
         # Whether a vision model agreed with the local detector. ``None``
         # means nobody checked (no Foundry configured, or a non-person
         # subject), which the UI must show as neither confirmation nor doubt.
@@ -167,6 +273,8 @@ def to_dict(row: Event) -> dict:
         # clothing, carried items, whether the face is visible.
         "appearance": metadata.get("appearance"),
         "animal": metadata.get("animal"),
+        "suspicious": metadata.get("suspicious"),
+        "vehicle": metadata.get("vehicle"),
         # What changed, for scene transitions (vehicle arrived/parked/moved/
         # departed/returned, mailbox delivery, bin put out/emptied). The UI
         # renders this instead of the raw tracker state.

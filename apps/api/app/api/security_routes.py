@@ -18,12 +18,16 @@ from ..db import get_db
 from ..models.db import Incident, User
 from ..schemas import (
     AuditLogOut,
+    DeterrenceActionIn,
+    DeterrenceActionOut,
+    DeterrenceCapabilitiesOut,
     IncidentExportOut,
     IncidentOut,
     SecurityModeIn,
     SecurityModeOut,
 )
 from ..services import audit as audit_service
+from ..services import deterrence as deterrence_service
 from ..services import incidents as incident_service
 from ..services import security_modes
 
@@ -116,3 +120,76 @@ async def audit_log(
 ):
     entries = await audit_service.list_entries(session, action=action, limit=limit)
     return [audit_service.to_dict(entry) for entry in entries]
+
+
+# --- deterrence -------------------------------------------------------------------
+#
+# Siren/light/voice. Every one of these routes requires an authenticated
+# user, and *execution* additionally requires a separate, explicit
+# confirmation call naming the exact pending action. There is deliberately
+# no automation-reachable path to execution, and no action that contacts
+# emergency services. See app/services/deterrence.py and docs/ai-features.md.
+
+
+@router.get("/deterrence/capabilities", response_model=DeterrenceCapabilitiesOut)
+async def deterrence_capabilities(_user: User = Depends(get_current_user)):
+    return deterrence_service.capabilities()
+
+
+@router.get("/deterrence/actions", response_model=list[DeterrenceActionOut])
+async def list_deterrence_actions(
+    camera_id: str | None = Query(default=None),
+    limit: int = Query(default=50, le=200),
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    rows = await deterrence_service.list_actions(session, camera_id=camera_id, limit=limit)
+    return [deterrence_service.to_dict(row) for row in rows]
+
+
+@router.post("/deterrence/actions", response_model=DeterrenceActionOut, status_code=201)
+async def request_deterrence_action(
+    payload: DeterrenceActionIn,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Propose a deterrent. Always lands in ``pending``; never executes."""
+    try:
+        row = await deterrence_service.request_action(
+            session,
+            camera_id=payload.camera_id,
+            action=payload.action,
+            reason=payload.reason or "",
+            incident_id=payload.incident_id,
+            requested_by=user.id,
+        )
+    except deterrence_service.DeterrenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return deterrence_service.to_dict(row)
+
+
+@router.post("/deterrence/actions/{action_id}/confirm", response_model=DeterrenceActionOut)
+async def confirm_deterrence_action(
+    action_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The only path to execution, and it is a human pressing a button."""
+    try:
+        row = await deterrence_service.confirm_action(session, action_id, confirmed_by=user.id)
+    except deterrence_service.DeterrenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return deterrence_service.to_dict(row)
+
+
+@router.post("/deterrence/actions/{action_id}/cancel", response_model=DeterrenceActionOut)
+async def cancel_deterrence_action(
+    action_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        row = await deterrence_service.cancel_action(session, action_id, actor=user.id)
+    except deterrence_service.DeterrenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return deterrence_service.to_dict(row)

@@ -42,9 +42,9 @@ describe("appearance chips",()=>{
     }
   });
 
-  it("hedges an age it is not sure about",()=>{
+  it("never displays age from a model response",()=>{
     const chips=appearanceChips({...APPEARANCE,age_confidence:0.3});
-    expect(chips.find(chip=>chip.key==="age")?.label).toContain("unsure");
+    expect(chips.find(chip=>chip.key==="age")).toBeUndefined();
   });
 
   it("says nothing at all when the model returned nothing",()=>{
@@ -64,7 +64,7 @@ describe("appearance in the events section",()=>{
     render(<EventCard event={{...BASE_EVENT,appearance:APPEARANCE}} persons={[]} onChanged={()=>{}}/>);
     expect(screen.getByText("dark jacket")).toBeInTheDocument();
     expect(screen.getByText("Carrying a parcel")).toBeInTheDocument();
-    expect(screen.getByText(/Looks adult/)).toBeInTheDocument();
+    expect(screen.queryByText(/Looks adult/)).not.toBeInTheDocument();
   });
 
   it("stays quiet for events recorded before appearance analysis existed",()=>{

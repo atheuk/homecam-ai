@@ -1,8 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .ai.detector import detector_status
 from .api.admin_routes import router as admin_router
@@ -10,10 +11,12 @@ from .api.admin_routes import zones_router as admin_zones_router
 from .api.auth_routes import router as auth_router
 from .api.routes import router
 from .api.security_routes import router as security_router
+from .auth.dependencies import COOKIE_NAME
 from .ai import camera_health
 from .config import settings
 from .db import SessionLocal, init_db
 from .services.cameras import sync_cameras
+from .services.digest_scheduler import digest_scheduler
 from .services.ingestion import ingestion_service
 from .services.provider_registry import discover_all_cameras
 from .services import detector_watchdog
@@ -42,10 +45,12 @@ async def lifespan(app: FastAPI):
     await camera_health.seed_from_open_incidents(SessionLocal)
     if settings.event_ingestion_enabled:
         ingestion_service.start()
+    digest_scheduler.start()
     try:
         yield
     finally:
         await ingestion_service.stop()
+        await digest_scheduler.stop()
 
 
 app = FastAPI(title="HomeCam AI API", version="0.1.0", lifespan=lifespan)
@@ -54,7 +59,22 @@ app.add_middleware(
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+
+
+@app.middleware("http")
+async def protect_cookie_authenticated_writes(request: Request, call_next):
+    if (
+        request.method not in {"GET", "HEAD", "OPTIONS"}
+        and request.url.path not in {"/api/v1/auth/login", "/api/v1/auth/register"}
+        and COOKIE_NAME in request.cookies
+        and not request.headers.get("authorization")
+        and request.headers.get("x-homecam-request") != "1"
+    ):
+        return JSONResponse(status_code=403, content={"detail": "Invalid browser request"})
+    return await call_next(request)
+
 app.include_router(router)
 app.include_router(auth_router)
 app.include_router(admin_router)

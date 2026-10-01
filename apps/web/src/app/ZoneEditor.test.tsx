@@ -234,6 +234,43 @@ describe("ZoneEditor", () => {
     expect(onSaved).toHaveBeenCalled();
   });
 
+  it("includes a loitering dwell threshold only when one is entered", async () => {
+    let body: Record<string, unknown> = {};
+    mockFetch({
+      "/still": () => jsonResponse(STILL),
+      "/zones": (init) => {
+        body = JSON.parse(String(init?.body));
+        return jsonResponse({ id: "z1" }, 201);
+      },
+    });
+    renderEditor();
+    await screen.findByAltText("Current view from camera cam-1");
+    const surface = sizeSurface(200, 100);
+    clickAt(surface, 20, 10);
+    clickAt(surface, 100, 10);
+    clickAt(surface, 60, 80);
+    fireEvent.change(screen.getByLabelText("Loitering seconds"), { target: { value: "90" } });
+    fireEvent.click(screen.getByText("Save drawn zone"));
+
+    await screen.findByText("Zone saved.");
+    expect(body.dwell_seconds).toBe(90);
+  });
+
+  it("rejects a non-positive loitering threshold before contacting the API", async () => {
+    const fetchMock = mockFetch({ "/still": () => jsonResponse(STILL) });
+    renderEditor();
+    await screen.findByAltText("Current view from camera cam-1");
+    const surface = sizeSurface(200, 100);
+    clickAt(surface, 20, 10);
+    clickAt(surface, 100, 10);
+    clickAt(surface, 60, 80);
+    fireEvent.change(screen.getByLabelText("Loitering seconds"), { target: { value: "0" } });
+    fireEvent.click(screen.getByText("Save drawn zone"));
+
+    expect(await screen.findByText("Loitering seconds must be a positive number.")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/zones"))).toBe(false);
+  });
+
   it("shows the guidance for the selected kind", async () => {
     renderEditor();
     await screen.findByAltText("Current view from camera cam-1");

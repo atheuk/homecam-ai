@@ -26,10 +26,30 @@ function mockJson(body:unknown,status=200){
 describe("event photo card",()=>{
   beforeEach(()=>{mockJson({})});
 
-  it("shows the detected person's photo, not a server-side file path",()=>{
+  it("shows vehicle attributes with independent confidence",()=>{
+    render(<EventCard event={{...EVENT,type:"vehicle",vehicle:{
+      make:"Volkswagen",make_confidence:0.87,model:"Golf",model_confidence:0.7,
+      colour:"dark blue",colour_confidence:0.93,body_type:"hatchback",body_type_confidence:0.8,
+    }}} persons={[]} onChanged={()=>{}}/>);
+    expect(screen.getByText("Volkswagen · 87%")).toBeInTheDocument();
+    expect(screen.getByText("Golf · 70%")).toBeInTheDocument();
+    expect(screen.getByText("dark blue · 93%")).toBeInTheDocument();
+  });
+
+  it("shows a suspicious score, explanations and linked visit evidence",()=>{
+    render(<EventCard event={{...EVENT,suspicious:{
+      score:5.2,level:"suspicious",reasons:["lingered 130s beside a parked vehicle"],
+      evidence_event_ids:["evt-older"],
+    }}} persons={[]} onChanged={()=>{}}/>);
+    expect(screen.getByText("suspicious · score 5.2")).toBeInTheDocument();
+    expect(screen.getByText("lingered 130s beside a parked vehicle")).toBeInTheDocument();
+    expect(screen.getByRole("link",{name:"evt-older"})).toHaveAttribute("href","#event-evt-older");
+  });
+
+  it("keeps the detected person's protected photo hidden until authentication",()=>{
     render(<EventCard event={EVENT} persons={[]} onChanged={()=>{}}/>);
-    const image=screen.getByRole("img") as HTMLImageElement;
-    expect(image.src).toContain("/api/v1/events/evt-1/photo");
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.getByText("Sign in to view photo")).toBeInTheDocument();
     expect(screen.queryByText(/media[\\/]best-photos/)).not.toBeInTheDocument();
   });
 
@@ -38,9 +58,10 @@ describe("event photo card",()=>{
     expect(screen.getByText(/An adult in a dark jacket carrying a parcel/)).toBeInTheDocument();
   });
 
-  it("uses the caption as alt text for screen readers",()=>{
+  it("uses a descriptive accessible label for protected photo controls",()=>{
     render(<EventCard event={EVENT} persons={[]} onChanged={()=>{}}/>);
-    expect(screen.getByAltText("An adult in a dark jacket carrying a parcel.")).toBeInTheDocument();
+    expect(screen.getByRole("button",{name:/open person detected on front yard/i}))
+      .toBeInTheDocument();
   });
 
   it("says so when no photo was captured rather than showing a broken image",()=>{

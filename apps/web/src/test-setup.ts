@@ -45,6 +45,23 @@ export class MockEventSource {
 }
 Object.assign(globalThis, { EventSource: MockEventSource });
 
+export class MockSseStream {
+  static instances: MockSseStream[] = [];
+  private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+  static response() {
+    const stream = new MockSseStream();
+    MockSseStream.instances.push(stream);
+    return new Response(new ReadableStream<Uint8Array>({
+      start: controller => { stream.controller = controller; },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  }
+
+  dispatch(type: string, data: unknown) {
+    this.controller?.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`));
+  }
+}
+
 // jsdom does not implement PointerEvent either. Without it, fireEvent's
 // pointer helpers fall back to a bare Event and silently drop clientX /
 // pointerId, so any drag or pinch assertion would be meaningless. A

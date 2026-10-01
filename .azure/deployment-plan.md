@@ -1,17 +1,22 @@
 # Azure Deployment Plan
 
-> **Status:** Deployed
+> **Status:** Ready for Validation
 
-Generated: 2026-09-24T09:14:40+02:00
-Last updated: 2026-09-24T15:35:00+02:00 (private tailnet connectivity, admin bootstrap, Dahua edge provider persistence, and public HLS relay all deployed and validated)
+Generated: 2026-10-01T12:50:00+02:00
+Updated: 2026-10-01T12:50:00+02:00
 
 ---
 
 ## 1. Project Overview
 
-**Goal:** Add private outbound connectivity from the existing HomeCam AI API Container App to the Home Assistant Dahua edge connector through Tailscale, without exposing the edge connector or Dahua endpoints publicly.
+**Goal:** Release HomeCam AI's modern security, mailbox, suspicious-behaviour, vehicle/wildlife recognition, and higher-resolution event-photo updates to the existing Azure development environment.
 
-**Path:** Add Components (MODIFY)
+**Path:** Modify Existing Application
+
+**Release source tree:** `492b4da` (integration branch `atheuk-release-homecam-ai-security-updates`).
+PRs #20 and #21 are already on `main`. PRs #22-#25 are integrated on the release branch from merge base `7543e75207da13851be16acf5e967b745f26b526`; the integration PR to `main` must contain only those four PRs.
+
+**Authorization:** The user's explicit "go live" instruction authorizes this release to the existing development target.
 
 ---
 
@@ -20,200 +25,163 @@ Last updated: 2026-09-24T15:35:00+02:00 (private tailnet connectivity, admin boo
 | Attribute | Value |
 |-----------|-------|
 | Classification | Development |
-| Scale | Small (0-2 API replicas) |
-| Budget | Cost-Optimized |
-| Subscription | Ate Lab (`83288725-b5b5-44ee-bb33-b1b0a38539cd`) |
+| Scale | Small; existing Container Apps and database |
+| Budget | Cost-Optimized; no new Azure resources |
+| Subscription | Ate Lab (`83288725-b5b5-44ee-bb33-b1b0a38539cd`), current default |
 | Location | North Europe (`northeurope`) |
 | Resource group | `rg-homecam-ai` |
-| Authorization | Deployment explicitly approved through the creator chat |
+| Container Apps environment | `cae-homecam-ai-dev-82ac` |
+
+The release updates existing application images and applies additive database migrations. It does not create a production target or provision new resources.
 
 ---
 
 ## 3. Components Detected
 
-| Component | Type | Technology | Path |
-|-----------|------|------------|------|
-| API | API service | Python 3.12 / FastAPI / httpx | `apps/api` |
-| Web | SSR web app | Next.js | `apps/web` |
-| Worker | Background service | Python | `apps/api` |
-| Dahua edge connector | Private edge API | Python / FastAPI | `apps/edge`, `homecam-edge` |
-| Infrastructure | Azure IaC | Bicep | `infra` |
-
-Existing Azure resources include Container Apps, Container Apps Environment, ACR, PostgreSQL Flexible Server, Key Vault, Redis, Log Analytics, Application Insights, and a user-assigned managed identity.
+| Component | Type | Technology | Azure resource |
+|-----------|------|------------|----------------|
+| HomeCam API | API | Python 3.12 / FastAPI | `ca-api-homecam-ai-dev-82ac` |
+| Web application | SSR frontend | Next.js | `ca-web-homecam-ai-dev-82ac` |
+| Background worker | Worker | Python | `ca-worker-homecam-ai-dev-82ac` |
+| Database migration | Job | Alembic | `job-migrate-homecam-ai-dev-82ac` |
+| PostgreSQL | Database | Azure Database for PostgreSQL Flexible Server | `psql-homecam-ai-dev-82ac` |
+| Image registry | Registry | Azure Container Registry | `crhomecamaidev82ac` |
+| Home Assistant edge connector | Edge add-on | Python / Home Assistant | Outside this Azure deployment |
 
 ---
 
 ## 4. Recipe Selection
 
-**Selected:** Bicep
+**Selected:** Existing Bicep-managed Azure Container Apps deployment with a targeted image rollout.
 
-**Rationale:** The application is already deployed and managed with modular Bicep. This change updates the existing API Container App revision and adds no new Azure resource type.
-
----
-
-## 5. Architecture
-
-**Stack:** Existing Azure Container Apps
-
-```text
-HomeCam API container
-  |
-  | HTTP CONNECT via 127.0.0.1:1055
-  v
-Tailscale userspace sidecar (tag:homecam-azure)
-  |
-  | encrypted tailnet connection
-  v
-svc:homecam-edge (HTTPS 8443)
-  |
-  v
-Home Assistant edge connector -> Dahua NVR on private LAN
-```
-
-### Service Mapping
-
-| Component | Azure Service | Change |
-|-----------|---------------|--------|
-| HomeCam API | Existing Azure Container App | Add a Tailscale userspace proxy sidecar and a proxy-only API setting |
-| Tailscale auth key | Existing Azure Key Vault | Add one secret; expose only as a Container Apps secret reference |
-| Dahua runtime config | Existing PostgreSQL-backed admin API | Persist only if the preconfigured edge token can be securely obtained |
-
-### Security Decisions
-
-- Preserve the existing external HTTPS API ingress configuration; add no ingress for the Tailscale sidecar.
-- Keep the edge connector and Dahua endpoints private; do not use Tailscale Funnel or public port forwarding.
-- Run Tailscale in userspace mode without `/dev/net/tun`, privileged mode, or `NET_ADMIN`.
-- Route only Dahua edge-provider requests through the localhost HTTP proxy; do not set global `HTTP_PROXY` or `HTTPS_PROXY`.
-- Store the Tailscale auth key in Key Vault and reference it from the Container App; never write its value to source, parameters, logs, or deployment output.
-- Authenticate the Azure node with the tagged `tag:homecam-azure` identity.
-- Pin the Tailscale image to `tailscale/tailscale:v1.102.4`.
+**Rationale:** The application already runs in the named Container Apps environment. This release changes application code and database schema, not Azure resource topology. Do not redeploy the subscription-wide template or alter unrelated resources.
 
 ---
 
-## 6. Provisioning Limit Checklist
+## 5. Architecture and Release Settings
 
-No new Azure resource instance is created. The existing API Container App gains one sidecar per replica.
+### Existing service mapping
 
-| Resource Type | Number to Deploy | Total After Deployment | Limit/Quota | Notes |
-|---------------|------------------|------------------------|-------------|-------|
-| `Microsoft.App/managedEnvironments` | 0 | 1 | 20 | Azure quota CLI: `ManagedEnvironmentCount`, North Europe |
-| `Microsoft.App/containerApps` | 0 | Existing app updated | Existing resource | No new Container App |
-| Container Apps sandbox vCPU | Up to 0.5 vCPU (0.25 x 2 replicas) | Existing workload + 0.5 vCPU maximum | 50 | Azure quota CLI: `SandboxCores`, North Europe |
+| Component | Existing Azure service | Release action |
+|-----------|------------------------|----------------|
+| API | Azure Container Apps | Update only container `api`; preserve the `tailscale` sidecar, all environment values, and secret references |
+| Web | Azure Container Apps | Update web image; compile with the public API URL below |
+| Migrations | Azure Container Apps Job | Run `alembic upgrade head` using the release API image before API rollout |
+| PostgreSQL / ACR / Key Vault / Redis / monitoring | Existing resources | No topology or secret changes |
 
-**Status:** All required capacity is available.
+### Public endpoints
 
----
+- API: `https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`
+- Web: `https://ca-web-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`
 
-## 7. Execution Checklist
+Build the web image with `NEXT_PUBLIC_API_URL` set to the API URL above. Do not pass secrets as build arguments or write them to logs.
 
-### Phase 1: Planning
-- [x] Analyze workspace
-- [x] Gather requirements
-- [x] Confirm subscription and location from explicit creator authorization and existing target
-- [x] Prepare resource inventory
-- [x] Fetch quotas and validate capacity with the Azure quota CLI
-- [x] Scan codebase
-- [x] Select Bicep recipe
-- [x] Plan architecture
-- [x] User approved deployment
+### Current rollback baseline (read-only inventory)
 
-### Phase 2: Execution
-- [x] Research Azure Container Apps and Tailscale userspace proxy behavior
-- [x] Add proxy-aware Dahua edge client behavior
-- [x] Add the Tailscale sidecar and Key Vault reference to Bicep
-- [x] Update edge connector documentation
-- [x] Run targeted tests and Bicep validation
-- [x] Update status to `Ready for Validation`
+| Component | Image | Latest ready revision |
+|-----------|-------|-----------------------|
+| API | `crhomecamaidev82ac.azurecr.io/api:main-6be4098` | `ca-api-homecam-ai-dev-82ac--0000034` |
+| Web | `crhomecamaidev82ac.azurecr.io/web:ui-6be4098` | `ca-web-homecam-ai-dev-82ac--0000014` |
 
-### Phase 3: Validation
-- [x] Invoke `azure-validate`
-- [x] All validation checks pass
-  - [x] Core Bicep validation: CLI, authentication, build, ARM validation, and what-if
-  - [x] Bicep lint
-  - [x] Azure Policy assignments reviewed
-  - [x] Application tests and build verification
-  - [x] Static RBAC role verification
-- [x] Record validation proof
-- [x] Update status to `Validated`
+The API currently has `api` and `tailscale` containers. Existing database, Redis, application, Foundry, and Tailscale secret references are present; only secret names were inspected. Keep them unchanged and do not read or print secret values.
 
-### Phase 4: Deployment
-- [x] Commit source and IaC changes
-- [x] Invoke `azure-deploy`
-- [x] Deploy the API image and Container App revision
-- [x] Validate API health and live Azure RBAC
-- [x] Validate tagged Tailscale identity and private edge connectivity
-- [x] Persist Dahua edge runtime configuration via the admin API
-- [x] Add a public HLS relay so the browser never needs private tailnet/localhost addresses
-- [x] Deploy the frontend hls.js fix and update status to `Deployed`
+### Migrations
 
-### Resolution Summary (superseding the earlier blocker below)
+Final Alembic head: `0012_ingestion_leases`.
 
-- A user-confirmed reusable + ephemeral Tailscale auth key authorized for `tag:homecam-azure` was supplied via a securely staged, non-committed file, rotated into Key Vault, and confirmed via `tailscale status --json` (`Tags: ["tag:homecam-azure"]`, `BackendState: Running`), surviving container restarts.
-- The first HomeCam admin account was bootstrapped via the existing `/api/v1/auth/register` endpoint using user-supplied credentials (never hardcoded/logged), then used to persist the Dahua edge provider config (`dahua_mode=edge`, edge connector base URL over the tailnet, edge bearer token read only into memory from the staged host file).
-- All 4 Dahua channels report online via the edge connector; channels 1-2 have real physically-connected cameras (channels 3-4 are confirmed physically disconnected NVR ports, not a bug).
-- **Root cause of a later "nothing works in the app" regression**: earlier validation had used `az containerapp exec` into the Tailscale sidecar's own network namespace (which is on the tailnet) to fetch HLS manifests — this is not equivalent to a real browser, which has no tailnet route. The true public `/live` endpoint was returning a private `*.ts.net` URL directly to the browser, and the frontend `<video src=...>` element had no HLS.js (only Safari plays HLS natively that way).
-- Fixed with two changes, now both deployed together: (1) a new public HLS relay route (`GET /api/v1/cameras/{id}/hls/{path}`) that streams the manifest/segments through the API's own tailnet-connected path and rewrites `/live`'s `stream_url`/`hls_url` to this public path whenever the upstream is private-only; (2) hls.js added to the frontend Live tab so non-Safari browsers can actually decode the HLS stream.
-- All staged credential handoff files (`tailscale_auth_key.txt`, `homecam_admin.json`) were securely deleted from the host after successful use; no secret values were ever printed, logged, or committed.
+Required chain: `0009_zone_polygon` → `0010_security_essentials` → `0011_modern_ai_security` → `0012_ingestion_leases`. PRs #24 and #25 add no Alembic revisions. Run the existing migration job's `alembic upgrade head` with the release API image and its existing `DATABASE_URL` secret reference before updating the API image. Confirm the job succeeds and the database reports head `0012_ingestion_leases`. The schema changes are additive; do not downgrade or run destructive data operations.
 
-### Deployed and Verified Portions
+### Runtime configuration
 
-- API images built and deployed successively: `crhomecamaidev82ac.azurecr.io/api:tailnet-ee7eaeb` (initial tailnet sidecar) → `api:tailnet-7f1095f` (HLS proxy route) → `api:tailnet-3bacc3b` (final, includes rebased frontend snapshot media-type fix). Final revision: `ca-api-homecam-ai-dev-82ac--0000007`, Healthy/Running, 100% traffic.
-- Web image `crhomecamaidev82ac.azurecr.io/web:tailnet-3bacc3b` (hls.js-enabled bundle, built with `NEXT_PUBLIC_API_URL` pointed at the public API FQDN). Final revision: `ca-web-homecam-ai-dev-82ac--0000003`, Healthy/Running, 100% traffic.
-- Public API ingress remains HTTPS-only (`allowInsecure: false`); no edge or Dahua public ingress was added at any point — only outbound connectivity from the API's Tailscale sidecar.
-- Live RBAC confirmed `AcrPull` on ACR and `Key Vault Secrets User` on Key Vault for the existing user-assigned identity.
-- Key Vault secret reference `tailscale-auth-key` holds the final rotated key; no staging file remains on the host.
-- Verified purely via true public HTTPS calls (no container-exec/tailnet shortcuts): `GET /api/v1/cameras/dahua-channel-{1,2}/live` return a `stream_url` on the API's own public domain (`https://ca-api-homecam-ai-dev-82ac.../api/v1/cameras/.../hls/index.m3u8`); the proxied master playlist, media sub-playlist, and a live `.mp4` segment (up to ~1.9 MB) for both channels all returned HTTP 200 over plain public internet; CORS on the new route correctly scopes `Access-Control-Allow-Origin` to the web app's own origin; the deployed web JS bundle contains the hls.js code.
+- Preserve the existing `FOUNDRY_VISION_DEPLOYMENT`, Foundry endpoint, API key reference, and AI feature flags.
+- The live API has no explicit `MAILBOX_*`, `INGESTION_LEASE_*`, `SUSPICIOUS_*`, `HOME_*`, or bird-threshold environment overrides. The release's safe application defaults therefore apply: mailbox detection and ingestion leases enabled, lease TTL 30 seconds, suspicious scoring enabled, home region `Netherlands, Northern Europe`, time zone `Europe/Amsterdam`, and bird confidence threshold `0.25`.
+- API best-photo defaults are `BEST_PHOTO_MIN_CROP_PIXELS=720`, `BEST_PHOTO_JPEG_QUALITY=94`, and `BEST_PHOTO_SNAPSHOT_TIMEOUT_SECONDS=4`. These are provided by the release settings defaults; do not replace existing app environment values.
+- `DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS=3` is consumed by the Home Assistant edge add-on, not by an Azure Container App. Do not add it to the API app; the add-on itself is outside this Azure deployment.
+- Local Docker is unavailable. Require green integration-PR `docker-validate` CI and rely on that image validation.
+
+### Provisioning limit checklist
+
+| Resource type | Number to deploy | Total after release | Limit/quota | Notes |
+|---------------|------------------|---------------------|-------------|-------|
+| `Microsoft.App/managedEnvironments` | 0 | 1 existing | 20 | Previously validated in North Europe; no new environment |
+| `Microsoft.App/containerApps` | 0 | 5 existing | No quota change | Targeted image-only revisions |
+| `Microsoft.App/jobs` | 0 | 1 existing | No quota change | Reuse existing migration job |
+| `Microsoft.DBforPostgreSQL/flexibleServers` | 0 | 1 existing | No quota change | Additive schema migrations only |
+| `Microsoft.ContainerRegistry/registries` | 0 | 1 existing | No quota change | Reuse existing ACR |
+
+**Status:** No resource creation or quota increase is planned; existing capacity was previously validated.
 
 ---
 
-## 8. Validation Proof
+## 6. Execution Checklist
 
-| Check | Command Run | Result | Timestamp |
+### Preparation
+- [x] Analyze the existing deployment and choose the existing Bicep/Container Apps path.
+- [x] Confirm the subscription, region, resource group, current app images/revisions, containers, and secret-reference names.
+- [x] Confirm the release merge base and scope; exclude changes already on `main` from PRs #20/#21.
+- [x] Inspect the complete migration chain and release configuration defaults.
+- [x] Record rollback baseline and keep all deployment operations non-destructive.
+- [x] Obtain explicit user authorization to go live.
+- [x] Update this plan to `Ready for Validation`.
+
+### Required validation before deployment
+- [ ] Run `azure-validate` to completion against this release; do not deploy if any required check fails.
+- [ ] Validate Bicep build/lint and targeted what-if with no unrelated resource changes.
+- [ ] Run application tests/build checks and review static RBAC; confirm integration-PR CI is green.
+- [ ] Record actual commands, results, and timestamps in Section 7; only the validation workflow may set status `Validated`.
+
+### All validation checks pass
+- [ ] Core validation: Azure CLI/authentication, `az bicep build`, `az deployment sub validate`, and `az deployment sub what-if` using `infra/main.bicep` and release parameters.
+- [ ] Bicep lint and Azure Policy assignment review for the target subscription.
+- [ ] Container image validation from integration-PR CI; local Docker is unavailable.
+- [ ] Static RBAC review of `infra/modules/role-assignments.bicep`.
+
+**Validation constraint:** `infra/main.bicep` requires secure `administratorLoginPassword` and `secretKey` parameters. The committed parameter file supplies neither; the existing Key Vault contains `secret-key` but no PostgreSQL administrator password. The template also defaults `isPlaceholder=true`, which would preview placeholder app images unless overridden. Do not use dummy secret values or proceed with a what-if that does not accurately represent the existing deployment.
+
+### Deployment (only after validation succeeds)
+- [ ] Use `azure-deploy` for execution; do not run deployment commands outside that workflow.
+- [ ] Build and push API and web images tagged `release-492b4da`; build the web image with the public API URL.
+- [ ] Update the migration job to the release API image and run it; verify `alembic upgrade head` succeeds at `0012_ingestion_leases`.
+- [ ] Update the API image with `--container-name api` only; preserve the Tailscale sidecar, app settings, ingress, and secret references.
+- [ ] Update the web image after the API revision is healthy.
+- [ ] Verify the deployed revisions, 100% traffic, public API/web health, API URL in the frontend bundle, live streams, and photo authentication/cache behavior.
+- [ ] Update deployment and verification results in this plan.
+
+---
+
+## 7. Validation Proof
+
+> Release-specific validation is pending. Do not mark this plan `Validated` until the `azure-validate` workflow has completed successfully.
+
+| Check | Command run | Result | Timestamp |
 |-------|-------------|--------|-----------|
-| Targeted provider tests | `python -m pytest apps\api\tests\test_dahua_edge_provider.py apps\api\tests\test_admin_provider_configs.py -q` | Pass: 21 tests | 2026-09-24T09:29+02:00 |
-| Python lint | `python -m ruff check ...` | Pass | 2026-09-24T09:29+02:00 |
-| Full API suite | `python -m pytest apps\api\tests -q` | Pass: 125 passed, 2 skipped | 2026-09-24T09:34+02:00 |
-| Bicep build and lint | `az bicep build` and `az bicep lint` | Pass; existing type-definition warnings only | 2026-09-24T09:34+02:00 |
-| ARM validation | `az deployment sub validate` with secure values held only in process memory | Pass | 2026-09-24T09:36+02:00 |
-| ARM what-if | `az deployment sub what-if` with secure values held only in process memory | Pass: no create/delete; API update included | 2026-09-24T09:37+02:00 |
-| Azure Policy | `az policy assignment list` | Pass: one assignment reviewed, no blocking validation result | 2026-09-24T09:36+02:00 |
-| Static RBAC | Review `infra/modules/role-assignments.bicep` | Pass: user-assigned identity has resource-scoped Key Vault Secrets User and ACR Pull | 2026-09-24T09:37+02:00 |
-| Full API suite (post-rebase) | `python -m pytest apps\api\tests -q` | Pass: 125 passed, 2 skipped | 2026-09-24T15:20+02:00 |
-| Public HLS proxy end-to-end (real public HTTPS, no container-exec) | `Invoke-WebRequest` against `https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io/api/v1/cameras/dahua-channel-{1,2}/live`, `.../hls/index.m3u8`, `.../hls/video1_stream.m3u8`, and a live `.mp4` segment | Pass: 200 on every hop, real video bytes (up to 1.9MB) fetched over public internet only | 2026-09-24T15:30+02:00 |
-| Web bundle contains hls.js | Fetched deployed `/_next/static/chunks/...js` and grepped for `hls`/`Hls` | Pass: found in `app/page-*.js` and a vendor chunk | 2026-09-24T15:32+02:00 |
-| Cross-origin proxy access | `Invoke-WebRequest` with `Origin` header set to the web app's public origin against the new `/hls/index.m3u8` route | Pass: `Access-Control-Allow-Origin` correctly echoes only the web app's own origin | 2026-09-24T15:32+02:00 |
+| API tests on resolved integration merge | `python -m pytest apps/api/tests -q` | 652 passed, 3 skipped | 2026-10-01 |
+| Ruff on resolved files | `python -m ruff check apps/api/app/api/routes.py apps/api/app/services/ingestion.py` | Pass | 2026-10-01 |
+| Bicep and Azure release validation | Pending `azure-validate` | Pending | Pending |
+| Integration PR CI, including Docker validation | Pending | Pending | Pending |
 
-**Validated by:** `azure-validate`
-
-### Role Assignment Verification
-
-- **Status:** Verified
-- **Identity:** `id-homecam-ai-dev-82ac`
-- **Roles:** Key Vault Secrets User scoped to `kv-homecam-ai-dev-82ac`; AcrPull scoped to `crhomecamaidev82ac`
-- **Tailscale impact:** The sidecar reads the new Key Vault-backed Container Apps secret through the existing least-privilege Key Vault role. No new management-plane permission is required.
-- **Deployment safety:** Subscription what-if reports provider/API-version normalization on unrelated existing resources. Deployment will target only the API module rather than redeploying the full subscription template.
+**Validated by:** Pending `azure-validate`
 
 ---
 
-## 9. Files to Change
+## 8. Rollback
 
-| File | Purpose | Status |
-|------|---------|--------|
-| `.azure/deployment-plan.md` | Deployment source of truth | In progress |
-| `infra/modules/api.bicep` | Tailscale sidecar, secret reference, and proxy setting | Complete |
-| `infra/main.bicep` | Wire the existing Key Vault secret URI to the API module | Complete |
-| `apps/api/app/providers/dahua/edge_provider.py` | Apply the proxy only to edge requests | Complete |
-| `apps/api/tests/test_dahua_edge_provider.py` | Verify proxy wiring | Complete |
-| `docs/edge-connector.md` | Document Azure sidecar deployment and private service URL | Complete |
+If the release causes an outage, stop further rollout and use the existing healthy Container Apps revision or restore the previous API/web image tags recorded above. Preserve the Tailscale sidecar and all current secrets. The migrations are additive; leave the database schema in place and do not downgrade it. No rollback is needed if the release is healthy.
 
 ---
 
-## 10. Rollback
+## 9. Post-Deployment Verification
 
-Redeploy the previous API Container App template or revision, removing the sidecar and `TAILSCALE_HTTP_PROXY` setting. The existing API ingress and all other Azure resources remain unchanged. Disable or delete the Tailscale node and rotate/revoke its auth key after rollback.
+- Public HTTPS API `/health` and `/ready` respond successfully.
+- Database migration head is `0012_ingestion_leases`.
+- API and web revisions are healthy and receive expected traffic; API has both `api` and unchanged `tailscale` containers.
+- Web responds successfully and its built JavaScript targets the public API FQDN.
+- Camera `/live` endpoints, public HLS manifest/sub-manifest, and a live segment work over public HTTPS; do not use the Tailscale sidecar namespace as browser-access proof.
+- Crop/full-frame photo routes reject unauthenticated requests and return private, no-store responses; perform an authenticated download if credentials are safely available.
+- Check ingestion/log counters without exposing tokens, secret values, or private image data. Real inference results require new real detections and cannot be asserted without them.
 
 ---
 
-## 11. Next Step
+## 10. Historical Baseline
 
-Supply a reusable, preferably ephemeral Tailscale auth key authorized for `tag:homecam-azure`, rotate the Key Vault secret, restart the revision, and complete private endpoint/admin API verification.
+The prior development deployment was validated and completed on 2026-09-24. It established the existing Container Apps environment, managed identity permissions, Tailscale sidecar, and public HLS relay. Those historical validation results are not substitutes for release-specific `azure-validate` checks.

@@ -147,6 +147,8 @@ class CameraZoneIn(BaseModel):
     points: list[Annotated[list[float], Field(min_length=2, max_length=2)]] | None = Field(
         default=None, max_length=MAX_ZONE_POINTS
     )
+    #: Loitering threshold for this zone; ``None`` uses the configured default.
+    dwell_seconds: float | None = Field(default=None, gt=0.0, le=86400.0)
 
     @model_validator(mode="after")
     def check_geometry(self) -> "CameraZoneIn":
@@ -167,6 +169,7 @@ class CameraZoneUpdate(BaseModel):
     points: list[Annotated[list[float], Field(min_length=2, max_length=2)]] | None = Field(
         default=None, max_length=MAX_ZONE_POINTS
     )
+    dwell_seconds: float | None = Field(default=None, gt=0.0, le=86400.0)
 
     @model_validator(mode="after")
     def check_geometry(self) -> "CameraZoneUpdate":
@@ -204,6 +207,7 @@ class CameraZoneOut(BaseModel):
     x2: float
     y2: float
     points: list[list[float]] | None = None
+    dwell_seconds: float | None = None
     created_at: datetime
     updated_at: datetime
 
