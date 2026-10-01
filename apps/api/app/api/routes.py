@@ -500,7 +500,7 @@ async def event_evidence(
         content=row.image,
         media_type=row.content_type or "image/jpeg",
         headers={
-            "Cache-Control": "private, max-age=86400",
+            "Cache-Control": "private, no-store",
             "Content-Disposition": f'inline; filename="{event_id}-{label}.jpg"',
         },
     )

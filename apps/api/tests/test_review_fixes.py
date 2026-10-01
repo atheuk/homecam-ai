@@ -129,6 +129,7 @@ async def test_package_theft_evidence_is_stored_and_retrievable(client, monkeypa
         image = await client.get(url, headers=headers)
         assert image.status_code == 200
         assert image.headers["content-type"].startswith("image/jpeg")
+        assert image.headers["cache-control"] == "private, no-store"
         assert image.content == expected
         # Evidence is incident material: never public.
         saved = dict(client.cookies)
