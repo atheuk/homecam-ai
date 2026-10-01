@@ -13,6 +13,7 @@ over per-user subscriptions rather than a single destination.
 from __future__ import annotations
 
 import ipaddress
+import socket
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -69,26 +70,87 @@ def scrub(text: str, *secrets: str | None) -> str:
     return cleaned[:400]
 
 
+def _is_blocked_address(address) -> bool:
+    """Anything that is not routable on the public internet is off limits."""
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def _resolved_addresses(host: str) -> list:
+    """Every address ``host`` currently resolves to."""
+    infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    return [ipaddress.ip_address(info[4][0]) for info in infos]
+
+
+def assert_public_host(raw: str, *, field_name: str = "url") -> None:
+    """Resolve ``raw`` and refuse to talk to a non-public address.
+
+    Called immediately before every outbound request rather than only at
+    save time, because a hostname that resolved publicly when an admin
+    saved it can later resolve to 169.254.169.254 (DNS rebinding). A host
+    that does not resolve at all is refused too: the request could not
+    have succeeded anyway, and failing closed keeps the resolver from
+    being a bypass.
+    """
+    host = urlparse(raw or "").hostname
+    if not host:
+        raise ValueError(f"{field_name} is not a valid URL")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            addresses = _resolved_addresses(host)
+        except OSError:
+            raise ValueError(f"{field_name} host does not resolve") from None
+        if not addresses or any(_is_blocked_address(item) for item in addresses):
+            raise ValueError(f"{field_name} must not resolve to a private address")
+        return
+    if _is_blocked_address(address):
+        raise ValueError(f"{field_name} must not point at a private address")
+
+
 def validate_https_url(raw: str, *, field_name: str) -> str:
     """Accept only an https URL to a public host.
 
     Blocking loopback/private/link-local literals keeps an authenticated
     admin from accidentally turning the notifier into a probe of the
     cluster's own internal network (SSRF). Redirects are disabled at the
-    HTTP client level for the same reason.
+    HTTP client level for the same reason, and the host is re-checked at
+    send time by :func:`assert_public_host`.
+
+    Embedded credentials are rejected outright: ``config`` is stored in
+    the clear and returned to the admin UI, so a password belongs in the
+    encrypted secret field instead of in the URL.
     """
     value = (raw or "").strip()
     parsed = urlparse(value)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError(f"{field_name} must be an https:// URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{field_name} must not embed credentials; use the token field")
     host = parsed.hostname
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         if host.lower() in {"localhost", "localhost.localdomain"}:
             raise ValueError(f"{field_name} must not point at localhost") from None
+        # A name is resolved here as a courtesy so misconfiguration is
+        # caught at save time, but an unresolvable name is allowed through
+        # (DNS may simply be unavailable); the send-time check is strict.
+        try:
+            addresses = _resolved_addresses(host)
+        except OSError:
+            return value.rstrip("/")
+        if any(_is_blocked_address(item) for item in addresses):
+            raise ValueError(f"{field_name} must not resolve to a private address")
         return value.rstrip("/")
-    if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+    if _is_blocked_address(address):
         raise ValueError(f"{field_name} must not point at a private address")
     return value.rstrip("/")
 
@@ -140,6 +202,7 @@ __all__ = [
     "SENDERS",
     "ChannelSpec",
     "NotificationError",
+    "assert_public_host",
     "requires_secret",
     "scrub",
     "validate_config",

@@ -285,14 +285,20 @@ async def finish_delivery(
         await session.commit()
 
 
-async def recent_delivery_count(session: AsyncSession, channel_id: str, *, window_minutes: int = 60) -> int:
-    """How many sends this channel has claimed in the trailing window."""
+async def recent_delivery_count(
+    session: AsyncSession, channel_id: str, *, window_minutes: int = 60, exclude_dedupe_key: str | None = None
+) -> int:
+    """How many sends this channel has claimed in the trailing window.
+
+    ``exclude_dedupe_key`` lets the dispatcher claim first and then count,
+    so two replicas racing on different incidents each see the other's
+    claim instead of both reading a stale under-the-limit count.
+    """
     since = _now() - timedelta(minutes=window_minutes)
-    result = await session.execute(
-        select(func.count())
-        .select_from(NotificationDelivery)
-        .where(NotificationDelivery.channel_id == channel_id, NotificationDelivery.created_at >= since)
-    )
+    conditions = [NotificationDelivery.channel_id == channel_id, NotificationDelivery.created_at >= since]
+    if exclude_dedupe_key is not None:
+        conditions.append(NotificationDelivery.dedupe_key != exclude_dedupe_key[:160])
+    result = await session.execute(select(func.count()).select_from(NotificationDelivery).where(*conditions))
     return int(result.scalar() or 0)
 
 

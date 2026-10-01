@@ -222,25 +222,37 @@ function ChannelRow({
 
   async function patch(body: Record<string, unknown>) {
     setBusy(true);
-    await fetch(`${API}/api/v1/notifications/channels/${channel.id}`, {
-      method: "PATCH",
-      headers: authHeaders(token),
-      credentials: "include",
-      body: JSON.stringify(body),
-    });
-    setBusy(false);
+    try {
+      await fetch(`${API}/api/v1/notifications/channels/${channel.id}`, {
+        method: "PATCH",
+        headers: authHeaders(token),
+        credentials: "include",
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setResult("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
     onChanged();
   }
 
   async function test() {
     setBusy(true);
     setResult(null);
-    const response = await fetch(`${API}/api/v1/notifications/channels/${channel.id}/test`, {
-      method: "POST",
-      headers: authHeaders(token),
-      credentials: "include",
-    });
-    setBusy(false);
+    let response: Response;
+    try {
+      response = await fetch(`${API}/api/v1/notifications/channels/${channel.id}/test`, {
+        method: "POST",
+        headers: authHeaders(token),
+        credentials: "include",
+      });
+    } catch {
+      setResult("Could not reach the server.");
+      return;
+    } finally {
+      setBusy(false);
+    }
     if (!response.ok) {
       setResult("Test failed.");
       return;
@@ -252,12 +264,17 @@ function ChannelRow({
 
   async function remove() {
     setBusy(true);
-    await fetch(`${API}/api/v1/notifications/channels/${channel.id}`, {
-      method: "DELETE",
-      headers: authHeaders(token),
-      credentials: "include",
-    });
-    setBusy(false);
+    try {
+      await fetch(`${API}/api/v1/notifications/channels/${channel.id}`, {
+        method: "DELETE",
+        headers: authHeaders(token),
+        credentials: "include",
+      });
+    } catch {
+      setResult("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
     onChanged();
   }
 

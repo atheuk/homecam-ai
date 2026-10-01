@@ -19,6 +19,7 @@ import logging
 
 from ....config import settings
 from ..payload import NotificationPayload
+from . import assert_public_host
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,14 @@ async def send_push(
     delivered = 0
     gone: list[str] = []
     for subscription in subscriptions:
+        try:
+            assert_public_host(subscription["endpoint"], field_name="endpoint")
+        except ValueError:
+            # A stored endpoint that now resolves somewhere private is
+            # treated as dead rather than followed.
+            logger.warning("web push endpoint rejected by the host check")
+            gone.append(subscription["endpoint"])
+            continue
         try:
             status = await asyncio.wait_for(
                 asyncio.to_thread(_send_one, subscription, body, timeout),

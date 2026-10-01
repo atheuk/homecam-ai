@@ -31,9 +31,13 @@ def _headers(spec, payload: NotificationPayload) -> dict:
 
 
 async def send(spec, payload: NotificationPayload, image: bytes | None, timeout: float) -> str:
-    from . import NotificationError, scrub
+    from . import NotificationError, assert_public_host, scrub
 
     url = f"{spec.config.get('server', 'https://ntfy.sh')}/{spec.config.get('topic', '')}"
+    try:
+        assert_public_host(url, field_name="server")
+    except ValueError as exc:
+        raise NotificationError(f"ntfy blocked: {exc}") from None
     headers = _headers(spec, payload)
     content: bytes
     if image and spec.supports_images():

@@ -26,13 +26,17 @@ def signature(body: bytes, secret: str) -> str:
 
 
 async def send(spec, payload: NotificationPayload, image: bytes | None, timeout: float) -> str:
-    from . import NotificationError, scrub
+    from . import NotificationError, assert_public_host, scrub
 
     url = spec.config.get("url") or ""
     body = json.dumps({"event": "incident_notification", **payload.as_dict()}).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "homecam-ai"}
     if spec.secret:
         headers["X-HomeCam-Signature"] = signature(body, spec.secret)
+    try:
+        assert_public_host(url, field_name="url")
+    except ValueError as exc:
+        raise NotificationError(f"webhook blocked: {exc}") from None
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             response = await client.post(url, content=body, headers=headers)

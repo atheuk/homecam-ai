@@ -176,10 +176,9 @@ async def dispatch_incident(incident: dict, *, reason: str, session_factory=None
             if severity_rank(severity) < severity_rank(spec.min_severity):
                 results[spec.id] = "below_channel_min_severity"
                 continue
-            if await store.recent_delivery_count(session, spec.id) >= max_per_hour:
-                results[spec.id] = "rate_limited"
-                logger.warning("channel %s rate-limited", spec.id)
-                continue
+            # Claim *before* counting. The claim row is committed, so a
+            # second replica counting at the same moment sees this one and
+            # the pair cannot both decide they are under the limit.
             if not await store.claim_delivery(
                 session,
                 channel_id=spec.id,
@@ -188,6 +187,17 @@ async def dispatch_incident(incident: dict, *, reason: str, session_factory=None
                 reason=reason,
             ):
                 results[spec.id] = "duplicate"
+                continue
+            if await store.recent_delivery_count(session, spec.id, exclude_dedupe_key=dedupe_key) >= max_per_hour:
+                results[spec.id] = "rate_limited"
+                logger.warning("channel %s rate-limited", spec.id)
+                await store.finish_delivery(
+                    session,
+                    channel_id=spec.id,
+                    dedupe_key=dedupe_key,
+                    status="rate_limited",
+                    detail=None,
+                )
                 continue
             try:
                 status, detail = await _send_to_channel(session, spec, payload, image)

@@ -370,7 +370,13 @@ sign-in.
 **SSRF guard.** `validate_https_url()` rejects anything that is not HTTPS and
 resolves loopback, link-local, private and reserved address ranges, so an
 operator cannot aim a webhook or custom ntfy server at the cloud metadata
-endpoint or an internal service.
+endpoint or an internal service. A URL that embeds credentials
+(`https://user:pass@host/`) is rejected too, because `config` is stored in the
+clear and returned to the admin UI: a credential belongs in the encrypted
+secret field. Because a hostname that resolved publicly at save time can later
+resolve somewhere private (DNS rebinding), `assert_public_host()` re-resolves
+and re-checks the host immediately before every outbound request, including
+each stored web push endpoint. Redirects are disabled on every client.
 
 **Content.** `payload.py` builds the message from deterministic fields only —
 camera name, incident kind, severity, event count, local time — plus the

@@ -131,6 +131,39 @@ def test_public_https_url_is_accepted():
     assert validate_https_url("https://example.com/hook/", field_name="url") == "https://example.com/hook"
 
 
+def test_urls_may_not_embed_credentials():
+    """Config is stored in the clear and shown to admins; secrets go in the secret field."""
+    with pytest.raises(ValueError):
+        validate_https_url("https://user:pass@example.com/hook", field_name="url")
+
+
+def test_a_hostname_that_resolves_privately_is_rejected(monkeypatch):
+    """A public-looking name must not be a way to reach the cluster's own network."""
+    import ipaddress
+
+    from app.services.notifications import senders
+
+    monkeypatch.setattr(senders, "_resolved_addresses", lambda host: [ipaddress.ip_address("169.254.169.254")])
+    with pytest.raises(ValueError):
+        validate_https_url("https://rebind.example.com/hook", field_name="url")
+    with pytest.raises(ValueError):
+        senders.assert_public_host("https://rebind.example.com/hook", field_name="url")
+
+
+def test_send_time_host_check_fails_closed_when_dns_fails(monkeypatch):
+    """Save time tolerates an unresolvable name; send time does not."""
+
+    def _boom(host):
+        raise OSError("no such host")
+
+    from app.services.notifications import senders
+
+    monkeypatch.setattr(senders, "_resolved_addresses", _boom)
+    assert validate_https_url("https://unresolvable.example/hook", field_name="url")
+    with pytest.raises(ValueError):
+        senders.assert_public_host("https://unresolvable.example/hook", field_name="url")
+
+
 def test_channel_config_validation():
     assert validate_config("ntfy", {"topic": "alerts"})["server"] == "https://ntfy.sh"
     assert validate_config("telegram", {"chat_id": 12345})["chat_id"] == "12345"

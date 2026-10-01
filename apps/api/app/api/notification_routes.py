@@ -29,6 +29,7 @@ from ..schemas_notifications import (
 )
 from ..services import audit as audit_service
 from ..services.notifications import dispatch, store
+from ..services.notifications.senders import validate_https_url
 from ..services.notifications.senders import webpush as webpush_sender
 
 router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
@@ -188,12 +189,14 @@ async def create_subscription(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if not payload.endpoint.startswith("https://"):
-        raise HTTPException(status_code=400, detail="endpoint must be https")
+    try:
+        endpoint = validate_https_url(payload.endpoint, field_name="endpoint")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     row = await store.upsert_subscription(
         session,
         user_id=user.id,
-        endpoint=payload.endpoint,
+        endpoint=endpoint,
         p256dh=payload.p256dh,
         auth=payload.auth,
         user_agent=request.headers.get("user-agent"),
