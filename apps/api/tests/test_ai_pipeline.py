@@ -189,6 +189,11 @@ async def test_animal_event_reports_species_and_breed(client, monkeypatch):
         "breed": "Border Collie",
         "confidence": 0.83,
         "description": None,
+        "common_name": None,
+        "scientific_name": None,
+        "genus": None,
+        "family": None,
+        "taxonomic_group": None,
     }
     assert "Border Collie" in body["tags"]
     assert "Border Collie" in body["description"]
