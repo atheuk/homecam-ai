@@ -20,12 +20,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..models.db import CameraZone, Event
-from . import activity_baseline, loitering, priority, suspicious
+from . import activity_baseline, loitering, priority, suspicious, zones as zone_service
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +43,8 @@ class SignalResult:
 
 
 async def _zone_kind(session: AsyncSession, camera_id: str, zone: str | None) -> str | None:
-    if not zone:
-        return None
-    result = await session.execute(
-        select(CameraZone.kind).where(CameraZone.camera_id == camera_id, CameraZone.name == zone)
-    )
-    return result.scalar_one_or_none()
+    kind = await zone_service.zone_attribute(session, camera_id, zone, CameraZone.kind)
+    return kind if isinstance(kind, str) else None
 
 
 def _confidence(metadata: dict) -> float | None:

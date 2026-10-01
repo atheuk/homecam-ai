@@ -216,7 +216,10 @@ async def create_camera_zone(
     session: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    return await zone_service.create_zone(session, camera_id, payload)
+    try:
+        return await zone_service.create_zone(session, camera_id, payload)
+    except zone_service.ZoneNameConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @zones_router.put("/{camera_id}/zones/{zone_id}", response_model=CameraZoneOut)
@@ -232,6 +235,8 @@ async def update_camera_zone(
         raise HTTPException(404, "Zone not found")
     try:
         return await zone_service.update_zone(session, zone, payload)
+    except zone_service.ZoneNameConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

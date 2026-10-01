@@ -12,9 +12,54 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from ..ai.zones import Zone
 from ..models.db import CameraZone
+
+
+class ZoneNameConflict(ValueError):
+    """Another zone on the same camera already uses this name."""
+
+
+async def zone_attribute(
+    session: AsyncSession, camera_id: str, zone_name: str | None, column: ColumnElement
+) -> object | None:
+    """One column of the zone called ``zone_name`` on ``camera_id``.
+
+    Zone names are *not* unique per camera - nothing in the schema or (until
+    now) the admin plane stopped a household from having two zones called
+    "driveway" on the same camera. Every enrichment stage used to read this
+    with ``scalar_one_or_none()``, so a duplicate name raised
+    ``MultipleResultsFound`` on live events and took down the whole stage:
+    signals, notification priority and incident routing all silently failed
+    and real alerts were lost.
+
+    Ambiguous configuration must degrade to a stable answer, never to a lost
+    alert, so resolve duplicates deterministically to the oldest matching
+    zone instead of raising. ``create_zone``/``update_zone`` now reject new
+    duplicates, but existing ones must keep working.
+    """
+    if not zone_name:
+        return None
+    result = await session.execute(
+        select(column)
+        .where(CameraZone.camera_id == camera_id, CameraZone.name == zone_name)
+        .order_by(CameraZone.created_at.asc(), CameraZone.id.asc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+async def _name_taken(
+    session: AsyncSession, camera_id: str, name: str, *, exclude_id: str | None = None
+) -> bool:
+    statement = select(CameraZone.id).where(
+        CameraZone.camera_id == camera_id, CameraZone.name == name
+    )
+    if exclude_id is not None:
+        statement = statement.where(CameraZone.id != exclude_id)
+    return (await session.execute(statement.limit(1))).scalars().first() is not None
 
 
 async def list_zones(session: AsyncSession, camera_id: str | None = None) -> list[CameraZone]:
@@ -30,6 +75,8 @@ async def get_zone(session: AsyncSession, zone_id: str) -> CameraZone | None:
 
 
 async def create_zone(session: AsyncSession, camera_id: str, payload) -> CameraZone:
+    if await _name_taken(session, camera_id, payload.name):
+        raise ZoneNameConflict(f"camera already has a zone named {payload.name!r}")
     now = datetime.now(timezone.utc)
     zone = CameraZone(
         id=str(uuid.uuid4()),
@@ -60,6 +107,11 @@ def _invalidate(camera_id: str) -> None:
 
 async def update_zone(session: AsyncSession, zone: CameraZone, payload) -> CameraZone:
     points = getattr(payload, "points", None)
+    new_name = getattr(payload, "name", None)
+    if new_name is not None and new_name != zone.name and await _name_taken(
+        session, zone.camera_id, new_name, exclude_id=zone.id
+    ):
+        raise ZoneNameConflict(f"camera already has a zone named {new_name!r}")
     for field in ("name", "kind", "x1", "y1", "x2", "y2", "dwell_seconds"):
         value = getattr(payload, field, None)
         if value is not None:

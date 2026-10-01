@@ -35,6 +35,7 @@ from ..models.db import Camera, CameraZone, Event, Incident
 from . import audit as audit_service
 from . import priority
 from . import security_modes
+from . import zones as zone_service
 
 logger = logging.getLogger(__name__)
 
@@ -111,12 +112,8 @@ async def _camera_name(session: AsyncSession, camera_id: str) -> str:
 
 
 async def _zone_kind(session: AsyncSession, camera_id: str, zone_name: str | None) -> str | None:
-    if not zone_name:
-        return None
-    result = await session.execute(
-        select(CameraZone.kind).where(CameraZone.camera_id == camera_id, CameraZone.name == zone_name)
-    )
-    return result.scalar_one_or_none()
+    kind = await zone_service.zone_attribute(session, camera_id, zone_name, CameraZone.kind)
+    return kind if isinstance(kind, str) else None
 
 
 def _new_id() -> str:
