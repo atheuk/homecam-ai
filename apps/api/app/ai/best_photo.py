@@ -18,6 +18,7 @@ import io
 import logging
 from dataclasses import dataclass
 
+from ..config import settings
 from .detector import Detection, DetectionContext, LocalDetector
 from .imaging import configure_pillow
 
@@ -37,13 +38,9 @@ CROP_PADDING = 0.08
 # surroundings is what makes the shot readable.
 MIN_CROP_WIDTH_FRACTION = 0.22
 MIN_CROP_HEIGHT_FRACTION = 0.30
-# Never emit a crop smaller than this on the long edge; below it, browsers
-# render a thumbnail no one can interpret.
-MIN_CROP_PIXELS = 224
 # Keep a person-shaped (portrait) aspect so heads aren't cut off by a box that
 # was wider than it was tall.
 TARGET_ASPECT_RATIO = 3 / 4  # width / height
-JPEG_QUALITY = 88
 
 # A detection that survives the crop as a barely-visible sliver along one
 # edge draws a border that points at nothing. Below this fraction of the
@@ -79,6 +76,10 @@ class BestPhoto:
     # Every detection in the source frame, in *full-frame* normalized
     # coordinates, so nothing seen in the frame is lost by cropping.
     frame_boxes: tuple[dict, ...] = ()
+    full_image: bytes = b""
+    full_content_type: str = "image/jpeg"
+    full_width: int | None = None
+    full_height: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -88,6 +89,9 @@ class BestPhoto:
             "cropped": self.cropped,
             "width": self.width,
             "height": self.height,
+            "full_width": self.full_width,
+            "full_height": self.full_height,
+            "full_frame": bool(self.full_image),
             "detection": self.detection.as_dict() if self.detection else None,
             "boxes": [dict(box) for box in self.boxes],
             "frame_boxes": [dict(box) for box in self.frame_boxes],
@@ -155,8 +159,8 @@ def _readable_crop_box(
     crop_width = (box.x2 - box.x1 + 2 * padding) * width
     crop_height = (box.y2 - box.y1 + 2 * padding) * height
 
-    crop_width = max(crop_width, MIN_CROP_WIDTH_FRACTION * width, MIN_CROP_PIXELS)
-    crop_height = max(crop_height, MIN_CROP_HEIGHT_FRACTION * height, MIN_CROP_PIXELS)
+    crop_width = max(crop_width, MIN_CROP_WIDTH_FRACTION * width, settings.best_photo_min_crop_pixels)
+    crop_height = max(crop_height, MIN_CROP_HEIGHT_FRACTION * height, settings.best_photo_min_crop_pixels)
 
     # Enforce the portrait target without ever shrinking a dimension.
     if crop_width / crop_height > TARGET_ASPECT_RATIO:
@@ -214,7 +218,7 @@ def crop_to_subject(image: bytes, detection: Detection) -> bytes:
                 Image.LANCZOS,
             )
         buffer = io.BytesIO()
-        subject.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+        subject.save(buffer, format="JPEG", quality=settings.best_photo_jpeg_quality)
         return buffer.getvalue()
     except Exception as exc:  # noqa: BLE001 - never fail an event over a crop
         logger.debug("subject crop skipped: %s", exc)
@@ -240,8 +244,13 @@ def crop_to_detection(
         if right - left < 2 or bottom - top < 2:
             return image, False, width, height
         cropped = frame.crop((left, top, right, bottom)).convert("RGB")
+        if min(cropped.size) < settings.best_photo_min_crop_pixels:
+            scale = settings.best_photo_min_crop_pixels / min(cropped.size)
+            cropped = cropped.resize(
+                (round(cropped.width * scale), round(cropped.height * scale)), Image.LANCZOS
+            )
         buffer = io.BytesIO()
-        cropped.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+        cropped.save(buffer, format="JPEG", quality=settings.best_photo_jpeg_quality)
         return buffer.getvalue(), True, cropped.width, cropped.height
     except Exception as exc:  # noqa: BLE001 - never fail an event over a crop
         logger.debug("best-photo crop skipped: %s", exc)
@@ -377,10 +386,10 @@ def select_best_photo(
     target_labels: frozenset[str] | set[str],
     crop: bool = True,
 ) -> BestPhoto | None:
-    """Pick the sharpest frame that most confidently contains the target.
+    """Pick the highest-resolution frame that contains the target.
 
-    Frames are scored independently, so a blurry motion frame loses to a
-    later sharp frame of the same person even if both detect equally well.
+    At equal resolution, a blurry motion frame loses to a sharper frame
+    of the same person.
 
     A frame that contains the target at all always beats one that does not:
     otherwise a person event whose second frame shows only the parked car
@@ -390,18 +399,24 @@ def select_best_photo(
     if not frames:
         return None
     best: BestPhoto | None = None
-    best_key: tuple[bool, float] | None = None
+    best_key: tuple[bool, int, float] | None = None
     for index, frame in enumerate(frames):
         detections = detector.detect(frame, context)
         score, sharpness, detection = score_frame(frame, detections, target_labels)
-        key = (detection is not None and detection.label in target_labels, score)
+        size = _image_size(frame)
+        key = (
+            detection is not None and detection.label in target_labels,
+            size[0] * size[1] if size else 0,
+            score,
+        )
         if best_key is not None and key <= best_key:
             continue
         best_key = key
         if crop and detection:
             image, cropped, width, height = crop_to_detection(frame, detection)
         else:
-            image, cropped, width, height = frame, False, None, None
+            width, height = size or (None, None)
+            image, cropped = frame, False
         best = BestPhoto(
             frame_index=index,
             score=score,
@@ -415,6 +430,10 @@ def select_best_photo(
             subject_image=crop_to_subject(frame, detection) if detection else None,
             boxes=_boxes_for_photo(frame, detection, detections, cropped),
             frame_boxes=tuple(overlay_boxes(detections, None, None)),
+            full_image=frame,
+            full_content_type=_sniff_content_type(frame),
+            full_width=size[0] if size else None,
+            full_height=size[1] if size else None,
         )
     return best
 

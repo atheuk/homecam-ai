@@ -27,6 +27,16 @@ function titleCase(label: string) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+/** Margin lives only in the UI; API boxes remain true detector geometry. */
+export function expandedBox({x1, y1, x2, y2}: DetectionBox["box"]) {
+  const dx = Math.max((x2 - x1) * 0.07, 0.004);
+  const dy = Math.max((y2 - y1) * 0.07, 0.004);
+  return {
+    x1: Math.max(0, x1 - dx), y1: Math.max(0, y1 - dy),
+    x2: Math.min(1, x2 + dx), y2: Math.min(1, y2 + dy),
+  };
+}
+
 /** Text shown on a border, e.g. "Sarah 93%" or "Dog 88%". */
 export function boxLabel(box: DetectionBox, name?: string | null) {
   // An unconfirmed box must not wear a confident percentage, and must
@@ -65,7 +75,7 @@ export function DetectionBoxes({
   return (
     <span className="detection-boxes">
       {boxes.map((box, index) => {
-        const {x1, y1, x2, y2} = box.box;
+        const {x1, y1, x2, y2} = expandedBox(box.box);
         return (
           <span
             key={`${box.label}-${index}`}

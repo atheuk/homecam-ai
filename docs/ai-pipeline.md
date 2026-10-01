@@ -19,7 +19,7 @@ normalize -> persist -> snapshot -> local detector -> semantics (zones + dwell)
 | Stage | Module | Notes |
 | --- | --- | --- |
 | Normalize + persist | `app/services/events.py` | Unchanged event contract (SPEC 9). |
-| Snapshot sampling | `app/services/ai_pipeline.py` | Uses each provider's existing `get_snapshot`; no new streaming infra. |
+| Snapshot sampling | `app/services/ai_pipeline.py` | Uses the detected frame and, for Dahua edge events, one bounded main-stream evidence snapshot; no extra request for routine polling. |
 | Local detection | `app/ai/detector.py` | `person, car, truck, bicycle, motorcycle, dog, cat, package` (SPEC 13). |
 | Zones | `app/ai/zones.py` | Normalized rectangles/polygons + overlap math only. |
 | Dwell | `app/ai/dwell.py` | Distinguishes a passing car from a parked one. |
@@ -133,9 +133,34 @@ how those region comparisons work.
 When a target class is detected (`person`, `package`, vehicles, animals) the
 pipeline samples `BEST_PHOTO_FRAMES` snapshots around the trigger, scores each
 one as `0.6 × detection confidence + 0.4 × sharpness`, and stores the winning
-frame — cropped to the detection box with 8% padding — under
-`MEDIA_ROOT/best-photos/`. It is exposed as `best_photo_path` and
-`thumbnail_path` on the event, and is distinct from any raw motion snapshot.
+frame — cropped with 8% padding and a minimum readable crop — under
+`MEDIA_ROOT/best-photos/`. The durable copy is stored in `event_photos`;
+the original full-resolution frame is stored in `event_evidence` as `full`.
+`photo_url` serves the crop and `full_photo_url` opens the original frame
+in the zoomable viewer after sign-in, with full-frame detection boxes. Both
+the event crop and person-cover photo endpoints require a bearer token and
+send `Cache-Control: private, no-store`; the viewer fetches them as temporary
+blob URLs that are revoked on close. `photo_width`,
+`photo_height`, `full_photo_width` and `full_photo_height` expose their
+resolutions. The local `best_photo_path` / `thumbnail_path` mirror is
+diagnostic only.
+
+For Dahua edge cameras, routine polling can remain on a low-resolution
+substream, including channels pinned there after main-stream buffer overflow.
+Only after a detection does the API request one `subtype=0` snapshot through
+the edge connector's existing serialized NVR lock. An incomplete JPEG,
+failed request, or timeout falls back to the detected frame. Among frames
+containing the subject, the highest pixel resolution wins before sharpness.
+The crop is never downscaled; small source images are upscaled with LANCZOS
+only when the frame cannot supply the minimum size. JPEG quality defaults
+to 94. Borders expand 7% of each detector box dimension per side (with a
+small floor), clamped to the image, in the web overlay only.
+
+Configuration: `BEST_PHOTO_SNAPSHOT_TIMEOUT_SECONDS=4` (API end-to-end
+deadline), `DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS=3` (edge NVR request),
+`BEST_PHOTO_MIN_CROP_PIXELS=720` (shorter crop edge), and
+`BEST_PHOTO_JPEG_QUALITY=94`. Existing `BEST_PHOTO_FRAMES` sampling remains
+available for other providers.
 
 The photo is always of **the event's own subject**: a person event is cropped
 to the person, an animal event to the animal, a vehicle event to the vehicle,

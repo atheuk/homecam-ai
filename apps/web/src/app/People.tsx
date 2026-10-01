@@ -59,8 +59,8 @@ export type Trust="unknown"|"trusted"|"watch";
 
 export type EventItem={
   id:string;camera_id:string;type:string;description:string;start_time:string;
-  has_photo?:boolean;photo_url?:string|null;photo_caption?:string|null;photo_rating?:number|null;
-  photo_boxes?:DetectionBox[]|null;animal?:AnimalIdentity|null;
+  has_photo?:boolean;photo_url?:string|null;full_photo_url?:string|null;photo_caption?:string|null;photo_rating?:number|null;
+  photo_boxes?:DetectionBox[]|null;full_photo_boxes?:DetectionBox[]|null;animal?:AnimalIdentity|null;
   appearance?:Appearance|null;
   vehicle?:VehicleIdentity|null;suspicious?:SuspiciousAssessment|null;
   // ``null`` means nobody checked, which is neither confirmation nor doubt.
@@ -229,9 +229,13 @@ export function EventCard({event,persons,onChanged}:{event:EventItem;persons:Per
     <div className="event-photo">
       {event.has_photo&&event.photo_url
         ? <ZoomablePhoto src={mediaUrl(event.photo_url)!}
+            fullSrc={event.full_photo_url ? mediaUrl(event.full_photo_url) : null}
+            loginUrl={mediaUrl("/api/v1/auth/login")}
+            requiresAuth
             alt={event.photo_caption||`${event.type} detected`}
             caption={event.photo_caption}
             boxes={event.photo_boxes}
+            fullBoxes={event.full_photo_boxes}
             subject={subject}
             title={event.person_display_name||event.description}/>
         : <span className="muted">No photo captured</span>}
@@ -321,7 +325,10 @@ function PersonRow({person,onRenamed}:{person:Person;onRenamed:()=>void}){
   return <li className="person-row">
     <div className="person-avatar">
       {person.photo_url
-        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!} alt={person.display_name} title={person.display_name}/>
+        ? <ZoomablePhoto src={mediaUrl(person.photo_url)!}
+            loginUrl={mediaUrl("/api/v1/auth/login")}
+            requiresAuth
+            alt={person.display_name} title={person.display_name}/>
         : <span className="muted">?</span>}
     </div>
     <div className="person-info">
