@@ -14,6 +14,8 @@ only on a normal Docker host.
    a random `home_cam_edge_token`, and `stream_base_url` to this host's
    private Tailscale URL (for example
    `http://homeassistant.example.ts.net:8888`).
+   `dahua_evidence_snapshot_timeout_seconds` defaults to 3 seconds and
+   bounds the full-resolution snapshot taken after a detection.
 
 Install and join the official Tailscale Home Assistant app separately. Do not
 router-port-forward 8443, 8554, 8888, or 8189. Configure HomeCam's Dahua

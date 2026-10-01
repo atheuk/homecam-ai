@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -105,6 +106,10 @@ class EdgeSettings:
     # reported offline; see ChannelLivenessTracker.
     channel_failure_threshold: int = 3
     channel_failure_retry_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.evidence_snapshot_timeout_seconds) or self.evidence_snapshot_timeout_seconds <= 0:
+            raise ValueError("evidence_snapshot_timeout_seconds must be a finite positive number")
 
     @property
     def dahua_configured(self) -> bool:
@@ -187,7 +192,9 @@ class DahuaClient:
     async def _get(self, path: str, params: dict | None = None, timeout: float | None = None) -> httpx.Response:
         async with self._lock:
             async with httpx.AsyncClient(
-                timeout=timeout or self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
+                timeout=timeout if timeout is not None else self.settings.timeout_seconds,
+                transport=self.transport,
+                follow_redirects=False,
             ) as client:
                 return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
 

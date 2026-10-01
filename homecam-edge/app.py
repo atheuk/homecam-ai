@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -52,6 +53,7 @@ class EdgeSettings:
     edge_token: str | None = None
     stream_base_url: str = "http://127.0.0.1:8888"
     timeout_seconds: float = 5.0
+    evidence_snapshot_timeout_seconds: float = 3.0
     channel_liveness_ttl_seconds: float = 60.0
     probe_ttl_seconds: float = 30.0
     # A failed reachability probe is cached far more briefly than a
@@ -59,6 +61,10 @@ class EdgeSettings:
     probe_failure_ttl_seconds: float = 5.0
     channel_failure_threshold: int = 3
     channel_failure_retry_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.evidence_snapshot_timeout_seconds) or self.evidence_snapshot_timeout_seconds <= 0:
+            raise ValueError("evidence_snapshot_timeout_seconds must be a finite positive number")
 
     @property
     def dahua_configured(self) -> bool:
@@ -101,6 +107,7 @@ def settings_from_env() -> EdgeSettings:
         edge_token=os.environ.get("HOME_CAM_EDGE_TOKEN") or None,
         stream_base_url=os.environ.get("STREAM_BASE_URL", "http://127.0.0.1:8888").rstrip("/"),
         timeout_seconds=float(os.environ.get("DAHUA_TIMEOUT_SECONDS", "5")),
+        evidence_snapshot_timeout_seconds=float(os.environ.get("DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS", "3")),
         channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
         probe_ttl_seconds=float(os.environ.get("DAHUA_PROBE_TTL_SECONDS", "30")),
         probe_failure_ttl_seconds=float(os.environ.get("DAHUA_PROBE_FAILURE_TTL_SECONDS", "5")),
@@ -130,12 +137,29 @@ class DahuaClient:
         assert self.settings.dahua_username and self.settings.dahua_password
         return httpx.DigestAuth(self.settings.dahua_username, self.settings.dahua_password)
 
-    async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
+    async def _get(
+        self, path: str, params: dict | None = None, timeout: float | None = None
+    ) -> httpx.Response:
         async with self._lock:
             async with httpx.AsyncClient(
-                timeout=self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
+                timeout=timeout if timeout is not None else self.settings.timeout_seconds,
+                transport=self.transport,
+                follow_redirects=False,
             ) as client:
                 return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
+
+    async def evidence_snapshot(self, channel: int) -> bytes:
+        """One complete main-stream attempt, even for substream-pinned channels."""
+        response = await self._get(
+            "/cgi-bin/snapshot.cgi",
+            {"channel": channel, "subtype": 0},
+            timeout=self.settings.evidence_snapshot_timeout_seconds,
+        )
+        response.raise_for_status()
+        content = response.content
+        if not content.startswith(JPEG_START_OF_IMAGE) or _is_truncated_jpeg(content):
+            raise ValueError(f"channel {channel} main-stream evidence snapshot is invalid or truncated")
+        return content
 
     def _ttl_for(self, reachable: bool) -> float:
         return self.settings.probe_ttl_seconds if reachable else self.settings.probe_failure_ttl_seconds
@@ -302,15 +326,19 @@ def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseT
         raise HTTPException(404, f"Unknown channel {channel}")
 
     @app.get("/channels/{channel}/snapshot")
-    async def snapshot(channel: int, authorization: str | None = Header(default=None)):
+    async def snapshot(
+        channel: int, full: bool = False, authorization: str | None = Header(default=None)
+    ):
         require_token(authorization)
         find_channel(channel)
         try:
-            content = await client.snapshot(channel)
+            content = await (client.evidence_snapshot(channel) if full else client.snapshot(channel))
         except httpx.HTTPStatusError as exc:
             raise HTTPException(503, f"Dahua snapshot failed: {exc}") from exc
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise HTTPException(503, f"Dahua NVR unreachable: {exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(503, str(exc)) from exc
         return Response(content, media_type="image/jpeg")
 
     @app.get("/channels/{channel}/live")
