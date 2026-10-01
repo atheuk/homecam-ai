@@ -243,6 +243,35 @@ async def test_events_from_a_lost_lease_are_dropped(clock, monkeypatch):
         assert (await session.execute(select(Event).where(Event.type == "mailbox_opened"))).first() is None
 
 
+async def test_subject_events_from_a_lost_lease_are_dropped(clock):
+    """The local belief can be stale (no renewal attempted yet), so the
+    person event is fenced in its own transaction: only the live epoch
+    commits it."""
+    a, b = LeaseKeeper("replica-a"), LeaseKeeper("replica-b")
+    stale = (await _ensure(a)).token
+    await advance(clock, TTL + 1)
+    live = (await _ensure(b)).token
+    person = [Detection("person", 0.9, BoundingBox(0.1, 0.2, 0.3, 0.9))]
+
+    async def emit(token):
+        return await ingestion._emit_subject_events(
+            SessionLocal, None, CAMERA, "Driveway", b"jpeg", person, None, "snapshot", lease=token
+        )
+
+    async def person_events():
+        async with SessionLocal() as session:
+            return len((await session.execute(
+                select(Event).where(Event.camera_id == CAMERA, Event.type == "person")
+            )).scalars().all())
+
+    before = await person_events()
+    assert await emit(stale) == 0
+    assert await person_events() == before
+    ingestion.reset_cooldowns()
+    assert await emit(live) == 1
+    assert await person_events() == before + 1
+
+
 async def test_two_ingesting_replicas_have_one_active_ingester_per_camera(monkeypatch, clock):
     """Drive ``poll_once`` as two replicas sharing one database. Each records
     the cameras it actually samples; every camera has exactly one ingester,

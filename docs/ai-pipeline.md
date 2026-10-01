@@ -389,7 +389,7 @@ scene-state save and each scene-event insert first runs a fencing `UPDATE` in
 the same transaction. It matches only while this replica still holds that
 epoch unexpired, and it locks the lease row until the write commits.
 Otherwise the write and its events are discarded and the stale cache dropped.
-Subject events from a frame whose lease has lapsed are dropped too.
+Person/animal (subject) events are fenced the same way, in their own transaction.
 
 **Bins** — add a zone of kind `bin` around the curb spot (off until you do).
 Every `BIN_CHECK_INTERVAL_SECONDS`, when no person/vehicle occludes it, the

@@ -205,11 +205,12 @@ async def poll_once(session_factory=SessionLocal) -> int:
         # verification) must never delay the person/animal event from the
         # same frame.
         # A slow frame can outlive the lease: the new holder reports from
-        # here on, so drop this replica's subject events.
+        # here on, so drop this replica's subject events (fenced below; the
+        # local belief only saves the work).
         if _still_leading(camera_id):
             created += await _emit_subject_events(
                 session_factory, provider, camera_id, camera_name, image, detections,
-                stream_frames, frame_source,
+                stream_frames, frame_source, lease=token,
             )
         # Every real frame advances the persistent scene state, including
         # frames with nothing in them: that is how a vehicle departs or a
@@ -237,6 +238,7 @@ async def _emit_subject_events(
     detections: list[Detection],
     stream_frames: list[bytes] | None,
     frame_source: str,
+    lease: ingestion_lease.LeaseToken | None = None,
 ) -> int:
     created = 0
     if detections:
@@ -284,6 +286,15 @@ async def _emit_subject_events(
                 "metadata": {"frame_source": frame_source},
             }
             async with session_factory() as session:
+                # Fenced in the event's own transaction: the lease row stays
+                # locked until the event commits, and a lost lease drops it.
+                if lease is not None and not await ingestion_lease.fence(session, lease):
+                    await session.rollback()
+                    logger.info(
+                        "subject event %s: %s dropped, ingestion lease epoch %d lost",
+                        camera_id, subject, lease.epoch,
+                    )
+                    break
                 await event_service.create_and_broadcast_event(
                     session, event, trigger_frame=image, frames=frames
                 )
