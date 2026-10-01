@@ -324,9 +324,9 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
       {((photo.requiresAuth && !cropImage) || (photo.fullSrc && !fullImage)) && (
         <form className="lightbox-auth" onSubmit={loadPhoto}>
           <span>{photo.requiresAuth && !cropImage
-            ? photo.accessToken ? "View this photo." : "Sign in to view this photo."
+            ? photo.accessToken || photo.useSessionCookie ? "View this photo." : "Sign in to view this photo."
             : "View the full-resolution frame."}</span>
-          {!photo.accessToken && !accessToken && <>
+          {!photo.useSessionCookie && !photo.accessToken && !accessToken && <>
             <input aria-label="Photo account email" type="email" required autoComplete="username"
               value={email} onChange={event => setEmail(event.target.value)} />
             <input aria-label="Photo account password" type="password" required autoComplete="current-password"

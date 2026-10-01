@@ -96,6 +96,31 @@ describe("opening a photo full screen",()=>{
     vi.unstubAllGlobals();
   });
 
+  it("loads protected photos with the restored session cookie without asking for credentials",async()=>{
+    const createObjectURL=vi.fn().mockReturnValue("blob:cookie-photo");
+    const revokeObjectURL=vi.fn();
+    vi.stubGlobal("URL",{createObjectURL,revokeObjectURL});
+    const fetchMock=vi.fn(async()=>new Response(new Blob(["photo"]),{status:200}));
+    vi.stubGlobal("fetch",fetchMock);
+    render(<ZoomablePhoto {...PHOTO} requiresAuth useSessionCookie
+      fullSrc="http://api.test/api/v1/events/evt-1/photo/full"/>);
+    fireEvent.click(screen.getByRole("button",{name:/open sarah full screen/i}));
+
+    expect(screen.queryByLabelText("Photo account email")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Photo account password")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button",{name:"View photo"}));
+
+    await waitFor(()=>expect(viewerImage().src).toBe("blob:cookie-photo"));
+    expect(fetchMock).toHaveBeenCalledWith(PHOTO.src,expect.objectContaining({
+      credentials:"include",
+      headers:{},
+      cache:"no-store",
+    }));
+    fireEvent.click(screen.getByRole("button",{name:"Close full screen"}));
+    await waitFor(()=>expect(revokeObjectURL).toHaveBeenCalledWith("blob:cookie-photo"));
+    vi.unstubAllGlobals();
+  });
+
   it("opens the photo in a full-screen dialog when the thumbnail is clicked",()=>{
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const dialog=openViewer();
