@@ -215,6 +215,8 @@ class IncidentOut(BaseModel):
     summary: str
     ai_summary: str | None = None
     evidence: dict | None = None
+    clip: dict
+    clip_hold: bool = False
     created_at: datetime
     updated_at: datetime
 

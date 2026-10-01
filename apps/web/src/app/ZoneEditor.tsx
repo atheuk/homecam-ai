@@ -13,6 +13,7 @@ export type CameraZoneShape = {
   y2: number;
   points?: number[][] | null;
   dwell_seconds?: number | null;
+  alerts_enabled?: boolean;
 };
 
 type Still = {
@@ -77,6 +78,7 @@ export default function ZoneEditor({
   const [name, setName] = useState("mailbox");
   const [kind, setKind] = useState("mailbox");
   const [dwellSeconds, setDwellSeconds] = useState("");
+  const [alertsEnabled, setAlertsEnabled] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -197,6 +199,7 @@ export default function ZoneEditor({
     setName(zone.name);
     setKind(zone.kind);
     setDwellSeconds(zone.dwell_seconds == null ? "" : String(zone.dwell_seconds));
+    setAlertsEnabled(zone.alerts_enabled !== false);
     setPoints(zoneOutline(zone).map(([x, y]) => [x, y]));
     setStatus(`Editing “${zone.name}”. Redraw the shape, then save.`);
     setError(null);
@@ -206,6 +209,7 @@ export default function ZoneEditor({
     setEditingId(null);
     setPoints([]);
     setDwellSeconds("");
+    setAlertsEnabled(true);
     setStatus(null);
     setError(null);
   }
@@ -239,7 +243,7 @@ export default function ZoneEditor({
       const url = editingId
         ? `${apiBase}/api/v1/admin/cameras/${cameraId}/zones/${editingId}`
         : `${apiBase}/api/v1/admin/cameras/${cameraId}/zones`;
-      const body: Record<string, unknown> = { name: name.trim(), kind, points };
+      const body: Record<string, unknown> = { name: name.trim(), kind, points, alerts_enabled: alertsEnabled };
       if (dwellValue !== null) body.dwell_seconds = dwellValue;
       const r = await fetch(url, {
         method: editingId ? "PUT" : "POST",
@@ -261,6 +265,7 @@ export default function ZoneEditor({
       setEditingId(null);
       setPoints([]);
       setDwellSeconds("");
+      setAlertsEnabled(true);
       await onSaved();
     } catch {
       setError("Could not reach the API to save the zone.");
@@ -399,6 +404,15 @@ export default function ZoneEditor({
           </select>
         </label>
         {kindHints[kind] && <p className="muted zone-kind-hint">{kindHints[kind]}</p>}
+        <label>
+          <input
+            type="checkbox"
+            checked={alertsEnabled}
+            onChange={(e) => setAlertsEnabled(e.target.checked)}
+            aria-label="Alert for activity in this zone"
+          />
+          Alert for activity in this zone
+        </label>
         <label>
           Loitering seconds (optional)
           <input

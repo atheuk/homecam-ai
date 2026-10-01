@@ -151,6 +151,39 @@ async def test_driveway_zone_is_alert_worthy_while_home(client):
 
 
 @pytest.mark.asyncio
+async def test_zone_alert_switch_suppresses_incident_but_not_event(client):
+    from app.services import events as event_service
+
+    headers = await _headers(client, "incidents-zone-muted@example.com")
+    zone = await client.post(
+        "/api/v1/admin/cameras/mock-front-door/zones",
+        json={
+            "name": "Quiet driveway", "kind": "driveway",
+            "x1": 0, "y1": 0, "x2": 1, "y2": 1, "alerts_enabled": False,
+        },
+        headers=headers,
+    )
+    assert zone.status_code == 201
+    assert zone.json()["alerts_enabled"] is False
+    await _set_mode(client, headers, "away")
+    async with SessionLocal() as session:
+        await event_service.create_and_broadcast_event(session, {
+            "id": "evt-muted-zone", "camera_id": "mock-front-door",
+            "type": "person", "priority": "high", "source": "provider",
+            "start_time": datetime.now(timezone.utc).isoformat(),
+            "description": "Person in zone", "zone": "Quiet driveway",
+        })
+    assert (await client.get("/api/v1/security/incidents", headers=headers)).json() == []
+    updated = await client.put(
+        f"/api/v1/admin/cameras/mock-front-door/zones/{zone.json()['id']}",
+        json={"alerts_enabled": True}, headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["alerts_enabled"] is True
+    await _set_mode(client, headers, "disarmed")
+
+
+@pytest.mark.asyncio
 async def test_person_event_while_home_is_quiet(client):
     """The un-zoned counterpart: a plain (no zone) person event is not
     alert-worthy while ``home`` -- only ``away``/``night`` by default."""

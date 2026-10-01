@@ -168,6 +168,10 @@ async def route_event(session: AsyncSession, row: Event, *, mode: str | None = N
     such gap)."""
     if mode is None:
         mode = await security_modes.get_mode(session)
+    if row.zone is not None and await zone_service.zone_attribute(
+        session, row.camera_id, row.zone, CameraZone.alerts_enabled
+    ) is False:
+        return None
 
     if _is_package_removal(row):
         return await _route_package_theft(session, row, mode=mode)
@@ -493,6 +497,13 @@ async def raise_camera_health(
             await session.commit()
             await session.refresh(incident)
     await _broadcast(incident, "incident.created")
+    if subtype != "offline":
+        from . import incident_clips
+        import time
+
+        triggered_at = time.monotonic()
+        capture_task = incident_clips.capture(camera_id, incident_clips.seed(camera_id), triggered_at)
+        await incident_clips.start(incident, capture_task)
     _notify(incident, "created")
     logger.warning("camera health incident raised: %s (%s)", camera_id, kind)
     return incident
@@ -651,6 +662,8 @@ async def _broadcast(incident: Incident, sse_event: str) -> None:
 
 
 def to_dict(incident: Incident) -> dict:
+    from .incident_clips import status as clip_status
+
     return {
         "id": incident.id,
         "kind": incident.kind,
@@ -672,6 +685,8 @@ def to_dict(incident: Incident) -> dict:
         "summary": incident.summary,
         "ai_summary": incident.ai_summary,
         "evidence": incident.evidence,
+        "clip": clip_status(incident),
+        "clip_hold": bool(incident.clip_hold),
         "created_at": incident.created_at.isoformat(),
         "updated_at": incident.updated_at.isoformat(),
     }
