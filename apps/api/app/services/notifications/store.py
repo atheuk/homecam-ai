@@ -133,7 +133,28 @@ async def enabled_channels(session: AsyncSession) -> list[NotificationChannel]:
     result = await session.execute(
         select(NotificationChannel).where(NotificationChannel.enabled.is_(True))
     )
-    return list(result.scalars().all())
+    channels = list(result.scalars().all())
+    global _no_channels_until
+    # Remember "nothing is configured" briefly so the common case - alerting
+    # not set up - costs the ingestion path no database work at all. The TTL
+    # bounds how long another replica's new channel stays unnoticed.
+    _no_channels_until = None if channels else _now() + timedelta(seconds=_NO_CHANNEL_TTL_SECONDS)
+    return channels
+
+
+#: See :func:`enabled_channels` / :func:`no_channels_configured`.
+_NO_CHANNEL_TTL_SECONDS = 60
+_no_channels_until: datetime | None = None
+
+
+def no_channels_configured() -> bool:
+    """True when a recent lookup found no enabled channel at all."""
+    return _no_channels_until is not None and _now() < _no_channels_until
+
+
+def invalidate_channel_cache() -> None:
+    global _no_channels_until
+    _no_channels_until = None
 
 
 async def create_channel(session: AsyncSession, data: dict) -> NotificationChannel:
@@ -158,6 +179,7 @@ async def create_channel(session: AsyncSession, data: dict) -> NotificationChann
     session.add(channel)
     await session.commit()
     await session.refresh(channel)
+    invalidate_channel_cache()
     return channel
 
 
@@ -182,6 +204,7 @@ async def update_channel(session: AsyncSession, channel: NotificationChannel, da
     channel.updated_at = _now()
     await session.commit()
     await session.refresh(channel)
+    invalidate_channel_cache()
     return channel
 
 
@@ -191,6 +214,7 @@ async def delete_channel(session: AsyncSession, channel: NotificationChannel) ->
     )
     await session.delete(channel)
     await session.commit()
+    invalidate_channel_cache()
 
 
 async def record_result(

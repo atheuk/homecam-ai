@@ -42,6 +42,10 @@ def notify_incident(incident: dict, *, reason: str) -> None:
     """
     if not settings.notifications_enabled or not incident.get("id"):
         return
+    if store.no_channels_configured():
+        # Nothing is set up: do not even open a database session from the
+        # ingestion path.
+        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

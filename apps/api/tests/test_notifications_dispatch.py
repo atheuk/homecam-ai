@@ -25,8 +25,10 @@ async def _clean_notification_tables(client):
             await session.commit()
 
     await _clear()
+    store.invalidate_channel_cache()
     yield
     await _clear()
+    store.invalidate_channel_cache()
 
 
 async def _make_channel(**overrides):
@@ -181,3 +183,33 @@ async def test_notify_incident_schedules_a_background_task(monkeypatch):
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert captured["reason"] == "escalated"
+
+
+async def test_notify_incident_skips_the_database_when_no_channel_exists(monkeypatch):
+    """With alerting unconfigured, ingestion must not pay for a DB session."""
+    called = False
+
+    async def _fake_dispatch(incident, *, reason, session_factory=None):
+        nonlocal called
+        called = True
+        return {}
+
+    # A real lookup finds nothing and caches that fact.
+    async with SessionLocal() as session:
+        assert await store.enabled_channels(session) == []
+    assert store.no_channels_configured() is True
+
+    monkeypatch.setattr(dispatch, "dispatch_incident", _fake_dispatch)
+    dispatch.notify_incident(_incident(), reason="created")
+    import asyncio
+
+    await asyncio.sleep(0)
+    assert called is False
+
+    # Adding a channel clears the cache, so the next incident is dispatched.
+    store.invalidate_channel_cache()
+    assert store.no_channels_configured() is False
+    dispatch.notify_incident(_incident(), reason="created")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert called is True
