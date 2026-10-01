@@ -136,6 +136,7 @@ describe("SecurityPanel",()=>{
       "/security/audit-log":()=>jsonResponse([]),
     });
     await signIn();
+    await screen.findByText("Nothing needs attention right now.");
     expect(screen.queryByText("Motion detected at Driveway")).not.toBeInTheDocument();
     expect(screen.getByText("0 open")).toBeInTheDocument();
 

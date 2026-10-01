@@ -283,7 +283,6 @@ export default function SecurityPanel({
   useEffect(() => {
     if (!hasSession) return;
     loadMode(token);
-    loadIncidents(token, incidentFilter);
     loadAuditLog(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, hasSession]);

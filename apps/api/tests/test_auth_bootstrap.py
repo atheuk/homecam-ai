@@ -1,5 +1,7 @@
 """Production bootstrap requires an out-of-band secret and is single-use."""
 import asyncio
+import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -111,6 +113,56 @@ async def test_production_bootstrap_is_disabled_without_configured_secret(
         assert response.status_code == 403
         async with session_factory() as session:
             assert await session.scalar(select(func.count()).select_from(User)) == 0
+    finally:
+        _restore_database_override(app, get_db, previous_override)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_production_existing_owner_can_sign_in_with_bootstrap_closed(
+    anonymous_client, monkeypatch, tmp_path
+):
+    from app.auth.security import hash_password
+    from app.config import settings
+    from app.db import get_db
+    from app.main import app
+    from app.models.db import User
+
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "auth_bootstrap_secret", None)
+    engine, session_factory, previous_override = await _isolated_database(app, get_db, tmp_path)
+    owner = User(
+        id=str(uuid.uuid4()),
+        email="existing-owner@example.com",
+        password_hash=hash_password("existing-owner-password"),
+        created_at=datetime.now(timezone.utc),
+    )
+    try:
+        async with session_factory() as session:
+            session.add(owner)
+            await session.commit()
+
+        login = await anonymous_client.post(
+            "/api/v1/auth/login",
+            json={"email": owner.email, "password": "existing-owner-password"},
+        )
+        assert login.status_code == 200
+        current_owner = await anonymous_client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+        assert current_owner.status_code == 200
+        assert current_owner.json()["email"] == owner.email
+
+        registration = await anonymous_client.post(
+            "/api/v1/auth/register",
+            json={"email": "unexpected-new-user@example.com", "password": "safe-password-123"},
+            headers={"X-HomeCam-Bootstrap-Secret": "not-configured"},
+        )
+        assert registration.status_code == 403
+        async with session_factory() as session:
+            users = list((await session.execute(select(User))).scalars())
+            assert [user.email for user in users] == [owner.email]
     finally:
         _restore_database_override(app, get_db, previous_override)
         await engine.dispose()
