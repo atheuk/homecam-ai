@@ -94,9 +94,11 @@ async def test_standby_takes_over_after_the_ttl(clock):
     a, b = LeaseKeeper("replica-a"), LeaseKeeper("replica-b")
     assert (await _ensure(a)).held
     # Replica A dies: no more renewals.
-    await advance(clock, TTL - 0.1)
+    # Leave a wide margin because lease expiry is evaluated by SQLite's real
+    # clock, which continues to advance during the database round trips.
+    await advance(clock, TTL - 5)
     assert not (await _ensure(b)).held
-    await advance(clock, 0.2)
+    await advance(clock, 5.1)
     taken = await _ensure(b)
     assert taken.held and taken.changed
     assert (await _row()).holder == "replica-b"
