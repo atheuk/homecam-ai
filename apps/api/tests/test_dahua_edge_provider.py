@@ -71,6 +71,27 @@ async def test_dahua_edge_provider_maps_channels_and_capabilities():
 
 
 @pytest.mark.asyncio
+async def test_evidence_snapshot_uses_full_endpoint_only_once():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/channels":
+            return httpx.Response(200, json={"channels": [{"channel": 1, "name": "Front Door", "online": True}]})
+        seen.append(str(request.url))
+        return httpx.Response(503)
+
+    provider = DahuaEdgeProvider(
+        DahuaEdgeSettings(base_url="https://edge.tailnet", retries=3),
+        transport=httpx.MockTransport(handler),
+    )
+    from app.providers.base import ProviderUnavailableError
+
+    with pytest.raises(ProviderUnavailableError):
+        await provider.get_evidence_snapshot("dahua-channel-1")
+    assert seen == ["https://edge.tailnet/channels/1/snapshot?full=true"]
+
+
+@pytest.mark.asyncio
 async def test_dahua_edge_health_reports_fully_online():
     provider = DahuaEdgeProvider(
         DahuaEdgeSettings(base_url="https://edge.tailnet", token="test-token"),

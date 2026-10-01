@@ -17,6 +17,7 @@ must never break ingestion.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -43,7 +44,7 @@ from ..ai.semantics import derive_semantics
 from ..ai.vision import caption_confirms_person, get_image_captioner, get_image_embedder
 from ..ai.vehicles import build_vehicle_identifier, crop_vehicle
 from ..config import settings
-from ..models.db import AIAnalysis, Event, EventPhoto
+from ..models.db import AIAnalysis, Event, EventEvidence, EventPhoto
 from ..providers.base import CameraOfflineError, CameraNotFoundError, ProviderUnavailableError
 from . import persons as person_service
 from . import suspicious
@@ -86,6 +87,20 @@ async def _sample_frames(
             logger.warning("snapshot failed for %s: %s", camera_id, exc)
             break
     return frames
+
+
+async def _evidence_snapshot(provider, camera_id: str) -> bytes | None:
+    if provider is None:
+        from .provider_registry import find_provider_for_camera
+
+        provider = await find_provider_for_camera(camera_id)
+    capture = getattr(provider, "get_evidence_snapshot", None)
+    if capture is None:
+        return None
+    image = await capture(camera_id)
+    if not image:
+        raise ValueError(f"empty high-resolution evidence snapshot for {camera_id}")
+    return image
 
 
 def _store_best_photo(event_id: str, image: bytes) -> str | None:
@@ -235,11 +250,11 @@ async def enrich_event(
     camera_name = str(event.get("camera_name") or row.camera_id)
     now = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
 
+    provider = None
     if frames:
         frames = list(frames)
     else:
         frames = []
-        provider = None
         try:
             provider = await find_provider_for_camera(row.camera_id)
         except Exception as exc:  # noqa: BLE001
@@ -304,6 +319,17 @@ async def enrich_event(
     photo_boxes: list[dict] = []
     photo_verified: bool | None = None
     if frames and settings.best_photo_enabled and detections:
+        # The detected polling frame may be a low-resolution substream. Ask
+        # for the main stream only for an actual event, with a hard deadline;
+        # the seed remains usable when the NVR is busy or its JPEG overflows.
+        try:
+            full_image = await asyncio.wait_for(
+                _evidence_snapshot(provider, row.camera_id), settings.best_photo_snapshot_timeout_seconds
+            )
+            if full_image is not None:
+                frames.append(full_image)
+        except Exception as exc:  # noqa: BLE001 - keep the detected frame
+            logger.warning("high-resolution evidence snapshot failed for %s: %s", row.camera_id, exc)
         # Photograph the subject this event is about. A person event must
         # never be illustrated - or re-identified - from a higher-confidence
         # car in the same frame; other classes are only a fallback when the
@@ -346,6 +372,15 @@ async def enrich_event(
             else:
                 caption = None
             await _persist_event_photo(session, row.id, photo, caption)
+            full = await session.get(EventEvidence, (row.id, "full"))
+            if full is None:
+                session.add(EventEvidence(
+                    event_id=row.id, label="full", image=photo.full_image,
+                    content_type=photo.full_content_type, created_at=datetime.now(timezone.utc),
+                ))
+            else:
+                full.image = photo.full_image
+                full.content_type = photo.full_content_type
 
             animal = None
             if is_animal_photo:
@@ -365,6 +400,9 @@ async def enrich_event(
                 list(metadata["best_photo"].get("boxes") or []), photo_verified
             )
             metadata["best_photo"]["boxes"] = photo_boxes
+            metadata["best_photo"]["frame_boxes"] = _mark_verification(
+                list(metadata["best_photo"]["frame_boxes"]), photo_verified
+            )
             if photo_verified is not None:
                 metadata["photo_verified"] = photo_verified
             if caption:

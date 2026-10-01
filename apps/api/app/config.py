@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=384, ge=8, le=4096)
     best_photo_frames: int = Field(default=3, ge=1, le=10)
     best_photo_enabled: bool = True
+    best_photo_snapshot_timeout_seconds: float = Field(default=4.0, gt=0, le=30)
+    best_photo_min_crop_pixels: int = Field(default=720, ge=224, le=4096)
+    best_photo_jpeg_quality: int = Field(default=94, ge=85, le=100)
     # Person identity / re-identification (Azure AI Foundry backed).
     #
     # ``foundry_endpoint``/``foundry_api_key`` point at an Azure AI Services

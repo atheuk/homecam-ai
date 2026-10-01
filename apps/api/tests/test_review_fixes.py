@@ -258,7 +258,7 @@ async def test_failed_evidence_save_advertises_no_urls(client, monkeypatch):
     async with SessionLocal() as session:
         event = (await session.execute(select(Event))).scalars().one()
         stored = list((await session.execute(select(EventEvidence))).scalars())
-    assert stored == []
+    assert [row.label for row in stored] == ["full"]
     for label in ("before", "after"):
         assert "image_url" not in event.event_metadata["mailbox"][label]
 

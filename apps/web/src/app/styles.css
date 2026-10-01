@@ -66,19 +66,19 @@
 
 /* --- Detection borders (who/what was actually detected) --- */
 .detection-boxes{position:absolute;inset:0;pointer-events:none}
-.detection-box{position:absolute;border:2px solid var(--accent);border-radius:3px;box-shadow:0 0 0 1px rgba(12,17,16,.75),inset 0 0 0 1px rgba(12,17,16,.55)}
+.detection-box{position:absolute;outline:2px solid var(--accent);outline-offset:1px;border-radius:3px}
 /* A subject that runs off the edge of the crop gets a dashed border, so a
    border that stops mid-person reads as "continues outside the photo"
    rather than as a bad detection. */
-.detection-box.clipped{border-style:dashed}
+.detection-box.clipped{outline-style:dashed}
 /* An unconfirmed border must not look like a confident identification:
    muted, dashed and off the accent colour, so it reads as "maybe". */
-.detection-box.unconfirmed{border-style:dashed;border-color:#8a94a6;opacity:.75}
+.detection-box.unconfirmed{outline-style:dashed;outline-color:#8a94a6;opacity:.75}
 .detection-box.unconfirmed .detection-tag{background:#8a94a6;color:#0c1110}
 .detection-tag{position:absolute;left:-2px;bottom:100%;margin-bottom:2px;background:var(--accent);color:#0c1110;font:10px/1.6 'DM Mono';padding:0 5px;border-radius:3px;white-space:nowrap}
 /* Keep the label legible instead of letting it grow with the photo. */
 .lightbox-figure .detection-tag{font-size:12px;transform:scale(calc(1 / var(--zoom,1)));transform-origin:left bottom}
-.lightbox-figure .detection-box{border-width:calc(2px / var(--zoom,1))}
+.lightbox-figure .detection-box{outline-width:calc(2px / var(--zoom,1));outline-offset:calc(1px / var(--zoom,1))}
 .animal{margin:0;display:flex;align-items:center;gap:8px;font-size:14px;flex-wrap:wrap}
 .animal .badge{text-transform:none}
 /* Observable details of a person: age band, build, clothing, carried items. */

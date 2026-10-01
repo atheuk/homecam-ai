@@ -355,6 +355,11 @@ async def _decorate_events(session: AsyncSession, rows: list[Event]) -> list[dic
         )
         payload["has_photo"] = row.id in photo_ids
         payload["photo_url"] = f"/api/v1/events/{row.id}/photo" if row.id in photo_ids else None
+        payload["full_photo_url"] = (
+            f"/api/v1/events/{row.id}/photo/full"
+            if row.id in photo_ids and (row.event_metadata or {}).get("best_photo", {}).get("full_frame")
+            else None
+        )
     return payloads
 
 
@@ -446,6 +451,19 @@ async def event_photo(event_id: str, session: AsyncSession = Depends(get_db)):
             "Cache-Control": "public, max-age=86400",
             "Content-Disposition": f'inline; filename="{event_id}.jpg"',
         },
+    )
+
+
+@router.get("/events/{event_id}/photo/full")
+async def event_full_photo(event_id: str, session: AsyncSession = Depends(get_db)):
+    """Original full-frame bytes corresponding to the selected event photo."""
+    photo = await session.get(EventEvidence, (event_id, "full"))
+    if photo is None:
+        raise HTTPException(404, "No full-frame photo stored for this event")
+    return Response(
+        content=photo.image,
+        media_type=photo.content_type or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400", "Content-Disposition": f'inline; filename="{event_id}-full.jpg"'},
     )
 
 

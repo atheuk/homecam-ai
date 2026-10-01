@@ -1,11 +1,8 @@
 "use client";
 /** Full-screen photo viewer with zoom and pan.
  *
- * Detection photos are deliberately small server-side crops, so on the
- * event list they are often too small to answer the only question that
- * matters: "who is that?". This gives every stored photo a way to be
- * opened full screen and inspected closely, without leaving the app or
- * downloading the file.
+ * Opens the original full-frame evidence at its native resolution, while
+ * the event list shows a readable crop of the detected subject.
  *
  * Zoom is anchored to wherever the user is pointing (wheel, pinch or
  * double-click) rather than to the middle of the screen. Anchoring to the
@@ -30,10 +27,12 @@ const RESET: View = {scale: 1, x: 0, y: 0};
 
 export type LightboxPhoto = {
   src: string;
+  fullSrc?: string | null;
   alt: string;
   caption?: string | null;
   title?: string;
   boxes?: DetectionBox[] | null;
+  fullBoxes?: DetectionBox[] | null;
   /** Name for the subject, shown on its border when only one is in shot. */
   subject?: string | null;
 };
@@ -263,8 +262,8 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
           {/* eslint-disable-next-line @next/next/no-img-element -- next/image
               cannot be used here: the API origin is injected at deploy time,
               not build time, so it cannot be a configured remote pattern. */}
-          <img ref={imageRef} src={photo.src} alt={photo.alt} draggable={false} />
-          <DetectionBoxes boxes={photo.boxes} name={photo.subject} />
+          <img ref={imageRef} src={photo.fullSrc || photo.src} alt={photo.alt} draggable={false} />
+          <DetectionBoxes boxes={photo.fullSrc ? photo.fullBoxes : photo.boxes} name={photo.subject} />
         </span>
       </div>
 
@@ -282,17 +281,21 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
  */
 export function ZoomablePhoto({
   src,
+  fullSrc,
   alt,
   caption,
   title,
   boxes,
+  fullBoxes,
   subject,
 }: {
   src: string;
+  fullSrc?: string | null;
   alt: string;
   caption?: string | null;
   title?: string;
   boxes?: DetectionBox[] | null;
+  fullBoxes?: DetectionBox[] | null;
   subject?: string | null;
 }) {
   const [open, setOpen] = useState(false);
@@ -305,7 +308,7 @@ export function ZoomablePhoto({
           <DetectionBoxes boxes={boxes} name={subject} />
         </span>
       </button>
-      {open && <Lightbox photo={{src, alt, caption, title, boxes, subject}} onClose={() => setOpen(false)} />}
+      {open && <Lightbox photo={{src, fullSrc, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
     </>
   );
 }

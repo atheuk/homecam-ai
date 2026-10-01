@@ -115,3 +115,30 @@ async def test_transport_failures_still_raise_rather_than_returning_garbage():
     client, _ = _client_recording(handler)
     with pytest.raises(httpx.ConnectError):
         await client.snapshot(1)
+
+
+@pytest.mark.asyncio
+async def test_evidence_retries_main_stream_once_even_when_polling_is_pinned():
+    first_main = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal first_main
+        if request.url.params["subtype"] == "0" and first_main:
+            first_main = False
+            return httpx.Response(200, content=_truncated_jpeg())
+        return httpx.Response(200, content=_jpeg(1500 if request.url.params["subtype"] == "0" else 500))
+
+    client, seen = _client_recording(handler)
+    assert await client.snapshot(1) == _jpeg(500)
+    seen.clear()
+    assert await client.evidence_snapshot(1) == _jpeg(1500)
+    assert [r.url.params["subtype"] for r in seen] == ["0"]
+    assert await client.snapshot(1) == _jpeg(500)
+
+
+@pytest.mark.asyncio
+async def test_truncated_evidence_is_rejected_without_substream_retry():
+    client, seen = _client_recording(lambda r: httpx.Response(200, content=_truncated_jpeg()))
+    with pytest.raises(ValueError, match="truncated"):
+        await client.evidence_snapshot(1)
+    assert [r.url.params["subtype"] for r in seen] == ["0"]

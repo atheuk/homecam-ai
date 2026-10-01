@@ -82,6 +82,7 @@ class EdgeSettings:
     # this connector (typically http://<this-host-tailscale-addr>:8888).
     stream_base_url: str = "http://127.0.0.1:8888"
     timeout_seconds: float = 5.0
+    evidence_snapshot_timeout_seconds: float = 3.0
     # How long a per-channel liveness result is trusted before re-probing.
     # Kept fairly high on purpose: this NVR can only sustain ~1-2 concurrent
     # RTSP/CGI sessions, so per-channel probing must be infrequent and
@@ -146,6 +147,7 @@ def settings_from_env() -> EdgeSettings:
         edge_token=os.environ.get("HOME_CAM_EDGE_TOKEN") or None,
         stream_base_url=os.environ.get("STREAM_BASE_URL", "http://127.0.0.1:8888").rstrip("/"),
         timeout_seconds=float(os.environ.get("DAHUA_TIMEOUT_SECONDS", "5")),
+        evidence_snapshot_timeout_seconds=float(os.environ.get("DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS", "3")),
         channel_liveness_ttl_seconds=float(os.environ.get("CHANNEL_LIVENESS_TTL_SECONDS", "60")),
         probe_ttl_seconds=float(os.environ.get("DAHUA_PROBE_TTL_SECONDS", "30")),
         probe_failure_ttl_seconds=float(os.environ.get("DAHUA_PROBE_FAILURE_TTL_SECONDS", "5")),
@@ -182,12 +184,23 @@ class DahuaClient:
         assert self.settings.dahua_username and self.settings.dahua_password
         return httpx.DigestAuth(self.settings.dahua_username, self.settings.dahua_password)
 
-    async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
+    async def _get(self, path: str, params: dict | None = None, timeout: float | None = None) -> httpx.Response:
         async with self._lock:
             async with httpx.AsyncClient(
-                timeout=self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
+                timeout=timeout or self.settings.timeout_seconds, transport=self.transport, follow_redirects=False
             ) as client:
                 return await client.get(f"{self.settings.dahua_base_url}{path}", params=params, auth=self._auth())
+
+    async def evidence_snapshot(self, channel: int) -> bytes:
+        """One complete main-stream attempt, even for substream-pinned channels."""
+        response = await self._get(
+            "/cgi-bin/snapshot.cgi", {"channel": channel, "subtype": 0},
+            timeout=self.settings.evidence_snapshot_timeout_seconds,
+        )
+        response.raise_for_status()
+        if not response.content.startswith(JPEG_START_OF_IMAGE) or _is_truncated_jpeg(response.content):
+            raise ValueError(f"channel {channel} main-stream evidence snapshot is invalid or truncated")
+        return response.content
 
     def _ttl_for(self, reachable: bool) -> float:
         return self.settings.probe_ttl_seconds if reachable else self.settings.probe_failure_ttl_seconds
@@ -401,15 +414,17 @@ def create_app(settings: EdgeSettings | None = None, transport: httpx.AsyncBaseT
         raise HTTPException(404, f"Unknown channel {channel}")
 
     @app.get("/channels/{channel}/snapshot")
-    async def snapshot(channel: int, authorization: str | None = Header(default=None)):
+    async def snapshot(channel: int, full: bool = False, authorization: str | None = Header(default=None)):
         require_token(authorization)
         _find_channel(channel)
         try:
-            content = await client.snapshot(channel)
+            content = await (client.evidence_snapshot(channel) if full else client.snapshot(channel))
         except httpx.HTTPStatusError as exc:
             raise HTTPException(503, f"Dahua snapshot failed: {exc}") from exc
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise HTTPException(503, f"Dahua NVR unreachable: {exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(503, str(exc)) from exc
         return Response(content, media_type="image/jpeg")
 
     @app.get("/channels/{channel}/live")
