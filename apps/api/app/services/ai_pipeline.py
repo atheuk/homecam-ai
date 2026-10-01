@@ -308,7 +308,7 @@ async def enrich_event(
         merged = list(event.get("tags") or [])
         row.tags = merged + [tag for tag in semantics.tags if tag not in merged]
         if scene.get("kind") == "vehicle":
-            known = (row.event_metadata or {}).get("vehicle_track", {}).get("vehicle")
+            known = scene.get("vehicle") or (row.event_metadata or {}).get("vehicle_track", {}).get("vehicle")
             if known:
                 row.event_metadata = {**(row.event_metadata or {}), "vehicle": known}
     row.source = "local-ai" if detections else row.source
@@ -426,7 +426,9 @@ async def enrich_event(
                 row.tags = tags
             if photo.detection is not None and photo.detection.label in VEHICLE_CLASSES:
                 metadata = dict(row.event_metadata or {})
-                existing_vehicle = (metadata.get("vehicle_track") or {}).get("vehicle")
+                existing_vehicle = metadata.get("vehicle") or (metadata.get("scene") or {}).get("vehicle") or (
+                    (metadata.get("vehicle_track") or {}).get("vehicle")
+                )
                 if existing_vehicle:
                     metadata["vehicle"] = existing_vehicle
                 else:

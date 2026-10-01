@@ -464,7 +464,7 @@ async def _process(
             session, scene, camera_name, detections, [z for _, z in zones], image, now, frame
         )
     from . import suspicious
-    transitions += suspicious.observe(scene, detections, [z for _, z in zones], now)
+    transitions += await suspicious.observe(session, scene, detections, [z for _, z in zones], now)
     for zone_id, zone in zones:
         kind = zone.kind.casefold()
         if kind == "mailbox" and settings.mailbox_delivery_enabled:
