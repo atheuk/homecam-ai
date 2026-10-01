@@ -483,15 +483,106 @@ export AI_DETECTOR_MODEL_PATH=/path/to/model.onnx
 ```
 
 If the runtime, numpy, Pillow or the model file are missing or unreadable, the
-detector logs a warning and falls back to the mock backend. It never crashes a
-request.
+detector reports a **degraded** status (ERROR log, `/ready`,
+`GET /api/v1/system/status`) and falls back to the mock backend. It never
+crashes a request. See "Detector configuration is fail-loud" below.
+
+## Detector configuration is fail-loud
+
+> **Incident, 2026-09-30.** A rollback left `AI_DETECTOR_BACKEND=rtdetr-r50`
+> and `AI_DETECTOR_MODEL_PATH=/app/models/rtdetr-r50.onnx` on the production
+> Container App. Neither the backend name nor the file existed. The old code
+> logged one WARNING and returned the mock detector, which reports nothing
+> for a real camera. The system was blind for three hours while `/health`,
+> `/ready` and `/api/v1/providers` were all green.
+
+Rules now:
+
+* `AI_DETECTOR_BACKEND` accepts exactly `mock`, `opencv`, `onnx`, `rtdetr`.
+  A handful of spellings are normalised (`rt-detr`, `rt_detr`,
+  `rtdetr-r18`, `rtdetr-r50`, `rtdetr_r50`, `rtdetr-r18vd`) — but an alias
+  only selects the code path; the model file behind it is still required to
+  exist and load, so an alias can never stand in for a missing model.
+* Anything else is reported as a configuration error naming the offending
+  value.
+* `AI_DETECTOR_MODEL_PATH` is checked for existence *before* the ONNX
+  runtime is touched, and the failure message names the exact path.
+* Falling back to mock is never silent: it logs at **ERROR**
+  (`DETECTION DISABLED: ...`), and `degraded: true` appears on `/ready`,
+  `GET /api/v1/system/readiness`, `GET /api/v1/system/health` and
+  `GET /api/v1/system/status` (which returns **503**).
+* `AI_DETECTOR_STRICT=true` turns the degradation into a startup failure
+  instead. It is **off by default** on purpose: a crash-looping home
+  security system protects nobody, so the default is "stay alive, but make
+  it impossible to miss". Turn it on where a deployment pipeline can catch
+  and roll back a failed revision.
+* `AI_DETECTOR_BACKEND=mock` remains a legitimate, deliberate choice and is
+  never reported as degraded — it is just reported as not detecting.
+
+The exact model path baked into the container image by `apps/api/Dockerfile`
+is **`/app/models/rtdetr.onnx`**. There is no `rtdetr-r50.onnx` in the image.
+
+### Zero-detection watchdog
+
+Frames arriving is not the same as detection working. The watchdog keeps a
+**per-camera** window counting frames the detector actually ran on and the
+boxes it returned, and raises
+
+```
+DETECTOR BLACKOUT on camera <id>: N frames were detected on over Ns and the
+detector returned zero detections in total.
+```
+
+when a sustained window of successful frames on that camera yields
+*literally no box at all*. State is per camera on purpose: a single global
+window would be reset by every detection anywhere, so one busy driveway
+camera would indefinitely mask a back-garden camera whose stream had died.
+The surfaces aggregate as **any camera blind**, and `blind_cameras` /
+`detector_watchdog.blackout_cameras` name the affected channels.
+
+It is deliberately keyed on raw detections, not on emitted events: events
+are legitimately suppressed for parked vehicles, so "no events" is also what
+a quiet driveway looks like, while a working detector on a real scene keeps
+returning boxes. A blackout makes `GET /api/v1/system/status` return 503.
+
+### Status surface
+
+```bash
+curl -fsS https://<api>/api/v1/system/status | jq
+```
+
+```json
+{
+  "status": "ok",
+  "detecting": true,
+  "detector": {
+    "requested_backend": "rtdetr",
+    "intended_backend": "rtdetr",
+    "active_backend": "rtdetr",
+    "is_intended_backend": true,
+    "loaded_model_path": "/app/models/rtdetr.onnx",
+    "degraded": false
+  },
+  "detector_watchdog": { "blackout": false }
+}
+```
+
+`status: "blind"` with HTTP 503 means the detector is not the intended one,
+or the watchdog is firing on at least one camera (`blind_cameras` names
+them). `/ready` reports the same information but stays HTTP 200 by design,
+so a readiness probe never pulls an otherwise-working ingestion pipeline out
+of service.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AI_DETECTOR_BACKEND` | `mock` | `mock`, `rtdetr`, `opencv`, or `onnx`. `rtdetr` is the production backend (deployed to Azure); `mock` is the zero-dependency default used by CI and tests. |
-| `AI_DETECTOR_MODEL_PATH` | *(empty)* | ONNX model path for `rtdetr` or `onnx`. For `rtdetr`, empty means `/app/models/rtdetr.onnx`, which `apps/api/Dockerfile` bakes into the image. |
+| `AI_DETECTOR_BACKEND` | `mock` | Exactly one of `mock`, `rtdetr`, `opencv`, `onnx` (plus normalised aliases such as `rt-detr`/`rtdetr-r50`). `rtdetr` is the production backend (deployed to Azure); `mock` is the zero-dependency default used by CI and tests. Any other value is a hard configuration error, reported loudly. |
+| `AI_DETECTOR_MODEL_PATH` | *(empty)* | ONNX model path for `rtdetr` or `onnx`. For `rtdetr`, empty means `/app/models/rtdetr.onnx`, which `apps/api/Dockerfile` bakes into the image (there is no `rtdetr-r50.onnx`). A path that does not exist is reported by name. |
+| `AI_DETECTOR_STRICT` | `false` | Refuse to start when the requested backend cannot be honoured, instead of running degraded. |
+| `DETECTOR_WATCHDOG_ENABLED` | `true` | Zero-detection watchdog. |
+| `DETECTOR_BLACKOUT_WINDOW_SECONDS` | `2700` | Sustained per-camera silence (45 min) before a blackout is declared. |
+| `DETECTOR_BLACKOUT_MIN_FRAMES` | `60` | Frames that camera must have been detected on in the window before silence counts as evidence. |
 | `AI_ANALYSIS_ENABLED` | `true` | Master switch for the enrichment stages. |
 | `EMBEDDING_DIMENSIONS` | `384` | Width of stored embeddings. |
 | `BEST_PHOTO_ENABLED` | `true` | Persist a best photo per detected event. |

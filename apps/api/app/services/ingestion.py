@@ -45,7 +45,7 @@ from ..ai.detector import (
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from . import ai_pipeline, scene_state
+from . import ai_pipeline, detector_watchdog, scene_state
 from . import events as event_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
 from .stream_frames import stream_hub
@@ -146,6 +146,9 @@ async def poll_once(session_factory=SessionLocal) -> int:
         except Exception as exc:  # noqa: BLE001 - detector must not break ingestion
             logger.warning("ingestion detection failed for %s: %s", camera_id, exc)
             continue
+        # A successfully-detected frame that yielded nothing is the exact
+        # signal the 2026-09-30 blackout produced for three hours.
+        detector_watchdog.record_frame(camera_id, len(detections))
 
         # Subject events first: a slow scene check (a Foundry mailbox/bin
         # verification) must never delay the person/animal event from the
@@ -450,6 +453,7 @@ def reset_cooldowns() -> None:
     _last_stream_seq.clear()
     _frame_stats.clear()
     _stats_since.clear()
+    detector_watchdog.reset()
     scene_state.reset_memory()
 
 

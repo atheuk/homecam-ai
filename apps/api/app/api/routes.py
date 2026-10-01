@@ -39,11 +39,14 @@ from ..schemas import (
     ProviderOutageIn,
 )
 from ..ai.audio import analyze_pcm
+from ..ai.detector import SUPPORTED_BACKENDS, detector_status
 from ..ai.vision import get_image_embedder
 from ..services import activities as activity_service
 from ..services import cameras as camera_service
+from ..services import detector_watchdog
 from ..services import events as event_service
 from ..services import persons as person_service
+from ..services.ingestion import frame_stats as ingestion_service_stats
 from ..services.stream_frames import stream_hub
 from ..services.provider_registry import (
     active_mock_providers,
@@ -690,13 +693,70 @@ async def set_provider_outage(provider_id: str, payload: ProviderOutageIn):
 @router.get("/system/health")
 async def health():
     provider_health = await get_all_provider_health()
-    overall = "ok" if all(h["status"] != "OFFLINE" for h in provider_health) else "degraded"
-    return {"status": overall, "service": "homecam-api", "providers": provider_health}
+    detector = detector_status()
+    watchdog = detector_watchdog.status()
+    providers_ok = all(h["status"] != "OFFLINE" for h in provider_health)
+    blind = detector.degraded or watchdog["blackout"]
+    overall = "ok" if providers_ok and not blind else "degraded"
+    return {
+        "status": overall,
+        "service": "homecam-api",
+        "providers": provider_health,
+        "detector": detector.as_dict(),
+        "detector_watchdog": watchdog,
+    }
+
+
+@router.get("/system/status")
+async def system_status(response: Response):
+    """Authoritative "are we actually seeing anything" surface.
+
+    Returns **503** when the detector is not the one that was asked for, or
+    when the zero-detection watchdog is firing, so a probe or a human can
+    tell "running the real detector" from "blind" without reading container
+    logs — the gap that let the 2026-09-30 incident run for three hours.
+    """
+    detector = detector_status()
+    watchdog = detector_watchdog.status()
+    blind = detector.degraded or watchdog["blackout"]
+    if blind:
+        response.status_code = 503
+    reasons = []
+    if detector.degraded:
+        reasons.append(detector.reason or "detector degraded to mock")
+    if watchdog["blackout"]:
+        reasons.append(
+            "zero detections on "
+            f"{', '.join(watchdog['blackout_cameras'])} across a full "
+            f"{watchdog['window_limit_seconds']:.0f}s window of successfully detected frames"
+        )
+    return {
+        "status": "blind" if blind else "ok",
+        "detecting": detector.detecting and not watchdog["blackout"],
+        "detector": detector.as_dict(),
+        "detector_watchdog": watchdog,
+        "blind_cameras": watchdog["blackout_cameras"],
+        "supported_backends": list(SUPPORTED_BACKENDS),
+        "reasons": reasons,
+        "ingestion": {
+            "enabled": settings.event_ingestion_enabled,
+            "frames": ingestion_service_stats(),
+        },
+    }
 
 
 @router.get("/system/readiness")
 async def readiness():
-    return {"status": "ready", "database": "configured", "redis": "configured"}
+    detector = detector_status()
+    watchdog = detector_watchdog.status()
+    blind = detector.degraded or watchdog["blackout"]
+    return {
+        "status": "degraded" if blind else "ready",
+        "database": "configured",
+        "redis": "configured",
+        "detector": detector.as_dict(),
+        "detector_watchdog": watchdog,
+    }
 
 
 @router.get("/settings")

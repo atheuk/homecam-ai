@@ -1,10 +1,21 @@
 """Local object detection abstraction (SPEC section 13).
 
-Three backends are selectable through ``AI_DETECTOR_BACKEND``:
+Four backends are selectable through ``AI_DETECTOR_BACKEND``. The accepted
+values are exactly :data:`SUPPORTED_BACKENDS` — ``mock``, ``opencv``,
+``onnx``, ``rtdetr`` — plus the spellings in :data:`BACKEND_ALIASES`.
+
+**Failure policy (incident 2026-09-30).** This module used to answer any
+unusable configuration with a single WARNING and the mock detector, which
+returns nothing for a real camera. Production spent three hours blind with
+every health signal green. Now every fallback produces a *degraded*
+:class:`DetectorStatus`, an ERROR log, and a visible state on ``/ready`` and
+``GET /api/v1/system/status``; ``AI_DETECTOR_STRICT=true`` turns it into a
+startup failure instead.
 
 ``mock`` (default)
     :class:`MockDetector` — fully deterministic, zero extra dependencies, so
-    tests and CI never need an ML runtime.
+    tests and CI never need an ML runtime. It is only ever selected by an
+    explicit ``AI_DETECTOR_BACKEND=mock``, or as a loudly-reported fallback.
 
 ``opencv`` (opt-in, no external model file required)
     :class:`OpenCvDetector` — genuine pixel-based person detection using the
@@ -19,8 +30,9 @@ Three backends are selectable through ``AI_DETECTOR_BACKEND``:
     ONNX Runtime. The model file is *not* bundled in this repository; see
     ``docs/ai-pipeline.md`` for how to download one. If the runtime, numpy,
     Pillow or the model file are missing, construction raises
-    :class:`DetectorUnavailableError` and :func:`get_detector` logs and falls
-    back to the mock backend rather than breaking event ingestion (SPEC 43).
+    :class:`DetectorUnavailableError` and :func:`resolve_detector` reports a
+    degraded status (ERROR log + status endpoint) while keeping ingestion
+    alive, rather than failing silently (SPEC 43).
 
     **Licensing caveat:** the obvious models for this backend are Ultralytics
     YOLOv8/v11 exports, and Ultralytics ships under **AGPL-3.0** — both the
@@ -47,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -98,6 +111,84 @@ def subject_for_label(label: str) -> str | None:
 
 class DetectorUnavailableError(RuntimeError):
     """Raised when a detector backend cannot be constructed locally."""
+
+
+class DetectorConfigurationError(RuntimeError):
+    """Raised when the detector configuration itself is wrong.
+
+    Distinct from :class:`DetectorUnavailableError`: that one means "this
+    backend could not be built right now", while this one means "what you
+    asked for cannot be honoured at all" and, under
+    ``AI_DETECTOR_STRICT=true``, must stop the process from starting.
+    """
+
+
+#: Every value ``AI_DETECTOR_BACKEND`` accepts. ``mock`` is the explicit,
+#: deliberate opt-in for "no pixel-based detection"; it is never reached by
+#: accident.
+SUPPORTED_BACKENDS: tuple[str, ...] = ("mock", "opencv", "onnx", "rtdetr")
+
+#: Spellings tolerated for a supported backend. These only ever select the
+#: same code path under a different name (an RT-DETR model variant, a
+#: hyphenation); the model file behind the alias is still verified, so an
+#: alias can never stand in for a model that is not there. ``rtdetr-r50``
+#: is listed because it is exactly what a rollback left in production on
+#: 2026-09-30, pointing at a model file the image does not contain.
+BACKEND_ALIASES: dict[str, str] = {
+    "rt-detr": "rtdetr",
+    "rt_detr": "rtdetr",
+    "rtdetr-r18": "rtdetr",
+    "rtdetr_r18": "rtdetr",
+    "rtdetr-r50": "rtdetr",
+    "rtdetr_r50": "rtdetr",
+    "rtdetr-r18vd": "rtdetr",
+    "rtdetr_r18vd": "rtdetr",
+}
+
+
+@dataclass(frozen=True)
+class DetectorStatus:
+    """What the process is *actually* detecting with, versus what was asked.
+
+    ``degraded`` is the field that matters operationally: it is true exactly
+    when the operator asked for real detection and did not get it.
+    """
+
+    requested_backend: str
+    intended_backend: str
+    active_backend: str
+    configured_model_path: str
+    loaded_model_path: str
+    degraded: bool
+    recognised: bool
+    reason: str | None = None
+
+    @property
+    def detecting(self) -> bool:
+        """Whether pixel-based detection is genuinely running."""
+        return not self.degraded and self.active_backend != "mock"
+
+    def as_dict(self) -> dict:
+        return {
+            "requested_backend": self.requested_backend,
+            "intended_backend": self.intended_backend,
+            "active_backend": self.active_backend,
+            "is_intended_backend": not self.degraded,
+            "recognised_backend": self.recognised,
+            "configured_model_path": self.configured_model_path,
+            "loaded_model_path": self.loaded_model_path,
+            "degraded": self.degraded,
+            "detecting": self.detecting,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class DetectorResolution:
+    """A built detector plus the :class:`DetectorStatus` describing it."""
+
+    detector: "LocalDetector"
+    status: DetectorStatus
 
 
 @dataclass(frozen=True)
@@ -614,6 +705,7 @@ class RtDetrDetector:
 
 _mock_detector = MockDetector()
 _active_detector: LocalDetector | None = None
+_active_status: DetectorStatus | None = None
 
 
 def mock_detector() -> MockDetector:
@@ -621,44 +713,162 @@ def mock_detector() -> MockDetector:
     return _mock_detector
 
 
-def build_detector(backend: str, model_path: str = "") -> LocalDetector:
-    """Build a detector, falling back to mock if the backend is unusable."""
-    normalized = (backend or "mock").strip().lower()
-    if normalized == "mock":
-        return _mock_detector
-    if normalized == "opencv":
-        try:
-            return OpenCvDetector()
-        except DetectorUnavailableError as exc:
-            logger.warning("falling back to mock detector: %s", exc)
-            return _mock_detector
-    if normalized == "onnx":
-        try:
-            return OnnxDetector(model_path)
-        except DetectorUnavailableError as exc:
-            logger.warning("falling back to mock detector: %s", exc)
-            return _mock_detector
-    if normalized in {"rtdetr", "rt-detr"}:
-        try:
-            return RtDetrDetector(model_path or DEFAULT_RTDETR_MODEL_PATH)
-        except DetectorUnavailableError as exc:
-            logger.warning("falling back to mock detector: %s", exc)
-            return _mock_detector
-    logger.warning("unknown AI_DETECTOR_BACKEND '%s'; using mock detector", backend)
-    return _mock_detector
+def _normalize_backend(backend: str) -> tuple[str, bool]:
+    """``(canonical name, recognised)`` for a configured backend string.
+
+    Aliases exist only for spellings that name the *same* backend with a
+    different model variant (``rtdetr-r50``, ``rt_detr``). They are
+    deliberately not a licence to guess: the alias only ever selects the
+    code path, and the model file behind it is still verified to exist and
+    load, so a tolerated alias can never mask a missing model.
+    """
+    raw = (backend or "").strip().lower()
+    if not raw:
+        return "mock", True
+    canonical = BACKEND_ALIASES.get(raw, raw)
+    return canonical, canonical in SUPPORTED_BACKENDS
+
+
+def _require_model_file(backend: str, model_path: str) -> None:
+    """Fail with the offending path named, before the runtime is touched."""
+    if not model_path:
+        raise DetectorUnavailableError(f"AI_DETECTOR_MODEL_PATH is not set for backend '{backend}'")
+    if not os.path.isfile(model_path):
+        raise DetectorUnavailableError(
+            f"AI_DETECTOR_MODEL_PATH '{model_path}' does not exist (backend '{backend}')"
+        )
+
+
+def _construct(backend: str, model_path: str) -> tuple[LocalDetector, str]:
+    """Build ``backend``; returns ``(detector, model path actually loaded)``."""
+    if backend == "mock":
+        return _mock_detector, ""
+    if backend == "opencv":
+        return OpenCvDetector(), ""
+    if backend == "onnx":
+        _require_model_file(backend, model_path)
+        return OnnxDetector(model_path), model_path
+    if backend == "rtdetr":
+        resolved = model_path or DEFAULT_RTDETR_MODEL_PATH
+        _require_model_file(backend, resolved)
+        return RtDetrDetector(resolved), resolved
+    raise DetectorUnavailableError(f"backend '{backend}' has no constructor")
+
+
+def resolve_detector(backend: str, model_path: str = "", *, strict: bool = False) -> DetectorResolution:
+    """Build the configured detector and describe exactly what was built.
+
+    Unlike the previous behaviour, degrading to the mock detector is never
+    quiet. A production incident (2026-09-30) ran three hours blind because
+    an unrecognised ``AI_DETECTOR_BACKEND`` logged one WARNING and then
+    returned the mock detector, which reports nothing for a real camera:
+    every health signal stayed green while the system saw nothing at all.
+
+    Two behaviours now prevent that:
+
+    * ``strict`` (``AI_DETECTOR_STRICT=true``) raises
+      :class:`DetectorConfigurationError`, so a misconfigured deployment
+      refuses to start rather than pretending to work.
+    * Otherwise the process stays alive — a home security system that
+      crash-loops protects nobody — but the fallback is recorded as a
+      *degraded* :class:`DetectorStatus`, logged at ERROR, and surfaced on
+      ``/ready`` and ``/api/v1/system/status`` so it cannot hide.
+    """
+    requested = (backend or "").strip()
+    canonical, recognised = _normalize_backend(requested)
+    configured_path = (model_path or "").strip()
+
+    if not recognised:
+        reason = (
+            f"AI_DETECTOR_BACKEND '{requested}' is not a recognised backend "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+        return _degrade(requested, canonical, configured_path, reason, strict)
+
+    try:
+        detector, loaded_path = _construct(canonical, configured_path)
+    except DetectorUnavailableError as exc:
+        return _degrade(requested, canonical, configured_path, str(exc), strict)
+
+    status = DetectorStatus(
+        requested_backend=requested or "mock",
+        intended_backend=canonical,
+        active_backend=getattr(detector, "name", canonical),
+        configured_model_path=configured_path,
+        loaded_model_path=loaded_path,
+        degraded=False,
+        recognised=True,
+        reason=None,
+    )
+    if canonical == "mock":
+        logger.info("detector backend 'mock' selected explicitly; no pixel-based detection will occur")
+    else:
+        logger.info(
+            "detector backend '%s' active (model=%s)", status.active_backend, loaded_path or "n/a"
+        )
+    return DetectorResolution(detector=detector, status=status)
+
+
+def _degrade(
+    requested: str, canonical: str, configured_path: str, reason: str, strict: bool
+) -> DetectorResolution:
+    if strict:
+        raise DetectorConfigurationError(reason)
+    logger.error(
+        "DETECTION DISABLED: %s. Falling back to the mock detector, which reports nothing for a real "
+        "camera - this deployment is effectively blind until AI_DETECTOR_BACKEND / "
+        "AI_DETECTOR_MODEL_PATH are corrected.",
+        reason,
+    )
+    status = DetectorStatus(
+        requested_backend=requested or "mock",
+        intended_backend=canonical,
+        active_backend="mock",
+        configured_model_path=configured_path,
+        loaded_model_path="",
+        degraded=True,
+        recognised=canonical in SUPPORTED_BACKENDS,
+        reason=reason,
+    )
+    return DetectorResolution(detector=_mock_detector, status=status)
+
+
+def build_detector(backend: str, model_path: str = "", *, strict: bool = False) -> LocalDetector:
+    """Build a detector; see :func:`resolve_detector` for the failure rules."""
+    return resolve_detector(backend, model_path, strict=strict).detector
 
 
 def get_detector() -> LocalDetector:
     """Return the configured detector, built lazily once per process."""
-    global _active_detector
-    if _active_detector is None:
+    return _resolve_active().detector
+
+
+def detector_status() -> DetectorStatus:
+    """The status of the process-wide detector, building it if needed.
+
+    Callers (readiness probes, the status endpoint) get the same answer the
+    ingestion loop is using, never a second, separately-built opinion.
+    """
+    return _resolve_active().status
+
+
+def _resolve_active() -> DetectorResolution:
+    global _active_detector, _active_status
+    if _active_detector is None or _active_status is None:
         from ..config import settings
 
-        _active_detector = build_detector(settings.ai_detector_backend, settings.ai_detector_model_path)
-    return _active_detector
+        resolution = resolve_detector(
+            settings.ai_detector_backend,
+            settings.ai_detector_model_path,
+            strict=settings.ai_detector_strict,
+        )
+        _active_detector = resolution.detector
+        _active_status = resolution.status
+    return DetectorResolution(detector=_active_detector, status=_active_status)
 
 
 def reset_detector() -> None:
     """Drop the cached detector so configuration changes take effect."""
-    global _active_detector
+    global _active_detector, _active_status
     _active_detector = None
+    _active_status = None

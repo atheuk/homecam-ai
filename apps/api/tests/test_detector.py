@@ -1,17 +1,21 @@
 """Local detector abstraction tests (SPEC section 13)."""
+import logging
 import sys
 
 import pytest
 
 from app.ai.detector import (
     DETECTION_CLASSES,
+    SUPPORTED_BACKENDS,
     BoundingBox,
     Detection,
     DetectionContext,
+    DetectorConfigurationError,
     MockDetector,
     OpenCvDetector,
     build_detector,
     mock_detector,
+    resolve_detector,
 )
 
 
@@ -54,13 +58,80 @@ def test_all_spec_categories_are_supported():
     }
 
 
-def test_unknown_backend_falls_back_to_mock():
-    assert build_detector("does-not-exist") is mock_detector()
+def test_unknown_backend_falls_back_to_mock_but_is_reported_degraded(caplog):
+    """Incident 2026-09-30: AI_DETECTOR_BACKEND=rtdetr-r50 was not accepted,
+    the code logged one WARNING and returned the mock detector, and nothing
+    said the system was blind for three hours."""
+    with caplog.at_level(logging.ERROR):
+        resolution = resolve_detector("does-not-exist")
+
+    assert resolution.detector is mock_detector()
+    status = resolution.status
+    assert status.degraded is True
+    assert status.recognised is False
+    assert status.detecting is False
+    assert status.intended_backend == "does-not-exist"
+    assert status.active_backend == "mock"
+    assert "does-not-exist" in (status.reason or "")
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+def test_unknown_backend_is_fatal_in_strict_mode():
+    with pytest.raises(DetectorConfigurationError) as excinfo:
+        resolve_detector("rtdetr-r50-typo", strict=True)
+    assert "rtdetr-r50-typo" in str(excinfo.value)
+
+
+def test_explicit_mock_backend_is_not_degraded():
+    """Mock is a deliberate opt-in, not an accident."""
+    status = resolve_detector("mock").status
+    assert status.degraded is False
+    assert status.detecting is False
+    assert status.reason is None
+
+
+def test_missing_model_file_names_the_path_and_degrades_loudly(tmp_path, caplog):
+    """The second half of the incident: a real backend name pointing at a
+    model file the image does not contain."""
+    missing = str(tmp_path / "rtdetr-r50.onnx")
+    with caplog.at_level(logging.ERROR):
+        resolution = resolve_detector("rtdetr", model_path=missing)
+
+    assert resolution.detector is mock_detector()
+    assert resolution.status.degraded is True
+    assert resolution.status.recognised is True
+    assert missing in (resolution.status.reason or "")
+    assert missing in caplog.text
+
+
+def test_missing_model_file_is_fatal_in_strict_mode(tmp_path):
+    missing = str(tmp_path / "nope.onnx")
+    with pytest.raises(DetectorConfigurationError) as excinfo:
+        resolve_detector("rtdetr", model_path=missing, strict=True)
+    assert missing in str(excinfo.value)
+
+
+def test_backend_alias_never_masks_a_missing_model(tmp_path):
+    """``rtdetr-r50`` is tolerated as a spelling of ``rtdetr`` — but only the
+    code path is aliased. A model file that is not there still fails."""
+    missing = str(tmp_path / "rtdetr-r50.onnx")
+    status = resolve_detector("rtdetr-r50", model_path=missing).status
+    assert status.intended_backend == "rtdetr"
+    assert status.recognised is True
+    assert status.degraded is True
+    assert missing in (status.reason or "")
+
+
+def test_supported_backends_are_the_documented_set():
+    assert set(SUPPORTED_BACKENDS) == {"mock", "opencv", "onnx", "rtdetr"}
 
 
 def test_onnx_backend_without_model_falls_back_to_mock():
-    """Opt-in backends must degrade, never crash the ingestion path."""
-    assert build_detector("onnx", model_path="") is mock_detector()
+    """Opt-in backends must degrade, never crash the ingestion path — but
+    the degradation is recorded, not silent."""
+    resolution = resolve_detector("onnx", model_path="")
+    assert resolution.detector is mock_detector()
+    assert resolution.status.degraded is True
 
 
 def test_opencv_backend_without_cv2_falls_back_to_mock(monkeypatch):
