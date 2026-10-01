@@ -27,6 +27,9 @@ const RESET: View = {scale: 1, x: 0, y: 0};
 
 export type LightboxPhoto = {
   src: string;
+  /** An already-fetched object URL for the protected crop, so opening the
+   * viewer does not re-download or re-prompt for a photo already on screen. */
+  previewSrc?: string | null;
   fullSrc?: string | null;
   loginUrl?: string;
   requiresAuth?: boolean;
@@ -58,7 +61,11 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const photoImage = cropImage || (photo.requiresAuth ? null : photo.src);
+  // The inline preview already holds an authenticated copy of the crop, so
+  // the viewer shows it straight away and only the full frame is still
+  // behind a deliberate request.
+  const needsCrop = Boolean(photo.requiresAuth && !cropImage && !photo.previewSrc);
+  const photoImage = cropImage || photo.previewSrc || (photo.requiresAuth ? null : photo.src);
   const request = useRef<AbortController | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -93,7 +100,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
 
   const loadPhoto = async (event: React.FormEvent) => {
     event.preventDefault();
-    const loadingCrop = Boolean(photo.requiresAuth && !cropImage);
+    const loadingCrop = needsCrop;
     const loadingFull = Boolean(photo.fullSrc && !fullImage);
     if (loading || (!loadingCrop && !loadingFull)) return;
     if (!accessToken && !photo.accessToken && !photo.loginUrl && !photo.useSessionCookie) {
@@ -321,9 +328,9 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
         </div>
       </div>
 
-      {((photo.requiresAuth && !cropImage) || (photo.fullSrc && !fullImage)) && (
+      {((needsCrop) || (photo.fullSrc && !fullImage)) && (
         <form className="lightbox-auth" onSubmit={loadPhoto}>
-          <span>{photo.requiresAuth && !cropImage
+          <span>{needsCrop
             ? photo.accessToken || photo.useSessionCookie ? "View this photo." : "Sign in to view this photo."
             : "View the full-resolution frame."}</span>
           {!photo.useSessionCookie && !photo.accessToken && !accessToken && <>
@@ -333,7 +340,7 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
               value={password} onChange={event => setPassword(event.target.value)} />
           </>}
           <button type="submit" disabled={loading}>
-            {loading ? "Loading…" : photo.requiresAuth && !cropImage ? "View photo" : "View full resolution"}
+            {loading ? "Loading…" : needsCrop ? "View photo" : "View full resolution"}
           </button>
           {error && <span role="alert" className="error">{error}</span>}
         </form>
@@ -377,6 +384,83 @@ export function Lightbox({photo, onClose}: {photo: LightboxPhoto; onClose: () =>
   );
 }
 
+/** Fetches a protected image with the viewer's own credentials and hands
+ * back a blob URL for it.
+ *
+ * The event list is the only place the crop is ever shown automatically,
+ * so the fetch is deliberately bounded: nothing is requested until the
+ * card is actually near the viewport, and an unmount aborts the request
+ * and releases the blob rather than leaving a decoded photo in memory.
+ * Anything other than a success (a 401 from an expired session, say)
+ * leaves the locked placeholder in place instead of a broken image.
+ */
+function useProtectedPreview({
+  src,
+  enabled,
+  accessToken,
+  frameRef,
+}: {
+  src: string;
+  enabled: boolean;
+  accessToken?: string | null;
+  frameRef: React.RefObject<HTMLElement | null>;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  // Browsers without IntersectionObserver (and jsdom) simply load straight
+  // away: lazy loading is an optimisation, never a precondition for the
+  // photo appearing at all.
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
+
+  useEffect(() => {
+    if (!enabled || visible) return;
+    const frame = frameRef.current;
+    if (!frame || typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setVisible(true);
+        observer.disconnect();
+      }
+    }, {rootMargin: "200px"});
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [enabled, visible, frameRef]);
+
+  useEffect(() => {
+    if (!enabled || !visible) return;
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setFailed(false);
+    (async () => {
+      try {
+        const response = await fetch(src, {
+          headers: accessToken ? {Authorization: `Bearer ${accessToken}`} : {},
+          signal: controller.signal,
+          cache: "no-store",
+          credentials: "include",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      } catch {
+        if (!controller.signal.aborted) setFailed(true);
+      }
+    })();
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setUrl(null);
+    };
+  }, [src, enabled, visible, accessToken]);
+
+  return {url, failed};
+}
+
 /** A photo that opens full screen when clicked.
  *
  * Rendered as a real button so it is reachable by keyboard and announced
@@ -410,20 +494,31 @@ export function ZoomablePhoto({
   subject?: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  const frameRef = useRef<HTMLSpanElement | null>(null);
+  // Only a viewer who already holds credentials can be shown the crop
+  // inline; anonymous visitors keep the locked placeholder.
+  const canPreview = Boolean(requiresAuth && (accessToken || useSessionCookie));
+  const {url: previewSrc, failed} = useProtectedPreview({
+    src,
+    enabled: canPreview,
+    accessToken,
+    frameRef,
+  });
+  const locked = requiresAuth && !previewSrc;
   return (
     <>
       <button type="button" className="photo-trigger" aria-label={`Open ${title || alt} full screen`} onClick={() => setOpen(true)}>
-        <span className="photo-frame">
-          {requiresAuth
-            ? <span className="photo-locked">{accessToken||useSessionCookie?"Open photo":"Sign in to view photo"}</span>
+        <span className="photo-frame" ref={frameRef}>
+          {locked
+            ? <span className="photo-locked">{canPreview ? (failed ? "Open photo" : "Loading photo…") : "Sign in to view photo"}</span>
             : <>
                 {/* eslint-disable-next-line @next/next/no-img-element -- see Lightbox */}
-                <img src={src} alt={alt} />
+                <img src={previewSrc || src} alt={alt} />
                 <DetectionBoxes boxes={boxes} name={subject} />
               </>}
         </span>
       </button>
-      {open && <Lightbox photo={{src, fullSrc, loginUrl, requiresAuth, accessToken, useSessionCookie, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
+      {open && <Lightbox photo={{src, previewSrc, fullSrc, loginUrl, requiresAuth, accessToken, useSessionCookie, alt, caption, title, boxes, fullBoxes, subject}} onClose={() => setOpen(false)} />}
     </>
   );
 }

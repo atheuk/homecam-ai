@@ -1,5 +1,5 @@
-﻿import {describe,it,expect,vi} from "vitest";
-import {render,screen,fireEvent,waitFor} from "@testing-library/react";
+﻿import {describe,it,expect,vi,afterEach} from "vitest";
+import {render,screen,fireEvent,waitFor,act,cleanup} from "@testing-library/react";
 import {ZoomablePhoto,Lightbox} from "./Lightbox";
 
 const PHOTO={
@@ -102,13 +102,16 @@ describe("opening a photo full screen",()=>{
     vi.stubGlobal("URL",{createObjectURL,revokeObjectURL});
     const fetchMock=vi.fn(async()=>new Response(new Blob(["photo"]),{status:200}));
     vi.stubGlobal("fetch",fetchMock);
-    render(<ZoomablePhoto {...PHOTO} requiresAuth useSessionCookie
+    const {unmount}=render(<ZoomablePhoto {...PHOTO} requiresAuth useSessionCookie
       fullSrc="http://api.test/api/v1/events/evt-1/photo/full"/>);
+    // The crop is fetched for the card itself, so the viewer opens on the
+    // photo rather than on another "View photo" step.
+    await waitFor(()=>expect(screen.getByAltText(PHOTO.alt)).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button",{name:/open sarah full screen/i}));
 
     expect(screen.queryByLabelText("Photo account email")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Photo account password")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button",{name:"View photo"}));
+    expect(screen.queryByRole("button",{name:"View photo"})).not.toBeInTheDocument();
 
     await waitFor(()=>expect(viewerImage().src).toBe("blob:cookie-photo"));
     expect(fetchMock).toHaveBeenCalledWith(PHOTO.src,expect.objectContaining({
@@ -116,7 +119,7 @@ describe("opening a photo full screen",()=>{
       headers:{},
       cache:"no-store",
     }));
-    fireEvent.click(screen.getByRole("button",{name:"Close full screen"}));
+    unmount();
     await waitFor(()=>expect(revokeObjectURL).toHaveBeenCalledWith("blob:cookie-photo"));
     vi.unstubAllGlobals();
   });
@@ -161,6 +164,120 @@ describe("opening a photo full screen",()=>{
     expect(document.body.style.overflow).toBe("hidden");
     fireEvent.keyDown(window,{key:"Escape"});
     expect(document.body.style.overflow).not.toBe("hidden");
+  });
+});
+
+describe("inline preview of a protected photo",()=>{
+  const AUTH={...PHOTO,requiresAuth:true as const,fullSrc:"http://api.test/api/v1/events/evt-1/photo/full"};
+
+  // Patch the object-URL helpers on the real URL rather than replacing it:
+  // React flushes unmount effects after the test body, and a wholesale stub
+  // would be gone by the time the cleanup revokes its blob.
+  const originals={createObjectURL:URL.createObjectURL,revokeObjectURL:URL.revokeObjectURL};
+  function stubObjectUrls(url="blob:preview"){
+    const createObjectURL=vi.fn().mockReturnValue(url);
+    const revokeObjectURL=vi.fn();
+    URL.createObjectURL=createObjectURL as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL=revokeObjectURL as unknown as typeof URL.revokeObjectURL;
+    return {createObjectURL,revokeObjectURL};
+  }
+
+  afterEach(()=>{
+    // Unmount before restoring: React's cleanup is what revokes the blob,
+    // and jsdom has no real revokeObjectURL to fall back to.
+    cleanup();
+    vi.unstubAllGlobals();
+    URL.createObjectURL=originals.createObjectURL;
+    URL.revokeObjectURL=originals.revokeObjectURL;
+  });
+
+  it("shows the crop inline using the restored session cookie",async()=>{
+    stubObjectUrls("blob:cookie-preview");
+    const fetchMock=vi.fn(async()=>new Response(new Blob(["crop"]),{status:200}));
+    vi.stubGlobal("fetch",fetchMock);
+    render(<ZoomablePhoto {...AUTH} useSessionCookie/>);
+
+    await waitFor(()=>expect(screen.getByAltText(PHOTO.alt)).toHaveAttribute("src","blob:cookie-preview"));
+    expect(screen.queryByText("Sign in to view photo")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url,init]=fetchMock.mock.calls[0] as unknown as [string,RequestInit];
+    expect(url).toBe(PHOTO.src);
+    expect(init).toMatchObject({credentials:"include",cache:"no-store"});
+    expect(init.headers).toEqual({});
+  });
+
+  it("sends the bearer token when one is available",async()=>{
+    stubObjectUrls("blob:token-preview");
+    const fetchMock=vi.fn(async()=>new Response(new Blob(["crop"]),{status:200}));
+    vi.stubGlobal("fetch",fetchMock);
+    render(<ZoomablePhoto {...AUTH} accessToken="token-1"/>);
+
+    await waitFor(()=>expect(screen.getByAltText(PHOTO.alt)).toHaveAttribute("src","blob:token-preview"));
+    const [,init]=fetchMock.mock.calls[0] as unknown as [string,RequestInit];
+    expect(init.headers).toEqual({Authorization:"Bearer token-1"});
+    expect(init).toMatchObject({credentials:"include",cache:"no-store"});
+  });
+
+  it("never points an image at the protected URL for anonymous viewers",()=>{
+    const fetchMock=vi.fn();
+    vi.stubGlobal("fetch",fetchMock);
+    render(<ZoomablePhoto {...AUTH}/>);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByText("Sign in to view photo")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("keeps the photo hidden when the session has expired",async()=>{
+    const {createObjectURL}=stubObjectUrls();
+    const fetchMock=vi.fn(async()=>new Response(null,{status:401}));
+    vi.stubGlobal("fetch",fetchMock);
+    render(<ZoomablePhoto {...AUTH} useSessionCookie/>);
+
+    await waitFor(()=>expect(screen.getByText("Open photo")).toBeInTheDocument());
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("waits until the card is near the viewport before fetching",async()=>{
+    stubObjectUrls("blob:lazy-preview");
+    const fetchMock=vi.fn(async()=>new Response(new Blob(["crop"]),{status:200}));
+    vi.stubGlobal("fetch",fetchMock);
+    let notify:((entries:{isIntersecting:boolean}[])=>void)|null=null;
+    const disconnect=vi.fn();
+    class ObserverStub{
+      constructor(callback:(entries:{isIntersecting:boolean}[])=>void){notify=callback}
+      observe(){}
+      disconnect(){disconnect()}
+      unobserve(){}
+      takeRecords(){return []}
+    }
+    vi.stubGlobal("IntersectionObserver",ObserverStub);
+    render(<ZoomablePhoto {...AUTH} useSessionCookie/>);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByText("Loading photo…")).toBeInTheDocument();
+
+    act(()=>{notify?.([{isIntersecting:true}])});
+    await waitFor(()=>expect(screen.getByAltText(PHOTO.alt)).toHaveAttribute("src","blob:lazy-preview"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(disconnect).toHaveBeenCalled();
+  });
+
+  it("aborts the request and releases the photo when the card goes away",async()=>{
+    const {revokeObjectURL}=stubObjectUrls("blob:unmount-preview");
+    let signal:AbortSignal|undefined;
+    const fetchMock=vi.fn(async(_url:string,init:RequestInit)=>{
+      signal=init.signal as AbortSignal;
+      return new Response(new Blob(["crop"]),{status:200});
+    });
+    vi.stubGlobal("fetch",fetchMock);
+    const {unmount}=render(<ZoomablePhoto {...AUTH} useSessionCookie/>);
+    await waitFor(()=>expect(screen.getByAltText(PHOTO.alt)).toBeInTheDocument());
+
+    unmount();
+    expect(signal?.aborted).toBe(true);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:unmount-preview");
   });
 });
 
