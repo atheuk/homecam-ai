@@ -44,6 +44,7 @@ from ..models.db import (
     EventEvidence,
     EventPhoto,
     Incident,
+    IncidentClip,
     Person,
     PersonSighting,
 )
@@ -242,7 +243,9 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
     # Resolved incidents first: that releases their events for a later run
     # while an unresolved incident keeps pinning its own.
     incident_stmt = select(Incident.id).where(
-        Incident.status == "resolved", Incident.last_seen_at < cutoffs["incidents"]
+        Incident.status == "resolved",
+        Incident.clip_hold.is_(False),
+        Incident.last_seen_at < cutoffs["incidents"],
     )
     if dry_run:
         report.counts["incidents"] = await _count(session, incident_stmt)
@@ -251,9 +254,22 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
             ids = list((await session.execute(incident_stmt.limit(batch))).scalars().all())
             if not ids:
                 break
-            await session.execute(delete(Incident).where(Incident.id.in_(ids)))
+            rows = list((await session.execute(
+                select(Incident).where(Incident.id.in_(ids)).with_for_update()
+            )).scalars().all())
+            deletable = [
+                row.id for row in rows
+                if row.status == "resolved" and not row.clip_hold
+                and (
+                    row.last_seen_at.replace(tzinfo=timezone.utc)
+                    if row.last_seen_at.tzinfo is None else row.last_seen_at
+                ) < cutoffs["incidents"]
+            ]
+            if deletable:
+                await session.execute(delete(IncidentClip).where(IncidentClip.incident_id.in_(deletable)))
+                await session.execute(delete(Incident).where(Incident.id.in_(deletable)))
             await session.commit()
-            report.counts["incidents"] += len(ids)
+            report.counts["incidents"] += len(deletable)
             if len(ids) < batch:
                 break
         else:
@@ -269,6 +285,44 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
         ).scalar_one()
     )
     report.protected["events_on_hold"] = held
+
+    clip_stmt = select(IncidentClip.incident_id).join(
+        Incident, Incident.id == IncidentClip.incident_id
+    ).where(
+        Incident.status == "resolved",
+        Incident.clip_hold.is_(False),
+        Incident.last_seen_at < cutoffs["media"],
+    )
+    if dry_run:
+        report.counts["media"] += await _count(session, clip_stmt)
+    else:
+        for _ in range(max_batches):
+            ids = list((await session.execute(clip_stmt.limit(batch))).scalars().all())
+            if not ids:
+                break
+            # Serialize the human hold toggle against deletion on PostgreSQL.
+            rows = list((await session.execute(
+                select(Incident).where(Incident.id.in_(ids)).with_for_update()
+            )).scalars().all())
+            deletable = [
+                row.id for row in rows
+                if row.status == "resolved" and not row.clip_hold
+                and (
+                    row.last_seen_at.replace(tzinfo=timezone.utc)
+                    if row.last_seen_at.tzinfo is None else row.last_seen_at
+                ) < cutoffs["media"]
+            ]
+            if deletable:
+                await session.execute(delete(IncidentClip).where(IncidentClip.incident_id.in_(deletable)))
+                await session.execute(
+                    update(Incident).where(Incident.id.in_(deletable)).values(clip_status="expired")
+                )
+            await session.commit()
+            report.counts["media"] += len(deletable)
+            if len(ids) < batch:
+                break
+        else:
+            report.truncated = True
 
     # Media blobs age out before their events: they dominate storage, and
     # the event's text stays searchable without them.
@@ -286,7 +340,7 @@ async def run(session: AsyncSession, *, dry_run: bool | None = None, now: dateti
         photo_stmt = photo_stmt.where(Event.id.notin_(protected))
         evidence_stmt = evidence_stmt.where(Event.id.notin_(protected))
     if dry_run:
-        report.counts["media"] = await _count(session, photo_stmt) + await _count(session, evidence_stmt)
+        report.counts["media"] += await _count(session, photo_stmt) + await _count(session, evidence_stmt)
     else:
         for stmt, model, column in (
             (photo_stmt, EventPhoto, EventPhoto.event_id),

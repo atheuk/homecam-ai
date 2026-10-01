@@ -14,7 +14,7 @@ bulky media:
 | Setting | Default | Covers |
 | --- | --- | --- |
 | `RETENTION_EVENT_DAYS` | 30 | `events` rows (and their children) |
-| `RETENTION_MEDIA_DAYS` | 30 | `event_photos`, `event_evidence` blobs |
+| `RETENTION_MEDIA_DAYS` | 30 | `event_photos`, `event_evidence` blobs and resolved incident clips |
 | `RETENTION_AI_ANALYSIS_DAYS` | 30 | `ai_analyses` rows |
 | `RETENTION_EMBEDDING_DAYS` | 30 | face/person embedding vectors |
 | `RETENTION_INCIDENT_DAYS` | 90 | **resolved** incidents only |
@@ -47,6 +47,14 @@ Two protections outrank every cutoff:
    `PUT /api/v1/events/{event_id}/retention-hold` (`{"retention_hold":
    true}`, audit-logged); the flag is returned in the event payload so the
    UI can show it.
+3. **Kept incident clips.** A signed-in household member can set
+   `PUT /api/v1/security/incidents/{id}/clip/hold` with `{"hold": true}`
+   on a ready clip. This protects the clip and its incident from both
+   media and incident retention until the hold is cleared. A resolved
+   unheld clip ages out after `RETENTION_MEDIA_DAYS`; open/acknowledged
+   incident clips remain available while the incident is active. Stored
+   clips also count toward the aggregate budget in `docs/incident-clips.md`;
+   reaching it skips new clips rather than deleting held evidence.
 
 ## The purge job
 
@@ -59,7 +67,7 @@ Two protections outrank every cutoff:
   as it goes. A first run against a long-neglected database can therefore
   not hold a single enormous transaction, and the report sets
   `truncated: true` so you know more remains for the next tick.
-- **Ordered children-first.** Resolved incidents → media → embeddings →
+- **Ordered children-first.** Resolved incidents (and their clips) → media → embeddings →
   AI analyses → events (NULL-ing `people.cover_event_id` on the way) →
   audit log. No FK is ever orphaned.
 - **Embeddings are cleared, not deleted.** The vector is set to `[]` with
@@ -100,6 +108,7 @@ it is the only chance to notice a mis-set cutoff before the data is gone.
 | GET | `/api/v1/admin/retention` | Effective policy + dry-run counts |
 | POST | `/api/v1/admin/retention/purge` | Run a purge now; `{"dry_run": true}` by default (audit-logged) |
 | PUT | `/api/v1/events/{id}/retention-hold` | Mark/unmark an event as keep-forever (audit-logged) |
+| PUT | `/api/v1/security/incidents/{id}/clip/hold` | Protect/unprotect a ready clip (audit-logged) |
 
 Both admin endpoints require authentication. The project has no role model
 yet — any authenticated user is effectively an admin — which is a known

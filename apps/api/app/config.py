@@ -316,6 +316,13 @@ class Settings(BaseSettings):
     # nobody ever acknowledges settles at a high-but-bounded severity instead
     # of growing without limit.
     incident_max_escalation_level: int = Field(default=3, ge=0, le=10)
+    incident_clips_enabled: bool = True
+    incident_clip_pre_seconds: int = Field(default=8, ge=1, le=20)
+    incident_clip_post_seconds: int = Field(default=8, ge=1, le=20)
+    incident_clip_buffer_bytes: int = Field(default=8_000_000, ge=100_000, le=32_000_000)
+    incident_clip_max_bytes: int = Field(default=16_000_000, ge=100_000, le=64_000_000)
+    incident_clip_daily_limit: int = Field(default=10, ge=1, le=100)
+    incident_clip_storage_limit_bytes: int = Field(default=4_000_000_000, ge=100_000, le=16_000_000_000)
     # AI-assisted incident risk summary (Foundry chat deployment). Purely
     # descriptive/advisory text alongside the deterministic summary -
     # disabled it changes nothing about whether/when an incident is raised,

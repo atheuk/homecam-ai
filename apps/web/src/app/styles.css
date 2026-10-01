@@ -440,6 +440,13 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible{
 .incident-actions button{background:var(--accent);color:#0c1110;border:0;border-radius:6px;padding:7px 12px;font-weight:700;font-size:12px;cursor:pointer}
 .incident-actions button[disabled]{opacity:.5;cursor:not-allowed}
 .incident-actions .text-button{background:none;color:var(--accent);font-weight:600;padding:7px 4px}
+.incident-clip{margin:12px 0}
+.incident-clip-actions{display:flex;flex-wrap:wrap;gap:8px}
+.incident-clip-actions button{background:var(--accent);color:#0c1110;border:0;border-radius:6px;padding:7px 12px;font-weight:700;font-size:12px;cursor:pointer}
+.incident-clip-actions button[disabled]{opacity:.5;cursor:not-allowed}
+.incident-clip-actions button.active{background:#20362d;color:var(--accent);outline:1px solid var(--accent)}
+.incident-clip p{margin:6px 0}
+.incident-clip-video{display:block;width:100%;max-height:480px;margin-top:10px;border-radius:8px;background:#000}
 .incident-timeline{list-style:none;margin:12px 0 0;padding:12px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
 .incident-timeline li{display:flex;gap:10px;font-size:13px}
 .incident-timeline-time{color:var(--muted);font:11px 'DM Mono';flex:0 0 auto}

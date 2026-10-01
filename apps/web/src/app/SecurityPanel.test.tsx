@@ -1,14 +1,14 @@
-import {describe,it,expect,vi,beforeEach} from "vitest";import {render,screen,fireEvent,waitFor} from "@testing-library/react";import SecurityPanel from "./SecurityPanel";
+import {describe,it,expect,vi,beforeEach,afterEach} from "vitest";import {render,screen,fireEvent,waitFor,cleanup} from "@testing-library/react";import SecurityPanel from "./SecurityPanel";
 import {MockSseStream} from "../test-setup";
 
 function jsonResponse(body:unknown,status=200){return new Response(JSON.stringify(body),{status});}
 
-function mockFetch(handlers:Record<string,(init?:RequestInit)=>Response>){
+function mockFetch(handlers:Record<string,(init?:RequestInit,url?:string)=>Response>){
   global.fetch=vi.fn(async(url:string,init?:RequestInit)=>{
     const path=String(url);
     if(path.includes("/ws")) return MockSseStream.response();
     for(const [key,handler] of Object.entries(handlers)){
-      if(path.includes(key)) return handler(init);
+      if(path.includes(key)) return handler(init,path);
     }
     return jsonResponse({detail:"not found"},404);
   }) as typeof fetch;
@@ -24,14 +24,18 @@ const baseIncident={
 };
 
 async function signIn(){
-  render(<SecurityPanel cameras={cameras}/>);
+  const result=render(<SecurityPanel cameras={cameras}/>);
   fireEvent.change(screen.getByLabelText("Email"),{target:{value:"user@example.com"}});
   fireEvent.change(screen.getByLabelText("Password"),{target:{value:"secret123"}});
   fireEvent.click(screen.getByText("Sign in"));
   await screen.findByText("Arming mode");
+  return result;
 }
 
 describe("SecurityPanel",()=>{
+  const originalCreateObjectURL=URL.createObjectURL;
+  const originalRevokeObjectURL=URL.revokeObjectURL;
+
   beforeEach(()=>{
     MockSseStream.instances.length=0;
     mockFetch({
@@ -41,6 +45,12 @@ describe("SecurityPanel",()=>{
       "/security/audit-log":()=>jsonResponse([]),
       "/security/schedules":()=>jsonResponse([]),
     });
+  });
+
+  afterEach(()=>{
+    cleanup();
+    URL.createObjectURL=originalCreateObjectURL;
+    URL.revokeObjectURL=originalRevokeObjectURL;
   });
 
   it("shows a sign-in form before any security data is loaded", ()=>{
@@ -63,6 +73,134 @@ describe("SecurityPanel",()=>{
     await waitFor(()=>expect(screen.getByRole("button",{name:"Home"})).toHaveAttribute("aria-pressed","true"));
     expect(screen.getByText("Motion detected at Driveway")).toBeInTheDocument();
     expect(screen.getByText("1 open")).toBeInTheDocument();
+  });
+
+  it("shows clip preparation states and remains compatible with incidents without clip metadata",async()=>{
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>jsonResponse([
+        {...baseIncident,id:"inc-pending",clip:{status:"pending",url:null}},
+        {...baseIncident,id:"inc-unavailable",clip:{status:"unavailable",url:null}},
+        {...baseIncident,id:"inc-skipped",clip:{status:"skipped",url:null}},
+        {...baseIncident,id:"inc-expired",clip:{status:"expired",url:null}},
+        baseIncident,
+      ]),
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    await signIn();
+    expect(await screen.findByText("Incident clip is being prepared.")).toBeInTheDocument();
+    expect(screen.getByText("No clip is available for this incident.")).toBeInTheDocument();
+    expect(screen.getByText("Clip skipped: daily or storage limit reached.")).toBeInTheDocument();
+    expect(screen.getByText("This incident clip has expired.")).toBeInTheDocument();
+    expect(screen.queryByRole("button",{name:"Play incident clip"})).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".incident-clip")).toHaveLength(4);
+  });
+
+  it("fetches a ready clip only after play is requested and revokes its blob URL on unmount",async()=>{
+    const clipRequests: {url:string;init?:RequestInit}[]=[];
+    const createObjectURL=vi.fn().mockReturnValue("blob:incident-clip");
+    const revokeObjectURL=vi.fn();
+    const clipUrl="/api/v1/security/incidents/inc-1/clip?source=incident";
+    URL.createObjectURL=createObjectURL as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL=revokeObjectURL as unknown as typeof URL.revokeObjectURL;
+    mockFetch({
+      [clipUrl]:(init)=>{
+        clipRequests.push({url:`http://localhost:8000${clipUrl}`,init});
+        return new Response(new Blob(["video"]),{status:200,headers:{"Content-Type":"video/mp4"}});
+      },
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>jsonResponse([{...baseIncident,clip:{status:"ready",url:clipUrl}}]),
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    const {unmount}=await signIn();
+    expect(clipRequests).toHaveLength(0);
+
+    fireEvent.click(await screen.findByRole("button",{name:"Play incident clip"}));
+    const video=await screen.findByLabelText("Incident clip");
+    expect(video).toHaveAttribute("src","blob:incident-clip");
+    expect(clipRequests[0].url).toBe(`http://localhost:8000${clipUrl}`);
+    expect(clipRequests[0].init?.headers).toMatchObject({Authorization:"Bearer tok-123"});
+    expect(clipRequests[0].init?.credentials).toBe("include");
+    expect(createObjectURL).toHaveBeenCalledOnce();
+
+    unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:incident-clip");
+  });
+
+  it("shows a retryable error when loading a ready clip fails",async()=>{
+    const clipUrl="/api/v1/security/incidents/inc-1/clip";
+    mockFetch({
+      [clipUrl]:()=>jsonResponse({detail:"unavailable"},503),
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>jsonResponse([{...baseIncident,clip:{status:"ready",url:clipUrl}}]),
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    await signIn();
+    fireEvent.click(await screen.findByRole("button",{name:"Play incident clip"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load this incident clip.");
+    expect(screen.getByRole("button",{name:"Play incident clip"})).toBeEnabled();
+  });
+
+  it("updates clip retention with the schema's hold field and displays the returned hold state",async()=>{
+    let held=false;
+    let requestInit:RequestInit|undefined;
+    const clipUrl="/api/v1/security/incidents/inc-1/clip";
+    mockFetch({
+      "/security/incidents/inc-1/clip/hold":(init)=>{
+        requestInit=init;
+        held=JSON.parse(String(init?.body)).hold;
+        return jsonResponse({...baseIncident,clip:{status:"ready",url:clipUrl},clip_hold:held});
+      },
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>jsonResponse([{...baseIncident,clip:{status:"ready",url:clipUrl},clip_hold:held}]),
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    await signIn();
+    fireEvent.click(await screen.findByRole("button",{name:"Keep clip"}));
+    const kept=await screen.findByRole("button",{name:"Clip kept"});
+    expect(kept).toHaveAttribute("aria-pressed","true");
+    expect(requestInit?.method).toBe("PUT");
+    expect(requestInit?.headers).toMatchObject({Authorization:"Bearer tok-123"});
+    expect(requestInit?.credentials).toBe("include");
+    expect(JSON.parse(String(requestInit?.body))).toEqual({hold:true});
+  });
+
+  it("downloads the clip through authenticated fetch with download=true in the provided clip URL",async()=>{
+    const requests: {url:string;init?:RequestInit}[]=[];
+    const createObjectURL=vi.fn().mockReturnValue("blob:download-clip");
+    const revokeObjectURL=vi.fn();
+    const click=vi.spyOn(HTMLAnchorElement.prototype,"click").mockImplementation(()=>undefined);
+    const clipUrl="/api/v1/security/incidents/inc-1/clip?source=incident";
+    URL.createObjectURL=createObjectURL as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL=revokeObjectURL as unknown as typeof URL.revokeObjectURL;
+    mockFetch({
+      "/api/v1/security/incidents/inc-1/clip":(init,url)=>{
+        requests.push({url:url!,init});
+        return new Response(new Blob(["video"]),{status:200,headers:{"Content-Type":"video/mp4"}});
+      },
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
+      "/security/incidents":()=>jsonResponse([{...baseIncident,clip:{status:"ready",url:clipUrl}}]),
+      "/security/audit-log":()=>jsonResponse([]),
+    });
+    await signIn();
+    expect(requests).toHaveLength(0);
+    fireEvent.click(await screen.findByRole("button",{name:"Download clip"}));
+
+    await waitFor(()=>expect(requests).toHaveLength(1));
+    expect(requests[0].url).toBe("http://localhost:8000/api/v1/security/incidents/inc-1/clip?source=incident&download=true");
+    expect(requests[0].url).toContain("source=incident");
+    expect(requests[0].url).not.toContain("tok-123");
+    expect(requests[0].init?.headers).toMatchObject({Authorization:"Bearer tok-123"});
+    expect(requests[0].init?.credentials).toBe("include");
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(click).toHaveBeenCalledOnce();
+    await waitFor(()=>expect(revokeObjectURL).toHaveBeenCalledWith("blob:download-clip"));
+    click.mockRestore();
   });
 
   it("switches arming mode with a PUT request", async()=>{

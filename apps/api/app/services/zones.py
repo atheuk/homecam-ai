@@ -89,6 +89,7 @@ async def create_zone(session: AsyncSession, camera_id: str, payload) -> CameraZ
         y2=payload.y2,
         points=getattr(payload, "points", None) or None,
         dwell_seconds=getattr(payload, "dwell_seconds", None),
+        alerts_enabled=payload.alerts_enabled,
         created_at=now,
         updated_at=now,
     )
@@ -116,6 +117,8 @@ async def update_zone(session: AsyncSession, zone: CameraZone, payload) -> Camer
         value = getattr(payload, field, None)
         if value is not None:
             setattr(zone, field, value)
+    if payload.alerts_enabled is not None:
+        zone.alerts_enabled = payload.alerts_enabled
     if points is not None:
         # An explicit empty list turns a polygon back into its rectangle.
         zone.points = points or None

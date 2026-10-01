@@ -18,12 +18,14 @@ from __future__ import annotations
 import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..db import get_db
-from ..models.db import ArmingSchedule, Incident, User
+from ..models.db import ArmingSchedule, Incident, IncidentClip, User
 from ..schemas import (
     ArmingScheduleIn,
     ArmingScheduleOut,
@@ -35,6 +37,7 @@ from ..schemas import (
     IncidentExportOut,
     IncidentOut,
     IntegrationModeIn,
+    RetentionHoldIn,
     SecurityModeIn,
     SecurityModeOut,
 )
@@ -214,6 +217,61 @@ async def get_incident(
     incident_id: str, session: AsyncSession = Depends(get_db), _user: User = Depends(get_current_user)
 ):
     incident = await _get_incident_or_404(session, incident_id)
+    return incident_service.to_dict(incident)
+
+
+@router.get("/incidents/{incident_id}/clip")
+async def incident_clip(
+    incident_id: str,
+    download: bool = False,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    incident = await _get_incident_or_404(session, incident_id)
+    if incident.clip_status != "ready":
+        raise HTTPException(status_code=404, detail="No clip available for this incident")
+    clip = await session.get(IncidentClip, incident_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="No clip available for this incident")
+    return Response(
+        content=clip.video,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'{"attachment" if download else "inline"}; filename="{incident_id}.mp4"',
+        },
+    )
+
+
+@router.put("/incidents/{incident_id}/clip/hold", response_model=IncidentOut)
+async def hold_incident_clip(
+    incident_id: str,
+    payload: RetentionHoldIn,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    incident = (await session.execute(
+        select(Incident).where(Incident.id == incident_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.clip_status != "ready":
+        raise HTTPException(status_code=409, detail="No completed clip to keep")
+    if await session.get(IncidentClip, incident_id) is None:
+        raise HTTPException(status_code=409, detail="No completed clip to keep")
+    incident.clip_hold = payload.hold
+    await audit_service.record(
+        session,
+        "incident.clip_hold_set" if payload.hold else "incident.clip_hold_cleared",
+        actor_user_id=user.id,
+        target_type="incident",
+        target_id=incident_id,
+        details={"hold": payload.hold},
+    )
+    await session.commit()
+    await session.refresh(incident)
     return incident_service.to_dict(incident)
 
 

@@ -1,187 +1,85 @@
-# Azure Deployment Plan
+# Incident video clips — Azure development release plan
 
-> **Status:** Ready for Validation
+> **Status:** Code prepared; release validation and deployment blocked pending coordination.
 
-Generated: 2026-10-01T12:50:00+02:00
-Updated: 2026-10-01T12:50:00+02:00
+## Scope and authorization
 
----
+Add short incident clips captured from the existing private HLS streams, retained
+in shared storage and served only through authenticated API routes. This is a
+code-and-additive-schema release to the existing North Europe development
+environment; no new public stream endpoints, credentials, or Azure resources.
+The user requested deployment eventually, but the coordinating session explicitly
+withheld authorization to merge or deploy until the rest of this release is ready.
+**Do not run Azure deployment operations, merge the PR, or reuse the previous
+release's authorization.**
 
-## 1. Project Overview
+## Existing target (verify again before deployment)
 
-**Goal:** Release HomeCam AI's modern security, mailbox, suspicious-behaviour, vehicle/wildlife recognition, and higher-resolution event-photo updates to the existing Azure development environment.
+- Subscription: Ate Lab (`83288725-b5b5-44ee-bb33-b1b0a38539cd`).
+- Resource group: `rg-homecam-ai`; location: `northeurope`.
+- Azure Container Apps: `ca-api-homecam-ai-dev-82ac`,
+  `ca-web-homecam-ai-dev-82ac`; existing migration job
+  `job-migrate-homecam-ai-dev-82ac`.
+- Preserve the API's Tailscale sidecar, existing secrets, ingress and private
+  access to the edge HLS relays; do not assume Azure can reach LAN RTSP.
+- Edge connectors and MediaMTX/go2rtc run outside Azure; coordinate their
+  availability independently of the Azure image rollout.
 
-**Path:** Modify Existing Application
+## Architecture and configuration
 
-**Release source tree:** `492b4da` (integration branch `atheuk-release-homecam-ai-security-updates`).
-PRs #20 and #21 are already on `main`. PRs #22-#25 are integrated on the release branch from merge base `7543e75207da13851be16acf5e967b745f26b526`; the integration PR to `main` must contain only those four PRs.
+The existing ingestion lease holder reads private fMP4 HLS from MediaMTX
+(Dahua) or go2rtc (Eufy), retains at most 8 MB of segments per camera and
+captures at most 16 MB per newly opened incident (8s pre/post by default).
+PostgreSQL admission allows at most 10 clips per UTC day and
+4,000,000,000 stored clip payload bytes total across replicas, including
+held evidence. Exhaustion marks new clips `skipped`; purged clips are `expired`.
+The completed clip is stored in PostgreSQL, accessible on both API replicas
+only via an authenticated `private, no-store` endpoint. A signed-in user
+can download it or place an audited retention hold; resolved unheld clips
+age out after 30 days. Incompatible/offline streams expose an unavailable
+status, not a clip. No new Azure resource is planned; check PostgreSQL
+capacity and private HLS connectivity before rollout.
+Additive migration head: `0015_incident_clips` (after `0014_notifications`).
+The same migration adds `camera_zones.alerts_enabled` defaulting true to
+preserve existing behavior; the zone editor exposes an optional alert toggle.
 
-**Authorization:** The user's explicit "go live" instruction authorizes this release to the existing development target.
+## Release checklist
 
----
+- [x] Implement and test clip capture, retention, authenticated playback, UI,
+      configuration, documentation and migration.
+- [x] Review security, multi-replica behavior and failure handling locally.
+- [x] Obtain green PR CI, including Linux Docker image builds (all backend,
+      frontend, edge and Docker checks passed on previous head; rerun on this
+      aggregate-budget revision before signoff).
+- [x] Open draft PR; **do not merge** until coordinator authorizes.
+- [ ] Obtain coordinator's explicit go-ahead and confirm subscription/location,
+      edge connectivity, storage headroom and existing image/revision baseline.
+      Confirm the current ~5 GB baseline on the 32 GB PostgreSQL server and
+      monitor headroom for clip payloads, indexes, WAL and other media.
+- [ ] Update this plan to `Ready for Validation`; run `azure-validate` and resolve
+      any issues before invoking `azure-deploy`.
+- [ ] Apply additive migration through existing job, then API and web images;
+      preserve sidecar, secrets, and rollback-ready revisions.
+- [ ] Verify authenticated clip playback, unavailable fallback, retention,
+      application health and rollback path in development.
 
-## 2. Requirements
+## Validation and rollback
 
-| Attribute | Value |
-|-----------|-------|
-| Classification | Development |
-| Scale | Small; existing Container Apps and database |
-| Budget | Cost-Optimized; no new Azure resources |
-| Subscription | Ate Lab (`83288725-b5b5-44ee-bb33-b1b0a38539cd`), current default |
-| Location | North Europe (`northeurope`) |
-| Resource group | `rg-homecam-ai` |
-| Container Apps environment | `cae-homecam-ai-dev-82ac` |
-
-The release updates existing application images and applies additive database migrations. It does not create a production target or provision new resources.
-
----
-
-## 3. Components Detected
-
-| Component | Type | Technology | Azure resource |
-|-----------|------|------------|----------------|
-| HomeCam API | API | Python 3.12 / FastAPI | `ca-api-homecam-ai-dev-82ac` |
-| Web application | SSR frontend | Next.js | `ca-web-homecam-ai-dev-82ac` |
-| Background worker | Worker | Python | `ca-worker-homecam-ai-dev-82ac` |
-| Database migration | Job | Alembic | `job-migrate-homecam-ai-dev-82ac` |
-| PostgreSQL | Database | Azure Database for PostgreSQL Flexible Server | `psql-homecam-ai-dev-82ac` |
-| Image registry | Registry | Azure Container Registry | `crhomecamaidev82ac` |
-| Home Assistant edge connector | Edge add-on | Python / Home Assistant | Outside this Azure deployment |
-
----
-
-## 4. Recipe Selection
-
-**Selected:** Existing Bicep-managed Azure Container Apps deployment with a targeted image rollout.
-
-**Rationale:** The application already runs in the named Container Apps environment. This release changes application code and database schema, not Azure resource topology. Do not redeploy the subscription-wide template or alter unrelated resources.
-
----
-
-## 5. Architecture and Release Settings
-
-### Existing service mapping
-
-| Component | Existing Azure service | Release action |
-|-----------|------------------------|----------------|
-| API | Azure Container Apps | Update only container `api`; preserve the `tailscale` sidecar, all environment values, and secret references |
-| Web | Azure Container Apps | Update web image; compile with the public API URL below |
-| Migrations | Azure Container Apps Job | Run `alembic upgrade head` using the release API image before API rollout |
-| PostgreSQL / ACR / Key Vault / Redis / monitoring | Existing resources | No topology or secret changes |
-
-### Public endpoints
-
-- API: `https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`
-- Web: `https://ca-web-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`
-
-Build the web image with `NEXT_PUBLIC_API_URL` set to the API URL above. Do not pass secrets as build arguments or write them to logs.
-
-### Current rollback baseline (read-only inventory)
-
-| Component | Image | Latest ready revision |
-|-----------|-------|-----------------------|
-| API | `crhomecamaidev82ac.azurecr.io/api:main-6be4098` | `ca-api-homecam-ai-dev-82ac--0000034` |
-| Web | `crhomecamaidev82ac.azurecr.io/web:ui-6be4098` | `ca-web-homecam-ai-dev-82ac--0000014` |
-
-The API currently has `api` and `tailscale` containers. Existing database, Redis, application, Foundry, and Tailscale secret references are present; only secret names were inspected. Keep them unchanged and do not read or print secret values.
-
-### Migrations
-
-Final Alembic head: `0012_ingestion_leases`.
-
-Required chain: `0009_zone_polygon` → `0010_security_essentials` → `0011_modern_ai_security` → `0012_ingestion_leases`. PRs #24 and #25 add no Alembic revisions. Run the existing migration job's `alembic upgrade head` with the release API image and its existing `DATABASE_URL` secret reference before updating the API image. Confirm the job succeeds and the database reports head `0012_ingestion_leases`. The schema changes are additive; do not downgrade or run destructive data operations.
-
-### Runtime configuration
-
-- Preserve the existing `FOUNDRY_VISION_DEPLOYMENT`, Foundry endpoint, API key reference, and AI feature flags.
-- The live API has no explicit `MAILBOX_*`, `INGESTION_LEASE_*`, `SUSPICIOUS_*`, `HOME_*`, or bird-threshold environment overrides. The release's safe application defaults therefore apply: mailbox detection and ingestion leases enabled, lease TTL 30 seconds, suspicious scoring enabled, home region `Netherlands, Northern Europe`, time zone `Europe/Amsterdam`, and bird confidence threshold `0.25`.
-- API best-photo defaults are `BEST_PHOTO_MIN_CROP_PIXELS=720`, `BEST_PHOTO_JPEG_QUALITY=94`, and `BEST_PHOTO_SNAPSHOT_TIMEOUT_SECONDS=4`. These are provided by the release settings defaults; do not replace existing app environment values.
-- `DAHUA_EVIDENCE_SNAPSHOT_TIMEOUT_SECONDS=3` is consumed by the Home Assistant edge add-on, not by an Azure Container App. Do not add it to the API app; the add-on itself is outside this Azure deployment.
-- Local Docker is unavailable. Require green integration-PR `docker-validate` CI and rely on that image validation.
-
-### Provisioning limit checklist
-
-| Resource type | Number to deploy | Total after release | Limit/quota | Notes |
-|---------------|------------------|---------------------|-------------|-------|
-| `Microsoft.App/managedEnvironments` | 0 | 1 existing | 20 | Previously validated in North Europe; no new environment |
-| `Microsoft.App/containerApps` | 0 | 5 existing | No quota change | Targeted image-only revisions |
-| `Microsoft.App/jobs` | 0 | 1 existing | No quota change | Reuse existing migration job |
-| `Microsoft.DBforPostgreSQL/flexibleServers` | 0 | 1 existing | No quota change | Additive schema migrations only |
-| `Microsoft.ContainerRegistry/registries` | 0 | 1 existing | No quota change | Reuse existing ACR |
-
-**Status:** No resource creation or quota increase is planned; existing capacity was previously validated.
-
----
-
-## 6. Execution Checklist
-
-### Preparation
-- [x] Analyze the existing deployment and choose the existing Bicep/Container Apps path.
-- [x] Confirm the subscription, region, resource group, current app images/revisions, containers, and secret-reference names.
-- [x] Confirm the release merge base and scope; exclude changes already on `main` from PRs #20/#21.
-- [x] Inspect the complete migration chain and release configuration defaults.
-- [x] Record rollback baseline and keep all deployment operations non-destructive.
-- [x] Obtain explicit user authorization to go live.
-- [x] Update this plan to `Ready for Validation`.
-
-### Required validation before deployment
-- [ ] Run `azure-validate` to completion against this release; do not deploy if any required check fails.
-- [ ] Validate Bicep build/lint and targeted what-if with no unrelated resource changes.
-- [ ] Run application tests/build checks and review static RBAC; confirm integration-PR CI is green.
-- [ ] Record actual commands, results, and timestamps in Section 7; only the validation workflow may set status `Validated`.
-
-### All validation checks pass
-- [ ] Core validation: Azure CLI/authentication, `az bicep build`, `az deployment sub validate`, and `az deployment sub what-if` using `infra/main.bicep` and release parameters.
-- [ ] Bicep lint and Azure Policy assignment review for the target subscription.
-- [ ] Container image validation from integration-PR CI; local Docker is unavailable.
-- [ ] Static RBAC review of `infra/modules/role-assignments.bicep`.
-
-**Validation constraint:** `infra/main.bicep` requires secure `administratorLoginPassword` and `secretKey` parameters. The committed parameter file supplies neither; the existing Key Vault contains `secret-key` but no PostgreSQL administrator password. The template also defaults `isPlaceholder=true`, which would preview placeholder app images unless overridden. Do not use dummy secret values or proceed with a what-if that does not accurately represent the existing deployment.
-
-### Deployment (only after validation succeeds)
-- [ ] Use `azure-deploy` for execution; do not run deployment commands outside that workflow.
-- [ ] Build and push API and web images tagged `release-492b4da`; build the web image with the public API URL.
-- [ ] Update the migration job to the release API image and run it; verify `alembic upgrade head` succeeds at `0012_ingestion_leases`.
-- [ ] Update the API image with `--container-name api` only; preserve the Tailscale sidecar, app settings, ingress, and secret references.
-- [ ] Update the web image after the API revision is healthy.
-- [ ] Verify the deployed revisions, 100% traffic, public API/web health, API URL in the frontend bundle, live streams, and photo authentication/cache behavior.
-- [ ] Update deployment and verification results in this plan.
-
----
-
-## 7. Validation Proof
-
-> Release-specific validation is pending. Do not mark this plan `Validated` until the `azure-validate` workflow has completed successfully.
-
-| Check | Command run | Result | Timestamp |
-|-------|-------------|--------|-----------|
-| API tests on resolved integration merge | `python -m pytest apps/api/tests -q` | 652 passed, 3 skipped | 2026-10-01 |
-| Ruff on resolved files | `python -m ruff check apps/api/app/api/routes.py apps/api/app/services/ingestion.py` | Pass | 2026-10-01 |
-| Bicep and Azure release validation | Pending `azure-validate` | Pending | Pending |
-| Integration PR CI, including Docker validation | Pending | Pending | Pending |
-
-**Validated by:** Pending `azure-validate`
-
----
-
-## 8. Rollback
-
-If the release causes an outage, stop further rollout and use the existing healthy Container Apps revision or restore the previous API/web image tags recorded above. Preserve the Tailscale sidecar and all current secrets. The migrations are additive; leave the database schema in place and do not downgrade it. No rollback is needed if the release is healthy.
-
----
-
-## 9. Post-Deployment Verification
-
-- Public HTTPS API `/health` and `/ready` respond successfully.
-- Database migration head is `0012_ingestion_leases`.
-- API and web revisions are healthy and receive expected traffic; API has both `api` and unchanged `tailscale` containers.
-- Web responds successfully and its built JavaScript targets the public API FQDN.
-- Camera `/live` endpoints, public HLS manifest/sub-manifest, and a live segment work over public HTTPS; do not use the Tailscale sidecar namespace as browser-access proof.
-- Crop/full-frame photo routes reject unauthenticated requests and return private, no-store responses; perform an authenticated download if credentials are safely available.
-- Check ingestion/log counters without exposing tokens, secret values, or private image data. Real inference results require new real detections and cannot be asserted without them.
-
----
-
-## 10. Historical Baseline
-
-The prior development deployment was validated and completed on 2026-09-24. It established the existing Container Apps environment, managed identity permissions, Tailscale sidecar, and public HLS relay. Those historical validation results are not substitutes for release-specific `azure-validate` checks.
+Current local results (2026-10-01): API 787 passed/3 skipped; Dahua edge 33 passed;
+Eufy edge 21 passed; web 195 passed, lint/typecheck/production build green;
+Python Ruff green; isolated SQLite `alembic upgrade head` reached
+`0015_incident_clips`. A targeted review identified two capture/hold races,
+both corrected before final regression testing. New aggregate admission
+limits passed local tests; a clip-hold/purge row-lock race was also addressed
+with a two-order transactional regression. Fresh PR CI is required before
+signoff. Previous PR CI passed on the
+earlier release commit, including Linux Docker image builds; a real private HLS playback
+check still requires the development edge environment. Do not mark this
+release `Validated` using
+earlier release results; invoke `azure-validate` once deployment is authorized.
+The release must preserve the API's `tailscale` sidecar and existing secret
+references, run the migration job with the new API image before switching the
+API/web image, and confirm both healthy revisions before traffic cutover.
+Capture an up-to-date rollback image/revision baseline before deployment.
+On failure restore the previous healthy API/web Container Apps revisions; keep
+the additive schema intact and do not delete media during rollback.

@@ -159,6 +159,7 @@ class CameraZone(Base):
     # "fine to stand in" can be given a long threshold instead of being
     # excluded entirely.
     dwell_seconds: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -539,8 +540,18 @@ class Incident(Base):
     # Always a reference to evidence the pipeline already stored - this is
     # never a second copy of any imagery.
     evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    clip_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    clip_hold: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class IncidentClip(Base):
+    __tablename__ = "incident_clips"
+    incident_id: Mapped[str] = mapped_column(String(64), ForeignKey("incidents.id"), primary_key=True)
+    video: Mapped[bytes] = mapped_column(LargeBinary)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AuditLog(Base):

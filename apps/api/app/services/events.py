@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -20,6 +21,7 @@ from ..models.db import Event, EventEvidence
 from . import activities as activity_service
 from . import ai_pipeline
 from . import incidents as incident_service
+from . import incident_clips
 from . import security_modes
 from . import signals as signal_service
 from . import scene_dedup
@@ -153,7 +155,10 @@ async def create_and_broadcast_event(
     (same transaction), which incident routing copies into
     ``Incident.evidence``.
     """
+    clip_triggered_at = time.monotonic()
+    clip_seed = incident_clips.seed(event["camera_id"])
     row = await persist_event(session, event)
+    clip_capture = incident_clips.capture(event["camera_id"], clip_seed, clip_triggered_at)
     event_id = row.id
     if evidence_images:
         try:
@@ -239,13 +244,17 @@ async def create_and_broadcast_event(
         # incident-routing failure can never suppress or delay the event.
         # ``mode`` is the mode captured above, before enrichment, not
         # whatever is active now (see comment above).
-        await incident_service.route_event(session, row, mode=mode_at_detection)
+        incident = await incident_service.route_event(session, row, mode=mode_at_detection)
+        if incident is not None and incident.event_ids[0] == row.id:
+            await incident_clips.start(incident, clip_capture)
+            clip_capture = None
     except Exception:  # noqa: BLE001 - incident routing must never break ingestion
         logger.exception("incident routing failed for %s", event_id)
         # Callers keep using ``row`` after this returns (scene ingestion
         # links the event to its track and logs ``row.id``), so the row has
         # to survive the rollback as a usable object, not an expired one.
         await _recover(session, row, event_id)
+    await incident_clips.discard(clip_capture)
     return row
 
 

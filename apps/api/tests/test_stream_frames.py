@@ -122,6 +122,35 @@ def _reader(relay: _Relay, decoded: list) -> tuple[StreamFrameReader, httpx.Asyn
     return StreamFrameReader("dahua-channel-2", hub, resolve, lambda: client, decoder), client, hub
 
 
+async def test_clip_buffer_is_bounded_and_discards_playlist_gaps(monkeypatch):
+    class ClipRelay(_Relay):
+        def handler(self, request):
+            if request.url.path.endswith("init.mp4"):
+                return httpx.Response(200, content=b"\x00\x00\x00\x10ftypisom")
+            if "_seg" in request.url.path:
+                return httpx.Response(200, content=b"\x00\x00\x00\x10moof" + b"x" * 8)
+            return super().handler(request)
+
+    relay = ClipRelay()
+    reader, client, hub = _reader(relay, [])
+    monkeypatch.setattr(settings, "incident_clip_buffer_bytes", 40)
+    hub._readers[reader.camera_id] = reader
+    try:
+        await reader.fetch_once(client)
+        assert len(hub.clip_segments(reader.camera_id)) == 1
+        relay.last = 10
+        await reader.fetch_once(client)
+        assert len(hub.clip_segments(reader.camera_id)) == 2
+        relay.last = 11
+        await reader.fetch_once(client)
+        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [2, 3]
+        relay.last = 14
+        await reader.fetch_once(client)
+        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [4]
+    finally:
+        await client.aclose()
+
+
 async def test_reader_decodes_only_the_newest_segment_and_keeps_it_in_memory():
     relay, decoded = _Relay(), []
     reader, client, hub = _reader(relay, decoded)

@@ -81,6 +81,8 @@ type Incident = {
   escalation_level: number;
   summary: string;
   ai_summary: string | null;
+  clip?: { status: "pending" | "ready" | "unavailable" | "skipped" | "expired"; url: string | null };
+  clip_hold?: boolean;
   evidence?:{score?:number;reasons?:string[];event_ids?:string[]}|null;
 };
 
@@ -142,6 +144,109 @@ function IncidentCard({
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [events, setEvents] = useState<IncidentEvent[] | null>(null);
+  const [clipObjectUrl, setClipObjectUrl] = useState<string | null>(null);
+  const [clipLoading, setClipLoading] = useState(false);
+  const [clipDownloading, setClipDownloading] = useState(false);
+  const [clipHold, setClipHold] = useState(incident.clip_hold ?? false);
+  const [clipHoldBusy, setClipHoldBusy] = useState(false);
+  const [clipError, setClipError] = useState<string | null>(null);
+  const clipObjectUrlRef = useRef<string | null>(null);
+  const clipRequestRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    clipRequestRef.current?.abort();
+    clipRequestRef.current = null;
+    if (clipObjectUrlRef.current) URL.revokeObjectURL(clipObjectUrlRef.current);
+  }, []);
+
+  useEffect(() => {
+    setClipHold(incident.clip_hold ?? false);
+  }, [incident.clip_hold]);
+
+  function resolveClipUrl(download = false): URL {
+    if (!incident.clip?.url) throw new Error("Incident clip URL is missing.");
+    const apiUrl = new URL(API, window.location.href);
+    const clipUrl = new URL(incident.clip.url, apiUrl);
+    if (clipUrl.origin !== apiUrl.origin) throw new Error("Incident clip URL is not trusted.");
+    if (download) clipUrl.searchParams.set("download", "true");
+    return clipUrl;
+  }
+
+  async function playClip() {
+    if (incident.clip?.status !== "ready" || clipLoading || clipObjectUrl) return;
+    setClipLoading(true);
+    setClipError(null);
+    const controller = new AbortController();
+    clipRequestRef.current = controller;
+    try {
+      const r = await fetch(resolveClipUrl().href, {
+        headers: authHeaders(token),
+        credentials: "include",
+        signal: controller.signal,
+      });
+      if (!r.ok) throw new Error("Clip request failed.");
+      const blob = await r.blob();
+      if (controller.signal.aborted) return;
+      const objectUrl = URL.createObjectURL(blob);
+      clipObjectUrlRef.current = objectUrl;
+      setClipObjectUrl(objectUrl);
+    } catch (cause) {
+      if (!(cause instanceof Error && cause.name === "AbortError")) {
+        setClipError("Could not load this incident clip. Please try again.");
+      }
+    } finally {
+      if (clipRequestRef.current === controller) {
+        clipRequestRef.current = null;
+        setClipLoading(false);
+      }
+    }
+  }
+
+  async function downloadClip() {
+    if (incident.clip?.status !== "ready" || !incident.clip.url || clipDownloading) return;
+    setClipDownloading(true);
+    setClipError(null);
+    try {
+      const r = await fetch(resolveClipUrl(true).href, {
+        headers: authHeaders(token),
+        credentials: "include",
+      });
+      if (!r.ok) throw new Error("Clip download request failed.");
+      const objectUrl = URL.createObjectURL(await r.blob());
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = `incident-${incident.id}-clip.mp4`;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch {
+      setClipError("Could not download this incident clip. Please try again.");
+    } finally {
+      setClipDownloading(false);
+    }
+  }
+
+  async function toggleClipHold() {
+    if (clipHoldBusy) return;
+    setClipHoldBusy(true);
+    setClipError(null);
+    try {
+      const r = await fetch(`${API}/api/v1/security/incidents/${incident.id}/clip/hold`, {
+        method: "PUT",
+        headers: authHeaders(token),
+        credentials: "include",
+        body: JSON.stringify({ hold: !clipHold }),
+      });
+      if (!r.ok) throw new Error("Clip retention request failed.");
+      const updatedIncident = await r.json() as { clip_hold?: unknown };
+      if (typeof updatedIncident.clip_hold !== "boolean") throw new Error("Clip retention response was invalid.");
+      setClipHold(updatedIncident.clip_hold);
+      onChanged();
+    } catch {
+      setClipError("Could not update clip retention. Please try again.");
+    } finally {
+      setClipHoldBusy(false);
+    }
+  }
 
   async function act(action: "acknowledge" | "resolve") {
     setBusy(true);
@@ -233,6 +338,36 @@ function IncidentCard({
         {cameraName}{incident.zone ? ` · ${incident.zone}` : ""} · {incident.event_count} event{incident.event_count === 1 ? "" : "s"} ·
         mode was {incident.mode_at_creation}
       </p>
+      {incident.clip && (
+        <div className="incident-clip">
+          {incident.clip.status === "pending" && <p className="muted">Incident clip is being prepared.</p>}
+          {incident.clip.status === "unavailable" && <p className="muted">No clip is available for this incident.</p>}
+          {incident.clip.status === "skipped" && <p className="muted">Clip skipped: daily or storage limit reached.</p>}
+          {incident.clip.status === "expired" && <p className="muted">This incident clip has expired.</p>}
+          {incident.clip.status === "ready" && !incident.clip.url && <p className="muted">No clip is available for this incident.</p>}
+          {incident.clip.status === "ready" && incident.clip.url && (
+            <div className="incident-clip-actions">
+              {!clipObjectUrl && <button type="button" disabled={clipLoading} onClick={playClip}>
+                {clipLoading ? "Loading clip…" : "Play incident clip"}
+              </button>}
+              <button type="button" disabled={clipDownloading} onClick={downloadClip}>
+                {clipDownloading ? "Preparing download…" : "Download clip"}
+              </button>
+              <button
+                type="button"
+                className={clipHold ? "active" : ""}
+                aria-pressed={clipHold}
+                disabled={clipHoldBusy}
+                onClick={toggleClipHold}
+              >
+                {clipHoldBusy ? "Updating hold…" : clipHold ? "Clip kept" : "Keep clip"}
+              </button>
+            </div>
+          )}
+          {clipError && <p className="error" role="alert">{clipError}</p>}
+          {clipObjectUrl && <video className="incident-clip-video" controls preload="metadata" aria-label="Incident clip" src={clipObjectUrl} />}
+        </div>
+      )}
       <div className="incident-actions">
         {incident.status === "open" && <button type="button" disabled={busy} onClick={() => act("acknowledge")}>Acknowledge</button>}
         {incident.status !== "resolved" && <button type="button" disabled={busy} onClick={() => act("resolve")}>Resolve</button>}

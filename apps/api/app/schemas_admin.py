@@ -149,6 +149,7 @@ class CameraZoneIn(BaseModel):
     )
     #: Loitering threshold for this zone; ``None`` uses the configured default.
     dwell_seconds: float | None = Field(default=None, gt=0.0, le=86400.0)
+    alerts_enabled: bool = True
 
     @model_validator(mode="after")
     def check_geometry(self) -> "CameraZoneIn":
@@ -170,6 +171,7 @@ class CameraZoneUpdate(BaseModel):
         default=None, max_length=MAX_ZONE_POINTS
     )
     dwell_seconds: float | None = Field(default=None, gt=0.0, le=86400.0)
+    alerts_enabled: bool | None = None
 
     @model_validator(mode="after")
     def check_geometry(self) -> "CameraZoneUpdate":
@@ -208,6 +210,7 @@ class CameraZoneOut(BaseModel):
     y2: float
     points: list[list[float]] | None = None
     dwell_seconds: float | None = None
+    alerts_enabled: bool
     created_at: datetime
     updated_at: datetime
 

@@ -223,6 +223,7 @@ describe("ZoneEditor", () => {
     expect(body).toEqual({
       name: "Front mailbox",
       kind: "mailbox",
+      alerts_enabled: true,
       points: [
         [0.1, 0.1],
         [0.5, 0.1],
@@ -243,6 +244,7 @@ describe("ZoneEditor", () => {
         return jsonResponse({ id: "z1" }, 201);
       },
     });
+
     renderEditor();
     await screen.findByAltText("Current view from camera cam-1");
     const surface = sizeSurface(200, 100);
@@ -254,6 +256,27 @@ describe("ZoneEditor", () => {
 
     await screen.findByText("Zone saved.");
     expect(body.dwell_seconds).toBe(90);
+  });
+
+  it("saves a zone with alerts disabled", async () => {
+    let body: Record<string, unknown> = {};
+    mockFetch({
+      "/still": () => jsonResponse(STILL),
+      "/zones": (init) => {
+        body = JSON.parse(String(init?.body));
+        return jsonResponse({ id: "z1" }, 201);
+      },
+    });
+    renderEditor();
+    await screen.findByAltText("Current view from camera cam-1");
+    const surface = sizeSurface(200, 100);
+    clickAt(surface, 20, 10);
+    clickAt(surface, 100, 10);
+    clickAt(surface, 60, 80);
+    fireEvent.click(screen.getByLabelText("Alert for activity in this zone"));
+    fireEvent.click(screen.getByText("Save drawn zone"));
+    await screen.findByText("Zone saved.");
+    expect(body.alerts_enabled).toBe(false);
   });
 
   it("rejects a non-positive loitering threshold before contacting the API", async () => {

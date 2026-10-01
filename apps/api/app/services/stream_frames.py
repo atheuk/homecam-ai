@@ -72,6 +72,14 @@ class FrameSample:
         return (time.monotonic() if now is None else now) - self.captured_at
 
 
+@dataclass(frozen=True)
+class ClipSegment:
+    init: bytes
+    data: bytes
+    captured_at: float
+    seq: int
+
+
 @dataclass
 class ReaderStats:
     ok: int = 0
@@ -259,6 +267,8 @@ class StreamFrameReader:
         self._init: tuple[str, bytes] | None = None
         self._seq = 0
         self._failures = 0
+        self.clip_segments: deque[ClipSegment] = deque()
+        self._clip_bytes = 0
 
     async def run(self) -> None:
         client = self._client_factory()
@@ -278,16 +288,20 @@ class StreamFrameReader:
                     self._failures += 1
                     self.stats.failed += 1
                     self.stats.last_error = f"{type(exc).__name__}: {exc}"[:200]
+                    self.clip_segments.clear()
+                    self._clip_bytes = 0
                     if self._failures >= _RERESOLVE_AFTER_FAILURES:
                         self._manifest_url = None
                         self._media_url = None
                         self._init = None
+                        self.clip_segments.clear()
+                        self._clip_bytes = 0
                     delay = min(
                         _MAX_BACKOFF_SECONDS,
                         settings.stream_sample_interval_seconds * (2 ** min(self._failures - 1, 5)),
                     )
                 self.hub.maybe_log_stats(self)
-                await asyncio.sleep(delay)
+                await asyncio.sleep(min(delay, 1.5) if settings.incident_clips_enabled and not self._failures else delay)
         finally:
             await client.aclose()
 
@@ -314,6 +328,18 @@ class StreamFrameReader:
         if self.latest is not None and self.latest.segment == segment_url:
             self.stats.unchanged += 1
             return False
+        if self.latest is not None and self.clip_segments:
+            available = [
+                urljoin(self._media_url, line.strip())
+                for line in playlist.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            if (
+                self.latest.segment not in available
+                or available.index(segment_url) - available.index(self.latest.segment) != 1
+            ):
+                self.clip_segments.clear()
+                self._clip_bytes = 0
 
         init = b""
         if init_url:
@@ -329,7 +355,23 @@ class StreamFrameReader:
             self.hub.aspect_ratio(self.camera_id),
         )
         self._seq += 1
-        self.latest = FrameSample(tuple(frames), time.monotonic(), self._seq, segment_url)
+        captured_at = time.monotonic()
+        self.latest = FrameSample(tuple(frames), captured_at, self._seq, segment_url)
+        if settings.incident_clips_enabled:
+            if self.clip_segments and self.clip_segments[-1].init != init:
+                self.clip_segments.clear()
+                self._clip_bytes = 0
+            if init.startswith(b"\x00\x00") and b"ftyp" in init[:16] and b"moof" in segment[:32]:
+                size = len(segment)
+                if size <= settings.incident_clip_buffer_bytes:
+                    self.clip_segments.append(ClipSegment(init, segment, captured_at, self._seq))
+                    self._clip_bytes += size
+            cutoff = captured_at - settings.incident_clip_pre_seconds - 4
+            while self.clip_segments and (
+                self.clip_segments[0].captured_at < cutoff
+                or self._clip_bytes > settings.incident_clip_buffer_bytes
+            ):
+                self._clip_bytes -= len(self.clip_segments.popleft().data)
         self.stats.ok += 1
         return True
 
@@ -444,6 +486,14 @@ class StreamFrameHub:
             return None
         limit = settings.stream_frame_max_age_seconds if max_age is None else max_age
         return reader.latest if reader.latest.age() <= limit else None
+
+    def clip_segments(self, camera_id: str) -> tuple[ClipSegment, ...]:
+        reader = self._readers.get(camera_id)
+        if reader is None or getattr(reader, "unsupported", False) or reader.latest is None:
+            return ()
+        if reader.latest.age() > settings.stream_frame_max_age_seconds:
+            return ()
+        return tuple(getattr(reader, "clip_segments", ()))
 
     def idle(self, camera_id: str) -> bool:
         touched = self._touched.get(camera_id)
