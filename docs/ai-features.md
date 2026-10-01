@@ -120,8 +120,10 @@ written in the same transaction as the `event_evidence` rows. If storing the
 evidence fails, the event is kept without URLs, so it never advertises evidence
 that returns 404.
 
-Both API replicas run ingestion with their own in-process scene caches, so both
-can observe the same removal. Before a mailbox event (removal, delivery,
+Each camera is ingested by one replica at a time: the holder of its
+`ingestion_leases` row (see `docs/ai-pipeline.md`, "One ingester per camera").
+The dedup claim below is a second safeguard for the handover window. Before a
+mailbox event (removal, delivery,
 retrieval, opening or visit) is emitted, the replica must win a database
 claim on `<transition>:<camera>:<zone>` (for example
 `mailbox_retrieval:<camera>:<zone>`) in `scene_dedup_claims`

@@ -370,6 +370,18 @@ replicas, by a DB claim on `<transition>:<camera>:<zone>` (window
 openings/visits). The pre-existing "person at the mailbox" event from zone
 semantics is unchanged.
 
+*One ingester per camera.* Scene state (vehicle tracks, bin and mailbox
+records, the lid reference crop) is cached in memory and written back after
+every frame, so two replicas ingesting the same camera would overwrite each
+other's newer state. A per-camera lease in `ingestion_leases`
+(`app/services/ingestion_lease.py`) prevents this. Only the holder samples the
+camera and advances its scene state. It renews the lease every
+`INGESTION_LEASE_TTL_SECONDS / 2` with a conditional `UPDATE`, and other
+replicas stand by. A standby takes over once the lease is older than the TTL,
+or immediately after a clean shutdown releases it. Gaining or losing a lease
+drops the cached scene, so the new holder resumes from the database. A
+replica that loses a lease also stops its stream reader for that camera.
+
 **Bins** — add a zone of kind `bin` around the curb spot (off until you do).
 Every `BIN_CHECK_INTERVAL_SECONDS`, when no person/vehicle occludes it, the
 zone is compared with a brightness-normalized baseline; a change stable for

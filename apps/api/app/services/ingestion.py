@@ -46,7 +46,7 @@ from ..ai import camera_health
 from ..config import settings
 from ..db import SessionLocal
 from ..providers.base import CameraNotFoundError, CameraOfflineError, ProviderUnavailableError
-from . import ai_pipeline, scene_dedup, scene_state
+from . import ai_pipeline, ingestion_lease, scene_dedup, scene_state
 from . import events as event_service
 from . import incidents as incident_service
 from .provider_registry import discover_all_cameras, find_provider_for_camera
@@ -115,6 +115,30 @@ async def _acquire_frame(camera_id: str, provider) -> tuple[bytes, list[bytes] |
     return image, None, "snapshot"
 
 
+async def _lead(session_factory, camera_id: str) -> bool:
+    """Whether this replica ingests ``camera_id`` right now.
+
+    Only the ingestion lease holder samples a camera and advances its scene
+    state. Gaining or losing the lease drops the cached scene so it is
+    reloaded from the database, which the previous holder kept current.
+    """
+    if not settings.ingestion_lease_enabled:
+        return True
+    keeper = ingestion_lease.keeper
+    try:
+        async with session_factory() as session:
+            status = await keeper.ensure(session, camera_id)
+    except Exception as exc:  # noqa: BLE001 - keep going on a lease we still hold
+        logger.warning("ingestion lease check failed for %s: %s", camera_id, exc)
+        return keeper.held(camera_id)
+    if status.changed:
+        scene_state.forget(camera_id)
+        _last_stream_seq.pop(camera_id, None)
+        if not status.held:
+            stream_hub.release(camera_id)
+    return status.held
+
+
 async def poll_once(session_factory=SessionLocal) -> int:
     """Run a single ingestion pass over every discovered camera.
 
@@ -126,6 +150,8 @@ async def poll_once(session_factory=SessionLocal) -> int:
     for camera in await discover_all_cameras(settings.camera_discovery_cache_seconds):
         camera_id = camera.get("id")
         if not camera_id:
+            continue
+        if not await _lead(session_factory, camera_id):
             continue
         camera_name = str(camera.get("name") or camera_id)
         # Camera-health (offline transition) must be evaluated for *every*
@@ -503,6 +529,7 @@ def reset_cooldowns() -> None:
     _stats_since.clear()
     stream_hub.clear_boosts()
     scene_state.reset_memory()
+    ingestion_lease.keeper.reset()
 
 
 class IngestionService:
@@ -530,6 +557,12 @@ class IngestionService:
             pass
         self._task = None
         await stream_hub.stop()
+        if settings.ingestion_lease_enabled:
+            try:
+                async with SessionLocal() as session:
+                    await ingestion_lease.keeper.release_all(session)
+            except Exception as exc:  # noqa: BLE001 - shutdown must not fail; leases expire anyway
+                logger.warning("could not release ingestion leases: %s", exc)
 
     async def _run(self) -> None:
         while True:

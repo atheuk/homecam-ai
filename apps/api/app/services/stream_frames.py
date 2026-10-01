@@ -393,6 +393,16 @@ class StreamFrameHub:
     def clear_boosts(self) -> None:
         self._boost_until.clear()
 
+    def release(self, camera_id: str) -> None:
+        """Stop reading ``camera_id`` (this replica no longer ingests it), so
+        a standby replica never holds an extra NVR stream session."""
+        task = self._tasks.pop(camera_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._readers.pop(camera_id, None)
+        self._touched.pop(camera_id, None)
+        self._boost_until.pop(camera_id, None)
+
     def boosted(self, camera_id: str | None = None) -> bool:
         """Whether ``camera_id`` (or, with ``None``, any camera) is boosted."""
         now = time.monotonic()

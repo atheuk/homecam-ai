@@ -198,6 +198,24 @@ class SceneDedupClaim(Base):
     event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class IngestionLease(Base):
+    """Which replica currently ingests a camera.
+
+    Only the holder samples the camera and advances its scene state
+    (vehicles, bins, mailbox), so two replicas never interleave stale
+    in-memory scene caches. The lease is taken and renewed with a
+    conditional UPDATE/INSERT and expires after a TTL, letting a standby
+    replica take over - see :mod:`app.services.ingestion_lease`.
+    ``expires_at`` is epoch seconds.
+    """
+
+    __tablename__ = "ingestion_leases"
+    camera_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[float] = mapped_column(Float)
+    acquired_at: Mapped[float] = mapped_column(Float)
+
+
 class EventEvidence(Base):
     """Labelled evidence images for an event (e.g. package before/after).
 

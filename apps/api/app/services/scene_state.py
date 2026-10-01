@@ -195,6 +195,16 @@ def reset_memory() -> None:
     _mailbox_stats.clear()
 
 
+def forget(camera_id: str) -> None:
+    """Drop one camera's cached scene so the next frame reloads it from the
+    database. Called whenever this replica gains or loses the camera's
+    ingestion lease: another replica may have advanced the state meanwhile."""
+    scene = _scenes.pop(camera_id, None)
+    if scene is not None:
+        for task, _ in scene.pending.values():
+            task.cancel()
+
+
 def _overlap(track_box: BoundingBox, box: BoundingBox) -> float:
     inter = intersection_area(track_box, box)
     if inter <= 0:
@@ -245,6 +255,12 @@ async def _load(session: AsyncSession, camera_id: str) -> CameraScene:
     scene = _scenes.get(camera_id)
     if scene is not None:
         return scene
+    scene = await _read(session, camera_id)
+    _scenes[camera_id] = scene
+    return scene
+
+
+async def _read(session: AsyncSession, camera_id: str) -> CameraScene:
     scene = CameraScene(camera_id=camera_id)
     rows = (
         await session.execute(select(VehicleTrack).where(VehicleTrack.camera_id == camera_id))
@@ -267,7 +283,6 @@ async def _load(session: AsyncSession, camera_id: str) -> CameraScene:
                 state=row.state,
                 data=dict(row.data or {}),
             )
-    _scenes[camera_id] = scene
     return scene
 
 
@@ -451,8 +466,13 @@ async def note_event(session: AsyncSession, transition: SceneTransition, event_i
 
 
 async def snapshot(session: AsyncSession, camera_id: str) -> dict:
-    """Current state for the admin/verification endpoint."""
-    scene = await _load(session, camera_id)
+    """Current state for the admin/verification endpoint.
+
+    A replica that does not ingest this camera has no cached scene (it is
+    dropped when the lease is lost) and reads the database afresh without
+    caching, so it never later resumes from a stale copy.
+    """
+    scene = _scenes.get(camera_id) or await _read(session, camera_id)
     return {
         "camera_id": camera_id,
         "observed_since": _iso(scene.observed_since),

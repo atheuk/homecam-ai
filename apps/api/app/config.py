@@ -343,6 +343,15 @@ class Settings(BaseSettings):
     search_candidate_limit: int = Field(default=500, ge=1, le=5000)
     search_default_limit: int = Field(default=20, ge=1, le=200)
 
+    # Per-camera ingestion leader lease. With several API replicas only the
+    # lease holder samples a camera and advances its scene state; the others
+    # stand by and take over once the lease is TTL seconds stale.
+    ingestion_lease_enabled: bool = True
+    ingestion_lease_ttl_seconds: float = Field(default=30.0, gt=0.0)
+    # Stable name for this replica in the lease table. Empty means
+    # "<hostname>-<pid>-<random>", which is unique per process.
+    ingestion_replica_id: str = ""
+
     # Loitering: a person continuously present in one zone for longer than
     # that zone's dwell threshold. Per-zone ``dwell_seconds`` overrides this
     # default. Presence is tracked in the database, not in memory, because
