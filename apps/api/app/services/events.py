@@ -284,6 +284,8 @@ def to_dict(row: Event) -> dict:
         "person_confidence": row.person_confidence,
         "person_confirmed": bool(row.person_confirmed),
         "photo_rating": row.photo_rating,
+        # Human "keep this" marker; exempts the event from retention purges.
+        "retention_hold": bool(row.retention_hold),
         "photo_caption": metadata.get("photo_caption"),
         # Detection borders, already expressed in the stored photo's own
         # coordinates by the AI pipeline, so the UI can draw them directly

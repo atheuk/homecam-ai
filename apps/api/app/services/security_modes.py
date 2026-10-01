@@ -3,7 +3,9 @@
 Deliberately deterministic and independent of any AI/ML component: the mode
 is a plain human decision persisted in :class:`~app.models.db.SecurityState`,
 and every other module in this feature (``incidents.py``, ``camera_health``)
-only ever *reads* it. Nothing in this module infers or auto-changes a mode.
+only ever *reads* it. Nothing in this module infers a mode from camera
+content; the only non-human writer is ``app.services.arming_schedules``,
+which applies the household's own configured, audited time windows.
 
 Per-zone behaviour is derived from the zone's ``kind`` (see
 ``app.ai.zones.ZONE_KINDS``) rather than a new per-zone override field, to
@@ -67,21 +69,39 @@ async def get_mode(session: AsyncSession) -> str:
     return state.mode
 
 
-async def set_mode(session: AsyncSession, mode: str, changed_by: str | None) -> SecurityState:
+async def set_mode(
+    session: AsyncSession,
+    mode: str,
+    changed_by: str | None,
+    *,
+    source: str = "manual",
+    actor_label: str | None = None,
+) -> SecurityState:
+    """Set the arming mode explicitly (a human, or an external automation).
+
+    Deliberately leaves ``last_transition_at`` alone. That column records
+    the last *scheduled* boundary applied, so an explicit change here
+    stands until the next scheduled transition arrives and takes the
+    household back onto its schedule - "override until the next scheduled
+    transition" with no separate expiry to keep in sync. See
+    :mod:`app.services.arming_schedules`.
+    """
     if mode not in MODES:
         raise ValueError(f"Unknown security mode: {mode!r}")
     state = await get_state(session)
     previous_mode = state.mode
     state.mode = mode
     state.changed_by = changed_by
+    state.changed_source = source
     state.changed_at = datetime.now(timezone.utc)
     await audit_service.record(
         session,
         "security.mode_changed",
         actor_user_id=changed_by,
+        actor_label=actor_label,
         target_type="security_state",
         target_id=STATE_ID,
-        details={"from": previous_mode, "to": mode},
+        details={"from": previous_mode, "to": mode, "source": source},
     )
     await session.commit()
     await session.refresh(state)
@@ -93,4 +113,5 @@ def to_dict(state: SecurityState) -> dict:
         "mode": state.mode,
         "changed_by": state.changed_by,
         "changed_at": state.changed_at.isoformat(),
+        "changed_source": state.changed_source or "manual",
     }

@@ -24,6 +24,10 @@ _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
 os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db_path}"
 os.environ.setdefault("APP_ENV", "development")
+# The arming scheduler is a background timer that would otherwise re-arm the
+# household mid-test the moment a schedule row exists. Schedule behaviour is
+# tested by calling ``tick()``/``apply_due_transition`` directly instead.
+os.environ.setdefault("ARMING_SCHEDULER_ENABLED", "false")
 # Best-photo files must land in a throwaway directory, never the repo.
 _media_root = tempfile.mkdtemp(prefix="homecam-media-")
 os.environ["MEDIA_ROOT"] = _media_root

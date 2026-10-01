@@ -73,9 +73,11 @@ across replicas.
 ## Arming modes
 
 `security_state` is a single-row table: `mode` ∈ `disarmed | home | away |
-night`, plus `changed_by` (user id) and `changed_at`. Every change goes
-through `PUT /api/v1/security/mode` (auth required) and is recorded in the
-audit trail — there is no code path that changes it automatically.
+night`, plus `changed_by` (user id), `changed_at`, `changed_source`
+(`manual | schedule | integration`) and `last_transition_at` (the most
+recent *scheduled* boundary that has been applied). Every change goes
+through `PUT /api/v1/security/mode` (auth required) or the scheduler, and
+is recorded in the audit trail.
 
 Per-zone behavior when routing a detection event to an incident
 (`app/services/security_modes.py::is_alert_armed`, called from
@@ -96,6 +98,82 @@ a person detected at the front door/entry while everyone is home should not
 page anyone. It reuses the existing zone editor and kind vocabulary rather
 than inventing new UI, so it is safe with zones that predate this change
 (an unset/`other` kind is treated the same as any non-vehicle kind).
+
+## Automatic arming schedules
+
+Modes can also change on a recurring schedule — "night from 23:00 to 07:00
+every day", "away on weekdays 09:00–17:00" — instead of only by hand.
+
+**Model** (`arming_schedules`, migration `0013`): `name`, `mode`,
+`days_of_week` (JSON list, 0 = Monday), `start_time`/`end_time` as `HH:MM`
+*wall-clock* strings, `enabled`, `priority`. A window is `[start, end)`;
+when `end <= start` it wraps past midnight, and `start == end` means the
+whole day. Times are resolved in `ARMING_SCHEDULE_TIMEZONE` (default
+`Europe/Amsterdam`), so 23:00 stays 23:00 across DST changes. When no
+window covers the current moment the household falls back to
+`ARMING_SCHEDULE_DEFAULT_MODE` (default `disarmed`). Overlapping windows
+are resolved by `max(priority, start_time)` — the later, higher-priority
+window wins.
+
+**Multi-replica safety.** `ArmingScheduler` ticks every
+`ARMING_SCHEDULER_INTERVAL_SECONDS` in every replica, so the *claim* must
+be atomic. It reuses the same pattern as the digest scheduler and the
+ingestion leases: compute the latest schedule boundary at or before now,
+then issue a single conditional UPDATE
+
+```sql
+UPDATE security_states SET mode = :mode, last_transition_at = :boundary
+ WHERE id = 'default'
+   AND (last_transition_at IS NULL OR last_transition_at < :boundary)
+```
+
+The replica whose UPDATE reports `rowcount == 1` owns the transition and
+writes the audit entry in that same transaction — the claim is what stops
+the boundary from ever being retried, so a separate audit commit could lose
+the record to a crash. Every other replica rolls back and does nothing.
+Nothing is in-memory, so restarts and rolling deploys cannot double-apply
+or skip a transition (boundaries are searched back
+`ARMING_SCHEDULE_LOOKBACK_DAYS`, default 8 days).
+
+**Manual override.** A manual `PUT /mode` deliberately does *not* advance
+`last_transition_at`. The override therefore holds until the next
+scheduled boundary, which then claims it normally — there is no separate
+expiry timer to get out of sync, and "disarm now, re-arm tonight" works
+with no extra UI. `GET /api/v1/security/mode` returns a `schedule` block
+with `scheduled_mode`, `active_schedule_name`, `next_transition_at`,
+`next_transition_mode` and `override_active`, which is what the Security
+tab renders.
+
+**Audit.** Every automatic change is recorded as
+`security.mode_changed` with `source: "schedule"` and the schedule id, and
+schedule CRUD is audited as `security.schedule_created` /
+`_updated` / `_deleted`.
+
+### Home Assistant presence integration
+
+`POST /api/v1/security/mode/integration` lets a presence automation set
+the mode without a user session. It is authenticated by the
+`X-HomeCam-Token` header compared against `SECURITY_INTEGRATION_TOKEN`
+with `hmac.compare_digest`, and **fails closed**: with no token
+configured the endpoint returns 503, and a missing/incorrect header
+returns 401. Accepted calls are audited with `source: "integration"` and
+the caller's `actor_label`, and behave exactly like a manual override
+(they hold until the next scheduled boundary). This is the only
+`/api/v1/*` route that is not session-authenticated, and
+`tests/test_route_auth.py` pins that allowlist so a future route cannot
+silently join it.
+
+```yaml
+# Home Assistant example
+rest_command:
+  homecam_away:
+    url: https://<api-host>/api/v1/security/mode/integration
+    method: POST
+    headers:
+      X-HomeCam-Token: !secret homecam_token
+    content_type: application/json
+    payload: '{"mode":"away","actor_label":"home-assistant"}'
+```
 
 ## Incidents: grouping, dedup, escalation, evidence
 
@@ -274,8 +352,13 @@ shapes are unchanged. See `test_auth_hardening.py`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/security/mode` | Current arming mode |
+| GET | `/api/v1/security/mode` | Current arming mode (+ schedule status) |
 | PUT | `/api/v1/security/mode` | Change arming mode (audit-logged) |
+| POST | `/api/v1/security/mode/integration` | Set mode from a presence automation (`X-HomeCam-Token`, audit-logged) |
+| GET | `/api/v1/security/schedules` | List arming schedules |
+| POST | `/api/v1/security/schedules` | Create a schedule (audit-logged) |
+| PUT | `/api/v1/security/schedules/{id}` | Update a schedule (audit-logged) |
+| DELETE | `/api/v1/security/schedules/{id}` | Delete a schedule (audit-logged) |
 | GET | `/api/v1/security/incidents` | List incidents (`status`/`kind` filters) |
 | GET | `/api/v1/security/incidents/{id}` | Incident detail |
 | POST | `/api/v1/security/incidents/{id}/acknowledge` | Acknowledge (audit-logged) |
@@ -290,13 +373,18 @@ shapes are unchanged. See `test_auth_hardening.py`.
 self-contained like the existing Admin panel (its own login gate, bearer
 token kept only in component state — never `localStorage`). It shows the
 mode switcher (with explicit copy that arming logic never depends on AI
-confidence), the incident list with acknowledge/resolve/export/timeline
+confidence), the arming-schedules card (list/create/enable/delete, with
+the next transition and an explicit "manual override is active" note), the
+incident list with acknowledge/resolve/export/timeline
 actions and a visually distinct AI-summary badge, a camera-health banner
 derived from open `camera_*` incidents, and the audit trail.
 
 ## Tests
 
-Backend: `test_security_modes.py`, `test_incidents.py` (grouping/dedup,
+Backend: `test_security_modes.py`, `test_arming_schedules.py` (window
+resolution incl. midnight wrap, boundary math, single-winner concurrent
+ticks, override-until-next-boundary, CRUD auth + audit, integration-token
+fail-closed), `test_incidents.py` (grouping/dedup,
 zone-kind × mode routing matrix, escalation, export contents),
 `test_camera_health.py` (including restart-seeding regression tests),
 `test_audit.py`, `test_auth_hardening.py` (including a concurrent-login

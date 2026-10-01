@@ -39,6 +39,7 @@ describe("SecurityPanel",()=>{
       "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString()}),
       "/security/incidents":()=>jsonResponse([baseIncident]),
       "/security/audit-log":()=>jsonResponse([]),
+      "/security/schedules":()=>jsonResponse([]),
     });
   });
 
@@ -168,5 +169,67 @@ describe("SecurityPanel",()=>{
 
     source!.dispatch("incident.escalated",{...baseIncident,escalation_level:1});
     await screen.findByText("escalated ×1");
+  });
+
+  const scheduleStatus={
+    enabled:true,timezone:"Europe/Amsterdam",scheduled_mode:"night",
+    active_schedule_id:"s1",active_schedule_name:"Nights",
+    next_transition_at:new Date("2025-01-02T07:00:00Z").toISOString(),next_transition_mode:"disarmed",
+    override_active:true,
+  };
+  const nightSchedule={
+    id:"s1",name:"Nights",mode:"night",days_of_week:[0,1,2,3,4,5,6],
+    start_time:"23:00",end_time:"07:00",enabled:true,priority:0,
+  };
+
+  function mockWithSchedules(scheduleHandler:(init?:RequestInit)=>Response){
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/security/mode":()=>jsonResponse({mode:"home",changed_by:"u1",changed_at:new Date().toISOString(),changed_source:"manual",schedule:scheduleStatus}),
+      "/security/incidents":()=>jsonResponse([]),
+      "/security/audit-log":()=>jsonResponse([]),
+      "/security/schedules":scheduleHandler,
+    });
+  }
+
+  it("lists arming schedules with the next transition and override state", async()=>{
+    mockWithSchedules(()=>jsonResponse([nightSchedule]));
+    await signIn();
+    await screen.findByText("Nights");
+    expect(screen.getByText(/night 23:00-07:00/)).toBeInTheDocument();
+    expect(screen.getByText("(Every day)")).toBeInTheDocument();
+    const status=await screen.findByTestId("schedule-status");
+    expect(status).toHaveTextContent("Manual override is active until then.");
+  });
+
+  it("creates a schedule from the Security tab", async()=>{
+    let created:Record<string,unknown>|null=null;
+    mockWithSchedules((init)=>{
+      if(init?.method==="POST"){created=JSON.parse(String(init.body));return jsonResponse({...nightSchedule,...created});}
+      return jsonResponse(created?[{...nightSchedule,...created}]:[]);
+    });
+    await signIn();
+    fireEvent.click(await screen.findByRole("button",{name:"Add schedule"}));
+    fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Workdays"}});
+    fireEvent.change(screen.getByLabelText("Mode"),{target:{value:"away"}});
+    fireEvent.change(screen.getByLabelText("Start"),{target:{value:"09:00"}});
+    fireEvent.change(screen.getByLabelText("End"),{target:{value:"17:00"}});
+    for(const day of ["Sat","Sun"]) fireEvent.click(screen.getByRole("button",{name:day}));
+    fireEvent.click(screen.getByText("Save schedule"));
+    await waitFor(()=>expect(created).toEqual({
+      name:"Workdays",mode:"away",days_of_week:[0,1,2,3,4],start_time:"09:00",end_time:"17:00",
+    }));
+  });
+
+  it("deletes a schedule", async()=>{
+    let deleted=false;
+    mockWithSchedules((init)=>{
+      if(init?.method==="DELETE"){deleted=true;return jsonResponse({});}
+      return jsonResponse(deleted?[]:[nightSchedule]);
+    });
+    await signIn();
+    fireEvent.click(await screen.findByRole("button",{name:"Delete"}));
+    await waitFor(()=>expect(deleted).toBe(true));
+    await screen.findByText(/No schedules yet/);
   });
 });

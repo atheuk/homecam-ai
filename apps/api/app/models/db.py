@@ -48,6 +48,11 @@ class Event(Base):
     # Human 1-5 rating of how good/usable the stored photo is.
     photo_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     photo_rating_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Explicit "keep this" marker set by a human. The retention purge
+    # (``app.services.retention``) never deletes a held event, its photo,
+    # its evidence or its analysis, however old it is. Nothing automatic
+    # ever sets or clears this: the whole point is that it outranks policy.
+    retention_hold: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
 
 class EventPhoto(Base):
@@ -440,6 +445,48 @@ class SecurityState(Base):
     mode: Mapped[str] = mapped_column(String(16), default="disarmed")
     changed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # How the current mode was set: "manual" (a human, through the API or
+    # the UI), "integration" (an authenticated external automation such as
+    # Home Assistant presence) or "schedule" (an automatic transition).
+    changed_source: Mapped[str] = mapped_column(String(16), default="manual")
+    # The scheduled boundary whose transition was last applied to this row.
+    # This is the single point of serialization that makes the arming
+    # scheduler multi-replica safe *and* gives manual overrides their
+    # lifetime: a manual change never advances it, so the next boundary
+    # still fires and takes the household back onto its schedule. See
+    # :mod:`app.services.arming_schedules`.
+    last_transition_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ArmingSchedule(Base):
+    """One recurring window that arms the household into ``mode``.
+
+    A window is ``[start_time, end_time)`` in the configured household
+    timezone on the selected ``days_of_week`` (0 = Monday). ``end_time``
+    before ``start_time`` wraps past midnight, so "night, 23:00-07:00,
+    every day" is a single row rather than two.
+
+    Windows never *disarm* on their own: when no window is active the
+    household falls back to ``settings.arming_schedule_default_mode``. When
+    several windows overlap, the highest ``priority`` wins and ties go to
+    the one that started most recently, so a weekday "away" window can be
+    layered under a nightly "night" window without either being ambiguous.
+    """
+
+    __tablename__ = "arming_schedules"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    mode: Mapped[str] = mapped_column(String(16))
+    # ISO weekday numbers, 0 = Monday .. 6 = Sunday, of the window's *start*.
+    days_of_week: Mapped[list] = mapped_column(JSON, default=list)
+    # Local wall-clock "HH:MM" strings, stored as text so a schedule means
+    # the same thing across DST shifts (23:00 stays 23:00).
+    start_time: Mapped[str] = mapped_column(String(5))
+    end_time: Mapped[str] = mapped_column(String(5))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Incident(Base):

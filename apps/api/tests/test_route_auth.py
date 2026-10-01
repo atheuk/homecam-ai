@@ -17,6 +17,22 @@ PUBLIC_API_ROUTES = {
     ("POST", "/api/v1/auth/register"),
 }
 
+# Routes authenticated by a shared secret instead of a user session, so an
+# external automation (Home Assistant presence) can arm the household. Listed
+# explicitly rather than widening PUBLIC_API_ROUTES: adding one must be a
+# deliberate, reviewed act, and each must still carry token auth.
+INTEGRATION_TOKEN_ROUTES = {
+    ("POST", "/api/v1/security/mode/integration"),
+}
+
+
+def _has_integration_token_dependency(dependant) -> bool:
+    from app.api.security_routes import require_integration_token
+
+    if dependant.call is require_integration_token:
+        return True
+    return any(_has_integration_token_dependency(child) for child in dependant.dependencies)
+
 
 def _has_auth_dependency(dependant) -> bool:
     if dependant.call in {get_current_user, get_current_auth_session}:
@@ -34,7 +50,10 @@ def test_every_versioned_route_is_authenticated_except_login_and_bootstrap():
     missing_auth = []
     for route in routes:
         for method in route.methods or ():
-            if (method, route.path) not in PUBLIC_API_ROUTES and not _has_auth_dependency(route.dependant):
+            key = (method, route.path)
+            if key in PUBLIC_API_ROUTES or key in INTEGRATION_TOKEN_ROUTES:
+                continue
+            if not _has_auth_dependency(route.dependant):
                 missing_auth.append(f"{method} {route.path}")
     assert not missing_auth, f"Unauthenticated API routes: {sorted(missing_auth)}"
 
@@ -44,7 +63,13 @@ def test_every_versioned_route_is_authenticated_except_login_and_bootstrap():
         for method in route.methods or ()
         if not _has_auth_dependency(route.dependant)
     }
-    assert registered_public_routes == PUBLIC_API_ROUTES
+    assert registered_public_routes == PUBLIC_API_ROUTES | INTEGRATION_TOKEN_ROUTES
+
+    # Every token route must actually enforce the token.
+    for route in routes:
+        for method in route.methods or ():
+            if (method, route.path) in INTEGRATION_TOKEN_ROUTES:
+                assert _has_integration_token_dependency(route.dependant), f"{method} {route.path}"
 
 
 @pytest.mark.asyncio
@@ -65,7 +90,9 @@ def test_every_versioned_route_is_authenticated_except_login_and_bootstrap():
         ("GET", "/api/v1/activities"),
         ("GET", "/api/v1/activities/unknown"),
         ("GET", "/api/v1/security/mode"),
+        ("GET", "/api/v1/security/schedules"),
         ("GET", "/api/v1/security/incidents"),
+        ("GET", "/api/v1/admin/retention"),
         ("GET", "/api/v1/admin/providers"),
         ("GET", "/api/v1/ws"),
     ],

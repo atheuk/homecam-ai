@@ -125,6 +125,73 @@ class SecurityModeOut(BaseModel):
     mode: str
     changed_by: str | None = None
     changed_at: datetime
+    changed_source: str = "manual"
+    # Schedule context: what the schedule wants right now, when it next
+    # changes, and whether the current mode is a manual override of it.
+    schedule: dict | None = None
+
+
+class ArmingScheduleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    mode: Literal["disarmed", "home", "away", "night"]
+    days_of_week: list[int] = Field(min_length=1)
+    start_time: str = Field(pattern=r"^\d{2}:\d{2}$")
+    end_time: str = Field(pattern=r"^\d{2}:\d{2}$")
+    enabled: bool = True
+    priority: int = Field(default=0, ge=0, le=1000)
+
+
+class ArmingScheduleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    mode: Literal["disarmed", "home", "away", "night"] | None = None
+    days_of_week: list[int] | None = Field(default=None, min_length=1)
+    start_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    end_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=0, le=1000)
+
+
+class ArmingScheduleOut(BaseModel):
+    id: str
+    name: str
+    mode: str
+    days_of_week: list[int]
+    start_time: str
+    end_time: str
+    enabled: bool
+    priority: int
+
+
+class IntegrationModeIn(BaseModel):
+    """Mode change requested by an external automation (Home Assistant)."""
+
+    mode: Literal["disarmed", "home", "away", "night"]
+    # Free-text label recorded in the audit trail so "who armed the house"
+    # stays answerable, e.g. "home-assistant:everyone-left".
+    source: str = Field(default="integration", min_length=1, max_length=64)
+
+
+class RetentionHoldIn(BaseModel):
+    hold: bool
+
+
+class RetentionReportOut(BaseModel):
+    dry_run: bool
+    started_at: datetime
+    cutoffs: dict
+    counts: dict
+    protected: dict
+    truncated: bool
+
+
+class RetentionPolicyOut(BaseModel):
+    policy: dict
+    report: RetentionReportOut
+
+
+class RetentionPurgeIn(BaseModel):
+    # Defaults to a dry run: deleting data must be the explicit choice.
+    dry_run: bool = True
 
 
 class IncidentOut(BaseModel):
