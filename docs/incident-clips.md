@@ -96,10 +96,12 @@ each event's JSON now carries
   is now media-sequence aware and refuses to splice over a gap. Overlapping
   events on one camera share one capture rather than storing duplicate video.
 * **Eufy T8210 battery doorbell:** it does not stream while asleep, so there
-  is **no pre-roll** and none is invented. The edge add-on (1.0.2) records a
+  is **no pre-roll** and none is invented. The edge add-on (1.0.3) records a
   bounded post-roll (default 15 s) from its private go2rtc when the doorbell
   rings or detects motion/a person, reusing the existing eufy-security-ws
-  connection and stopping the stream afterwards (120 s cooldown, 24
+  connection and stopping the stream afterwards. Recording starts at the
+  first keyframe after the doorbell wakes (bounded by
+  `LIVE_READY_TIMEOUT_SECONDS`, default 15 s); 120 s cooldown, 24
   recordings/day, in-memory only with a short TTL). The API polls the edge
   for up to `EVENT_CLIP_EDGE_WAIT_SECONDS`, matches a complete clip that
   started near the event and stores it; the card says *"starts when the

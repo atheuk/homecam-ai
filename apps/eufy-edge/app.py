@@ -288,7 +288,17 @@ class ClipRecorder:
 
     async def _record(self, clip: EdgeClip) -> None:
         try:
-            await client.start_livestream(clip.serial)
+            stream = await client.start_livestream(clip.serial)
+            # A sleeping doorbell needs a few seconds of P2P wake-up before
+            # its first SPS/PPS+IDR. Asking go2rtc to record earlier makes
+            # its ffmpeg probe fail ("Invalid data found when processing
+            # input"), so wait -- bounded -- for a decodable start first.
+            if not await stream.wait_for_keyframe(settings.live_ready_timeout):
+                if not stream.queues:
+                    await client.stop_livestream(clip.serial, expected=stream)
+                raise RuntimeError(
+                    f"no keyframe from the device within {settings.live_ready_timeout:.0f}s"
+                )
             name = await _ensure_go2rtc_stream(clip.serial)
             clip.data = await _fetch_mp4(name, self.seconds)
             if len(clip.data) < 64 or clip.data[4:8] != b"ftyp":
