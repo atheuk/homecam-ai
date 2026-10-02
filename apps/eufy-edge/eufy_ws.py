@@ -10,9 +10,15 @@ Protocol summary:
 
 * the server greets with ``{"type": "version", ...}``;
 * the client pins a schema with ``set_api_schema``;
-* ``start_listening`` returns the full driver state, including devices;
+* ``start_listening`` returns the driver state. From schema 13 onwards its
+  ``devices`` list holds *serial numbers only*, so name/type/battery/picture
+  must be fetched per device with ``device.get_properties``;
+* devices the bridge loads later (e.g. it was still logging in to Eufy when
+  we connected) arrive as ``device added`` events;
 * ``device.start_livestream`` begins a burst of ``livestream video data``
-  events carrying raw H.264 Annex-B chunks as Node Buffer JSON.
+  events carrying raw H.264 Annex-B chunks as Node Buffer JSON. A late
+  joiner gets no SPS/PPS until the next keyframe, so we cache the current
+  GOP and replay it to new subscribers.
 
 Upstream note: ``bropat/eufy-security-ws`` was archived in September 2026.
 It still works, but it is a frozen dependency -- keep this module small so
@@ -43,6 +49,30 @@ DOORBELL_TYPE_CODES = {5, 7, 16, 18, 19, 91, 93}
 
 # How long to wait for the bridge to answer a command before giving up.
 COMMAND_TIMEOUT_SECONDS = 20.0
+
+# Upper bounds for the per-device "current GOP" replay cache. If a GOP grows
+# past these (no keyframe for a long time) the cache is dropped until the
+# next SPS rather than growing without bound.
+GOP_CACHE_MAX_BYTES = 4 * 1024 * 1024
+GOP_CACHE_MAX_CHUNKS = 300
+
+# Stop a livestream that nobody subscribed to within this many seconds, so a
+# ``/live`` call whose viewer never arrives cannot keep the battery doorbell
+# awake indefinitely.
+DEFAULT_LIVE_IDLE_STOP_SECONDS = 60.0
+
+H264_NAL_IDR = 5
+H264_NAL_SPS = 7
+
+
+def _h264_nal_types(chunk: bytes) -> set[int]:
+    """NAL unit types present in an Annex-B H.264 chunk."""
+    types: set[int] = set()
+    index = chunk.find(b"\x00\x00\x01")
+    while index != -1 and index + 3 < len(chunk):
+        types.add(chunk[index + 3] & 0x1F)
+        index = chunk.find(b"\x00\x00\x01", index + 3)
+    return types
 
 
 class EufyBridgeError(RuntimeError):
@@ -80,8 +110,36 @@ class Livestream:
 
     queues: set[asyncio.Queue] = field(default_factory=set)
     started: bool = False
+    # Chunks from the most recent SPS onwards. go2rtc's ffmpeg always joins
+    # after the P2P stream has started (``/live`` starts it, the HLS viewer
+    # arrives later); without SPS/PPS + IDR ffmpeg can neither probe nor
+    # decode the feed, so new subscribers are primed with this first.
+    gop: list[bytes] = field(default_factory=list)
+    gop_bytes: int = 0
+    idle_task: asyncio.Task | None = None
+
+    def _remember(self, chunk: bytes) -> None:
+        if H264_NAL_SPS in _h264_nal_types(chunk):
+            self.gop = [chunk]
+            self.gop_bytes = len(chunk)
+            return
+        if not self.gop:
+            return
+        self.gop.append(chunk)
+        self.gop_bytes += len(chunk)
+        if self.gop_bytes > GOP_CACHE_MAX_BYTES or len(self.gop) > GOP_CACHE_MAX_CHUNKS:
+            self.gop = []
+            self.gop_bytes = 0
+
+    def add_subscriber(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        for chunk in self.gop:
+            queue.put_nowait(chunk)
+        self.queues.add(queue)
+        return queue
 
     def publish(self, chunk: bytes) -> None:
+        self._remember(chunk)
         for queue in list(self.queues):
             # Drop rather than block: a slow reader must never stall the
             # socket that every other device's events share.
@@ -90,17 +148,29 @@ class Livestream:
             queue.put_nowait(chunk)
 
     def close(self) -> None:
+        if self.idle_task is not None and self.idle_task is not asyncio.current_task():
+            self.idle_task.cancel()
+        self.idle_task = None
         for queue in list(self.queues):
             queue.put_nowait(None)
         self.queues.clear()
+        self.gop = []
+        self.gop_bytes = 0
 
 
 class EufyWsClient:
     """Maintains one persistent connection to eufy-security-ws."""
 
-    def __init__(self, url: str, connect_timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        connect_timeout: float = 10.0,
+        live_idle_stop_seconds: float = DEFAULT_LIVE_IDLE_STOP_SECONDS,
+    ) -> None:
         self._url = url
         self._connect_timeout = connect_timeout
+        self._live_idle_stop_seconds = live_idle_stop_seconds
+        self._background: set[asyncio.Task] = set()
         self._ws: Any | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._devices: dict[str, dict] = {}
@@ -164,12 +234,38 @@ class EufyWsClient:
             await self.close()
             raise
         self._ingest_state(state)
+        # Schema >= 13 only lists serials; without this every device would
+        # appear as a nameless "camera" with no doorbell/snapshot support.
+        for serial in list(self._devices):
+            await self._load_properties(serial)
         logger.info("connected to eufy-security-ws; %d device(s) known", len(self._devices))
+
+    async def _load_properties(self, serial: str) -> None:
+        """Best-effort property fetch that bypasses the connect lock."""
+        try:
+            result = await self._send_command({"command": "device.get_properties", "serialNumber": serial})
+        except (EufyBridgeError, EufyBridgeUnavailable) as exc:
+            logger.warning("could not load properties for a Eufy device: %s", exc)
+            return
+        self._merge_properties(serial, result)
+
+    def _merge_properties(self, serial: str, result: dict) -> None:
+        properties = result.get("properties") if isinstance(result.get("properties"), dict) else result
+        if isinstance(properties, dict):
+            self._properties.setdefault(serial, {}).update(properties)
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     async def close(self) -> None:
         for stream in self._livestreams.values():
             stream.close()
         self._livestreams.clear()
+        for pending in list(self._background):
+            pending.cancel()
+        self._background.clear()
         task, self._reader_task = self._reader_task, None
         if task is not None:
             task.cancel()
@@ -247,6 +343,31 @@ class EufyWsClient:
             self._properties.setdefault(serial, {})[str(event.get("name"))] = event.get("value")
             return
 
+        if name == "device added":
+            # Devices load after the bridge finishes its Eufy cloud login,
+            # which is often *after* we connected and got an empty list.
+            added = event.get("device")
+            added_serial = added if isinstance(added, str) else (added or {}).get("serialNumber")
+            if isinstance(added_serial, str) and added_serial:
+                self._devices.setdefault(added_serial, {"serialNumber": added_serial})
+                if isinstance(added, dict):
+                    self._devices[added_serial] = added
+                    self._properties.setdefault(added_serial, {}).update(added)
+                else:
+                    self._spawn(self._load_properties(added_serial))
+            return
+
+        if name == "device removed":
+            removed = event.get("device")
+            removed_serial = removed if isinstance(removed, str) else (removed or {}).get("serialNumber")
+            if isinstance(removed_serial, str):
+                self._devices.pop(removed_serial, None)
+                self._properties.pop(removed_serial, None)
+                stream = self._livestreams.pop(removed_serial, None)
+                if stream is not None:
+                    stream.close()
+            return
+
         if name == "captcha request":
             self._captcha_pending = True
             return
@@ -301,9 +422,7 @@ class EufyWsClient:
             result = await self.command({"command": "device.get_properties", "serialNumber": serial})
         except (EufyBridgeError, EufyBridgeUnavailable):
             return self._properties.get(serial, {})
-        properties = result.get("properties") or result
-        if isinstance(properties, dict):
-            self._properties.setdefault(serial, {}).update(properties)
+        self._merge_properties(serial, result)
         return self._properties.get(serial, {})
 
     # ------------------------------------------------------------ normalise
@@ -378,7 +497,15 @@ class EufyWsClient:
                     self._livestreams.pop(serial, None)
                     raise
             stream.started = True
+            if not stream.queues and self._live_idle_stop_seconds > 0:
+                stream.idle_task = asyncio.get_running_loop().create_task(self._stop_if_idle(serial, stream))
         return stream
+
+    async def _stop_if_idle(self, serial: str, stream: Livestream) -> None:
+        await asyncio.sleep(self._live_idle_stop_seconds)
+        if self._livestreams.get(serial) is stream and not stream.queues:
+            logger.info("stopping an unwatched Eufy livestream")
+            await self.stop_livestream(serial)
 
     async def stop_livestream(self, serial: str) -> None:
         stream = self._livestreams.pop(serial, None)
@@ -389,9 +516,7 @@ class EufyWsClient:
 
     async def subscribe(self, serial: str) -> asyncio.Queue:
         stream = await self.start_livestream(serial)
-        queue: asyncio.Queue = asyncio.Queue()
-        stream.queues.add(queue)
-        return queue
+        return stream.add_subscriber()
 
     async def unsubscribe(self, serial: str, queue: asyncio.Queue) -> None:
         stream = self._livestreams.get(serial)

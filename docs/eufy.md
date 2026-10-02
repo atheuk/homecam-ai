@@ -106,4 +106,12 @@ CI uses mocked adapter responses only and never requires a Eufy account or HomeB
   snapshot poll would flatten it. Before the doorbell has produced any
   event, `/snapshot` returns 404 rather than a fabricated image.
 - Live view depends on go2rtc being available on the adapter host to remux
-  the raw P2P H.264 into browser-playable HLS.
+  the raw P2P H.264 into browser-playable HLS. The adapter registers the
+  go2rtc stream in memory only (`PATCH /api/streams`) on every live
+  request, so it survives go2rtc restarts and read-only go2rtc configs.
+- The edge adapter enriches the bridge's serial-only device list with
+  `device.get_properties`, picks up devices added after it connected, and
+  replays the current H.264 keyframe to go2rtc. See
+  `apps/eufy-edge/README.md` for details and troubleshooting.
+- The edge adapter's own tests (`apps/eufy-edge/tests`) run in CI against a
+  fake eufy-security-ws bridge and a mocked go2rtc API.

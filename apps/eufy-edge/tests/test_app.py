@@ -76,7 +76,6 @@ def fake(monkeypatch):
     monkeypatch.setattr(adapter, "client", client)
     monkeypatch.setattr(adapter.settings, "edge_token", TOKEN)
     monkeypatch.setattr(adapter.settings, "stream_token", "stream-token")
-    adapter._registered_streams.clear()
     return client
 
 

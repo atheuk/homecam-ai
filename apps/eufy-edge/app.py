@@ -46,7 +46,7 @@ class Settings:
     self_url: str
     stream_token: str
     live_ready_timeout: float
-
+    live_idle_stop_seconds: float = 60.0
     @classmethod
     def from_env(cls) -> "Settings":
         go2rtc_url = os.environ.get("GO2RTC_URL", "http://127.0.0.1:1984").rstrip("/")
@@ -62,11 +62,12 @@ class Settings:
             self_url=os.environ.get("SELF_URL", "http://127.0.0.1:8091").rstrip("/"),
             stream_token=os.environ.get("STREAM_TOKEN") or secrets.token_urlsafe(24),
             live_ready_timeout=float(os.environ.get("LIVE_READY_TIMEOUT_SECONDS", "15")),
+            live_idle_stop_seconds=float(os.environ.get("LIVE_IDLE_STOP_SECONDS", "60")),
         )
 
 
 settings = Settings.from_env()
-client = EufyWsClient(settings.eufy_ws_url)
+client = EufyWsClient(settings.eufy_ws_url, live_idle_stop_seconds=settings.live_idle_stop_seconds)
 
 
 @asynccontextmanager
@@ -78,9 +79,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="HomeCam Eufy edge adapter", lifespan=lifespan)
-
-# go2rtc stream names we have already registered this process lifetime.
-_registered_streams: set[str] = set()
 
 
 def require_token(authorization: str | None) -> None:
@@ -151,29 +149,34 @@ def _stream_name(serial: str) -> str:
 
 
 async def _ensure_go2rtc_stream(serial: str) -> str:
-    """Register (idempotently) a go2rtc stream that pulls our raw H.264.
+    """Register a go2rtc stream that pulls our raw H.264.
 
     go2rtc runs ffmpeg against our ``/internal`` endpoint and remuxes -- no
     transcoding, so this is cheap even on a Raspberry Pi.
+
+    Uses ``PATCH /api/streams`` on *every* call: it is idempotent, creates
+    the stream when missing and is memory-only. ``PUT`` also tries to write
+    go2rtc.yaml -- returning HTTP 400 on a read-only/disabled config even
+    though the stream was created, and persisting the stream token to disk
+    when it succeeds -- and a process-local "already registered" cache goes
+    stale whenever go2rtc restarts, leaving HLS at 404 until we restart too.
     """
     name = _stream_name(serial)
-    if name in _registered_streams:
-        return name
     source = (
         f"ffmpeg:{settings.self_url}/internal/devices/{quote(serial)}/h264"
         f"?token={quote(settings.stream_token)}#video=copy"
     )
+    params = {"name": name, "src": source}
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            response = await http.put(
-                f"{settings.go2rtc_url}/api/streams",
-                params={"name": name, "src": source},
-            )
+            response = await http.patch(f"{settings.go2rtc_url}/api/streams", params=params)
+            if response.status_code == 405:
+                # Very old go2rtc without PATCH support.
+                response = await http.put(f"{settings.go2rtc_url}/api/streams", params=params)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise HTTPException(503, f"go2rtc is unreachable at {settings.go2rtc_url}: {exc}") from exc
     if response.status_code >= 400:
         raise HTTPException(502, f"go2rtc rejected stream registration: HTTP {response.status_code}")
-    _registered_streams.add(name)
     return name
 
 

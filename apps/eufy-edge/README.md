@@ -85,10 +85,38 @@ The T8210 is battery powered, so the adapter is deliberately conservative:
   event image — the same picture the Eufy app's notification shows. A
   snapshot poll that woke the doorbell over P2P would flatten the battery.
 - **Livestreams stop as soon as the last viewer disconnects**, rather than
-  running until a timeout.
+  running until a timeout. A stream started by `/live` that go2rtc never
+  connects to is stopped after `LIVE_IDLE_STOP_SECONDS` (default 60).
 
 If no event image exists yet, `/snapshot` returns 404 rather than inventing
 one; ring or trigger the doorbell once and it will populate.
+
+## How the bridge protocol is handled
+
+- eufy-security-ws (schema ≥ 13) lists devices as bare serial numbers, so
+  the adapter fetches `device.get_properties` for each one. Without this
+  the doorbell showed up as a nameless "camera" with no snapshot or
+  doorbell-event support.
+- Devices the bridge loads after the adapter connected (for example while
+  it was still logging in or waiting on 2FA) arrive as `device added`
+  events and are picked up without restarting the adapter.
+- go2rtc's ffmpeg always joins after the P2P stream started. The adapter
+  caches the current H.264 GOP (from the last SPS, max 4 MB) and replays
+  it to new subscribers so ffmpeg gets SPS/PPS and a keyframe immediately.
+- The go2rtc stream is registered with `PATCH /api/streams` on every
+  `/live` call. This is memory-only (the stream token is never written to
+  `go2rtc.yaml`), works with a read-only go2rtc config, and recovers
+  automatically after go2rtc restarts.
+
+## Troubleshooting
+
+- `/devices` empty or `/health` not `authenticated`: the bridge has not
+  finished logging in. Check the eufy-security-ws logs for a pending 2FA
+  code or captcha and complete it there.
+- Doorbell listed but live view never starts: the HomeBase/doorbell must
+  be reachable from this host over the LAN for P2P, and go2rtc must be
+  able to reach `SELF_URL`.
+- Snapshot 404: ring the doorbell once so the bridge has an event image.
 
 ## Tests
 
