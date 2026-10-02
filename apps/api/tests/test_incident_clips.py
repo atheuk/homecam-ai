@@ -257,3 +257,21 @@ async def test_post_roll_grace_is_bounded(monkeypatch):
             stream_frames.stream_hub._readers.pop(camera_id, None)
         else:
             stream_frames.stream_hub._readers[camera_id] = previous
+
+async def test_late_scheduled_capture_uses_already_buffered_post_roll(monkeypatch):
+    camera_id = "mock-late-task"
+    init = b"\x00\x00\x00\x10ftypisom"
+    monkeypatch.setattr(settings, "incident_clip_post_seconds", 4)
+    monkeypatch.setattr(settings, "incident_clip_post_grace_seconds", 0.5)
+    triggered_at = time.monotonic() - 10
+    first = ClipSegment(init, b"\x00\x00\x00\x10moof-first", triggered_at, 1, 2.0)
+    reader, previous = _late_reader(camera_id, init, first)
+    reader.clip_segments.append(ClipSegment(init, b"\x00\x00\x00\x10moof-buffered", time.monotonic(), 2, 2.0))
+    try:
+        video = await asyncio.wait_for(incident_clips.capture(camera_id, (first,), triggered_at), 2)
+        assert bytes(video).endswith(b"moof-buffered")
+    finally:
+        if previous is None:
+            stream_frames.stream_hub._readers.pop(camera_id, None)
+        else:
+            stream_frames.stream_hub._readers[camera_id] = previous

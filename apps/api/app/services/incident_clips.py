@@ -102,10 +102,8 @@ async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_a
         raise ValueError("stream reader stopped")
     grace_until = deadline + settings.incident_clip_post_grace_seconds
     while True:
-        now = time.monotonic()
-        if now >= deadline and (segments[-1].captured_at >= deadline - 3 or now >= grace_until):
-            break
-        await asyncio.sleep(min(0.5, max(0.01, (deadline if now < deadline else grace_until) - now)))
+        # Refresh before deciding, so a covering segment that is already
+        # buffered counts even if this task was scheduled late.
         if stream_hub._readers.get(camera_id) is not reader:
             raise ValueError("stream reader changed")
         current = stream_hub.clip_segments(camera_id)
@@ -119,6 +117,10 @@ async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_a
                 if total_bytes > settings.incident_clip_max_bytes:
                     raise ValueError("clip exceeds configured size cap")
                 segments.append(segment)
+        now = time.monotonic()
+        if now >= deadline and (segments[-1].captured_at >= deadline - 3 or now >= grace_until):
+            break
+        await asyncio.sleep(min(0.5, max(0.01, (deadline if now < deadline else grace_until) - now)))
     if segments[-1].captured_at < deadline - 3:
         logger.info(
             "clip post-roll for %s short: newest segment %.1fs before deadline after %.1fs grace (%d segments)",
