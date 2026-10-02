@@ -143,6 +143,7 @@ class Livestream:
     # parameter sets, so ffmpeg never has to probe mid-GOP data.
     awaiting_keyframe: set[asyncio.Queue] = field(default_factory=set)
     keyframe: asyncio.Event = field(default_factory=asyncio.Event)
+    closed: bool = False
 
     def _remember(self, chunk: bytes) -> set[int]:
         nal_types: set[int] = set()
@@ -193,12 +194,16 @@ class Livestream:
         self.awaiting_keyframe.discard(queue)
 
     async def wait_for_keyframe(self, timeout: float) -> bool:
-        """Wait (bounded) until a decodable GOP start has arrived."""
+        """Wait (bounded) until a decodable GOP start has arrived.
+
+        Returns False on timeout or as soon as the stream is closed (bridge
+        reported the livestream stopped, socket dropped, device removed).
+        """
         try:
             await asyncio.wait_for(self.keyframe.wait(), timeout)
         except asyncio.TimeoutError:
             return False
-        return True
+        return not self.closed
 
     def publish(self, chunk: bytes) -> None:
         nal_types = self._remember(chunk)
@@ -223,7 +228,9 @@ class Livestream:
             queue.put_nowait(None)
         self.queues.clear()
         self.awaiting_keyframe.clear()
-        self.keyframe.clear()
+        # Wake anyone waiting for a keyframe; ``closed`` makes them fail fast.
+        self.closed = True
+        self.keyframe.set()
         self.gop = []
         self.gop_bytes = 0
         self.parameter_sets = {}
@@ -616,7 +623,11 @@ class EufyWsClient:
             logger.info("stopping an unwatched Eufy livestream")
             await self.stop_livestream(serial)
 
-    async def stop_livestream(self, serial: str) -> None:
+    async def stop_livestream(self, serial: str, expected: Livestream | None = None) -> None:
+        if expected is not None and self._livestreams.get(serial) is not expected:
+            # The caller's stream already ended and may have been replaced by
+            # someone else's (e.g. a live viewer): never stop that one.
+            return
         stream = self._livestreams.pop(serial, None)
         if stream is not None:
             stream.close()

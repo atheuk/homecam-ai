@@ -295,7 +295,7 @@ class ClipRecorder:
             # input"), so wait -- bounded -- for a decodable start first.
             if not await stream.wait_for_keyframe(settings.live_ready_timeout):
                 if not stream.queues:
-                    await client.stop_livestream(clip.serial)
+                    await client.stop_livestream(clip.serial, expected=stream)
                 raise RuntimeError(
                     f"no keyframe from the device within {settings.live_ready_timeout:.0f}s"
                 )

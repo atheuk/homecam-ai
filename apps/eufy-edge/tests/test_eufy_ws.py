@@ -243,7 +243,38 @@ def test_subscriber_joining_a_waking_device_gets_nothing_before_the_first_idr():
         assert [queue.get_nowait() for _ in range(queue.qsize())] == [SPS, PPS, IDR, P_FRAME]
         assert await stream.wait_for_keyframe(0.01) is True
         stream.close()
-        assert not stream.keyframe.is_set() and not stream.awaiting_keyframe
+        assert stream.closed and not stream.awaiting_keyframe
+        assert await stream.wait_for_keyframe(5) is False
+
+    run(scenario())
+
+
+def test_closing_a_stream_wakes_a_keyframe_waiter_immediately():
+    async def scenario():
+        stream = Livestream()
+        waiter = asyncio.ensure_future(stream.wait_for_keyframe(30))
+        await asyncio.sleep(0)
+        stream.close()  # e.g. bridge reported "livestream stopped"
+        assert await asyncio.wait_for(waiter, 1) is False
+
+    run(scenario())
+
+
+def test_stop_livestream_with_expected_never_stops_a_replacement_stream(bridge):
+    async def scenario():
+        bridge["bridge"] = fake = FakeBridge()
+        client = EufyWsClient("ws://bridge", live_idle_stop_seconds=0)
+        try:
+            old = await client.start_livestream(SERIAL)
+            await client.stop_livestream(SERIAL)
+            new = await client.start_livestream(SERIAL)
+            viewer = new.add_subscriber()
+            before = len(fake.commands("device.stop_livestream"))
+            await client.stop_livestream(SERIAL, expected=old)
+            assert client._livestreams[SERIAL] is new and viewer in new.queues
+            assert len(fake.commands("device.stop_livestream")) == before
+        finally:
+            await client.close()
 
     run(scenario())
 

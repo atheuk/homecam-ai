@@ -63,7 +63,9 @@ class FakeClient:
         self.started.append(serial)
         return self.stream
 
-    async def stop_livestream(self, serial):
+    async def stop_livestream(self, serial, expected=None):
+        if expected is not None and expected is not self.stream:
+            return
         self.stopped.append(serial)
 
     async def close(self):
@@ -218,6 +220,27 @@ def test_recorder_gives_up_and_releases_a_device_that_never_sends_a_keyframe(mon
     assert clip.complete is False and clip.data == b""
     assert "no keyframe" in clip.failed
     assert client.stopped == [SERIAL]
+
+
+def test_recorder_fails_fast_when_the_livestream_ends_while_waking(monkeypatch):
+    client = FakeClient(keyframe=False)
+    monkeypatch.setattr(adapter, "client", client)
+    monkeypatch.setattr(adapter, "recorder", adapter.ClipRecorder(enabled=True, seconds=15, cooldown=120, daily_limit=3))
+    monkeypatch.setattr(adapter.settings, "live_ready_timeout", 30.0)
+    replacement = Livestream()
+
+    async def scenario():
+        clip = adapter.recorder.trigger(SERIAL, "doorbell")
+        await asyncio.sleep(0)
+        old, client.stream = client.stream, replacement  # a live viewer started a new stream
+        replacement.add_subscriber()
+        old.close()  # bridge: "livestream stopped"
+        await asyncio.wait_for(asyncio.gather(*adapter.recorder._tasks), 2)
+        return clip
+
+    clip = asyncio.run(scenario())
+    assert "no keyframe" in clip.failed
+    assert client.stopped == []  # the viewer's replacement stream is left alone
 
 
 def test_clip_endpoints_require_the_token_and_serve_mp4(fake):
