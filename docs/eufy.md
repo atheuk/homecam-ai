@@ -108,10 +108,12 @@ CI uses mocked adapter responses only and never requires a Eufy account or HomeB
 - Live view depends on go2rtc being available on the adapter host to remux
   the raw P2P H.264 into browser-playable HLS. The adapter registers the
   go2rtc stream in memory only (`PATCH /api/streams`) on every live
-  request, so it survives go2rtc restarts and read-only go2rtc configs.
+  request (go2rtc >= 1.2.0 required; `PUT` is never used because it
+  would persist the token-bearing source), so it survives go2rtc restarts
+  and read-only go2rtc configs.
 - The edge adapter enriches the bridge's serial-only device list with
   `device.get_properties`, picks up devices added after it connected, and
-  replays the current H.264 keyframe to go2rtc. See
+  replays the latest SPS/PPS plus the current IDR-started GOP to go2rtc. See
   `apps/eufy-edge/README.md` for details and troubleshooting.
 - The edge adapter's own tests (`apps/eufy-edge/tests`) run in CI against a
   fake eufy-security-ws bridge and a mocked go2rtc API.

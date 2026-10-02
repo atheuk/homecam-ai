@@ -154,30 +154,50 @@ async def _ensure_go2rtc_stream(serial: str) -> str:
     go2rtc runs ffmpeg against our ``/internal`` endpoint and remuxes -- no
     transcoding, so this is cheap even on a Raspberry Pi.
 
-    Uses ``PATCH /api/streams`` on *every* call: it is idempotent, creates
-    the stream when missing and is memory-only. ``PUT`` also tries to write
-    go2rtc.yaml -- returning HTTP 400 on a read-only/disabled config even
-    though the stream was created, and persisting the stream token to disk
-    when it succeeds -- and a process-local "already registered" cache goes
-    stale whenever go2rtc restarts, leaving HLS at 404 until we restart too.
+    Uses ``PATCH /api/streams`` (go2rtc >= 1.2.0) on *every* call: it is
+    idempotent, creates the stream when missing and is memory-only. ``PUT``
+    is never used because it also writes the source -- including the stream
+    token -- into go2rtc.yaml via ``app.PatchConfig``. A process-local
+    "already registered" cache would go stale whenever go2rtc restarts.
+
+    go2rtc < 1.2.0 has no PATCH handler and answers it with HTTP 200 without
+    doing anything, so the registration is confirmed with a side-effect-free
+    ``GET /api/streams?src=<name>`` (404 or ``null`` when missing).
     """
     name = _stream_name(serial)
     source = (
         f"ffmpeg:{settings.self_url}/internal/devices/{quote(serial)}/h264"
         f"?token={quote(settings.stream_token)}#video=copy"
     )
-    params = {"name": name, "src": source}
+    api = f"{settings.go2rtc_url}/api/streams"
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            response = await http.patch(f"{settings.go2rtc_url}/api/streams", params=params)
-            if response.status_code == 405:
-                # Very old go2rtc without PATCH support.
-                response = await http.put(f"{settings.go2rtc_url}/api/streams", params=params)
+            response = await http.patch(api, params={"name": name, "src": source})
+            if response.status_code < 400:
+                check = await http.get(api, params={"src": name})
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise HTTPException(503, f"go2rtc is unreachable at {settings.go2rtc_url}: {exc}") from exc
+    if response.status_code in (404, 405, 501):
+        raise HTTPException(502, GO2RTC_UNSUPPORTED)
     if response.status_code >= 400:
         raise HTTPException(502, f"go2rtc rejected stream registration: HTTP {response.status_code}")
+    if not _go2rtc_has_stream(check):
+        raise HTTPException(502, GO2RTC_UNSUPPORTED)
     return name
+
+
+GO2RTC_UNSUPPORTED = (
+    "go2rtc did not register the stream; go2rtc >= 1.2.0 (PATCH /api/streams) is required"
+)
+
+
+def _go2rtc_has_stream(response: httpx.Response) -> bool:
+    if response.status_code >= 400:
+        return False
+    try:
+        return response.json() is not None
+    except ValueError:
+        return False
 
 
 @app.get("/devices/{device_id}/live")

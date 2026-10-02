@@ -145,7 +145,7 @@ def test_devices_added_after_connect_are_picked_up(bridge):
 def test_late_subscriber_receives_the_cached_keyframe_first():
     async def scenario():
         stream = Livestream()
-        stream.publish(P_FRAME)  # mid-GOP junk before any SPS: never replayed
+        stream.publish(P_FRAME)  # mid-GOP junk before any IDR: never replayed
         stream.publish(SPS + PPS + IDR)
         stream.publish(P_FRAME)
         queue = stream.add_subscriber()
@@ -159,6 +159,27 @@ def test_late_subscriber_receives_the_cached_keyframe_first():
     run(scenario())
 
 
+def test_sparse_parameter_sets_are_replayed_before_a_later_idr():
+    # Cameras may send SPS/PPS once at stream start and then only IDRs.
+    stream = Livestream()
+    stream.publish(SPS + PPS + IDR)
+    stream.publish(P_FRAME)
+    stream.publish(IDR)  # next GOP without parameter sets
+    stream.publish(P_FRAME)
+    queue = stream.add_subscriber()
+    received = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert received == [SPS, PPS, IDR, P_FRAME]
+
+
+def test_separately_sent_parameter_sets_are_kept():
+    stream = Livestream()
+    stream.publish(SPS)
+    stream.publish(PPS)
+    stream.publish(IDR)
+    queue = stream.add_subscriber()
+    assert [queue.get_nowait() for _ in range(queue.qsize())] == [SPS, PPS, IDR]
+
+
 def test_gop_cache_is_bounded(monkeypatch):
     monkeypatch.setattr(eufy_ws, "GOP_CACHE_MAX_BYTES", 32)
     stream = Livestream()
@@ -167,6 +188,19 @@ def test_gop_cache_is_bounded(monkeypatch):
         stream.publish(P_FRAME)
     assert stream.gop == []
     assert stream.add_subscriber().empty()
+
+
+def test_gop_cache_recovers_at_next_idr_after_overflow_without_new_sps(monkeypatch):
+    monkeypatch.setattr(eufy_ws, "GOP_CACHE_MAX_CHUNKS", 3)
+    stream = Livestream()
+    stream.publish(SPS + PPS + IDR)
+    for _ in range(5):
+        stream.publish(P_FRAME)
+    assert stream.gop == []
+    stream.publish(IDR)  # camera does not repeat SPS/PPS
+    stream.publish(P_FRAME)
+    queue = stream.add_subscriber()
+    assert [queue.get_nowait() for _ in range(queue.qsize())] == [SPS, PPS, IDR, P_FRAME]
 
 
 def test_live_video_events_reach_a_late_ffmpeg_subscriber(bridge):
@@ -231,24 +265,41 @@ def test_watched_livestream_is_not_idle_stopped(bridge):
 
 
 class FakeGo2rtc:
-    """go2rtc HTTP API: PATCH is memory-only; PUT also writes go2rtc.yaml."""
+    """go2rtc ``/api/streams`` handler, modelled on upstream source.
 
-    def __init__(self, config_writable: bool = False) -> None:
+    ``modern`` (>= 1.2.0, verified at v1.2.0 and v1.9.14
+    ``internal/streams/api.go``): PATCH is memory-only (``streams.Patch``) and
+    requires ``name``; PUT additionally writes go2rtc.yaml via
+    ``app.PatchConfig``; ``GET ?src=<name>`` is 404 for an unknown stream.
+
+    ``legacy`` (v1.1.x ``cmd/streams/streams.go``): the switch has no PATCH
+    case, so PATCH falls through to the JSON dump -- HTTP 200, nothing
+    registered -- and ``GET ?src=`` for an unknown stream encodes ``null``.
+    """
+
+    def __init__(self, legacy: bool = False) -> None:
         self.streams: dict[str, str] = {}
         self.requests: list[httpx.Request] = []
-        self.config_writable = config_writable
+        self.persisted: dict[str, str] = {}
+        self.legacy = legacy
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         name = request.url.params.get("name")
         src = request.url.params.get("src")
-        if request.method == "PATCH":
+        if request.method == "PUT":
+            self.streams[name or src] = src
+            self.persisted[name or src] = src
+            return httpx.Response(200)
+        if request.method == "PATCH" and not self.legacy:
+            if not name:
+                return httpx.Response(400)
             self.streams[name] = src
             return httpx.Response(200)
-        if request.method == "PUT":
-            self.streams[name] = src
-            return httpx.Response(200 if self.config_writable else 400, text="config file disabled")
-        return httpx.Response(405)
+        if request.method == "GET" and src and not self.legacy and src not in self.streams:
+            return httpx.Response(404)
+        payload = {"producers": [{"url": self.streams[src]}]} if src in self.streams else None
+        return httpx.Response(200, json=payload)
 
     def restart(self) -> None:
         self.streams.clear()
@@ -273,8 +324,15 @@ def go2rtc(monkeypatch):
 def test_go2rtc_registration_uses_memory_only_patch(go2rtc):
     name = run(adapter._ensure_go2rtc_stream(SERIAL))
     assert name == f"eufy-{SERIAL}"
-    assert [r.method for r in go2rtc.requests] == ["PATCH"]
-    assert go2rtc.streams[name].startswith("ffmpeg:http://adapter:8091/internal/devices/")
+    patch, check = go2rtc.requests
+    assert patch.method == "PATCH"
+    assert patch.url.path == "/api/streams"
+    assert dict(patch.url.params) == {
+        "name": name,
+        "src": f"ffmpeg:http://adapter:8091/internal/devices/{SERIAL}/h264?token=stream-token#video=copy",
+    }
+    assert (check.method, dict(check.url.params)) == ("GET", {"src": name})
+    assert go2rtc.persisted == {}
 
 
 def test_go2rtc_registration_survives_a_go2rtc_restart(go2rtc):
@@ -282,22 +340,40 @@ def test_go2rtc_registration_survives_a_go2rtc_restart(go2rtc):
     go2rtc.restart()
     run(adapter._ensure_go2rtc_stream(SERIAL))
     assert name in go2rtc.streams
-    assert [r.method for r in go2rtc.requests] == ["PATCH", "PATCH"]
+    assert [r.method for r in go2rtc.requests] == ["PATCH", "GET", "PATCH", "GET"]
 
 
-def test_go2rtc_without_patch_falls_back_to_put(go2rtc, monkeypatch):
-    go2rtc.config_writable = True
-    original = go2rtc.handler
-
+@pytest.mark.parametrize("status", [404, 405, 501])
+def test_go2rtc_without_patch_fails_explicitly_and_never_puts(go2rtc, monkeypatch, status):
     def no_patch(request):
-        if request.method == "PATCH":
-            go2rtc.requests.append(request)
-            return httpx.Response(405)
-        return original(request)
+        go2rtc.requests.append(request)
+        return httpx.Response(status)
 
     monkeypatch.setattr(go2rtc, "handler", no_patch)
-    run(adapter._ensure_go2rtc_stream(SERIAL))
-    assert [r.method for r in go2rtc.requests] == ["PATCH", "PUT"]
+    with pytest.raises(HTTPException) as excinfo:
+        run(adapter._ensure_go2rtc_stream(SERIAL))
+    assert excinfo.value.status_code == 502
+    assert "1.2.0" in excinfo.value.detail
+    assert [r.method for r in go2rtc.requests] == ["PATCH"]
+    assert go2rtc.persisted == {}
+
+
+def test_legacy_go2rtc_silent_patch_noop_is_detected_without_put(go2rtc):
+    go2rtc.legacy = True
+    with pytest.raises(HTTPException) as excinfo:
+        run(adapter._ensure_go2rtc_stream(SERIAL))
+    assert excinfo.value.status_code == 502
+    assert "1.2.0" in excinfo.value.detail
+    assert [r.method for r in go2rtc.requests] == ["PATCH", "GET"]
+    assert go2rtc.streams == {} and go2rtc.persisted == {}
+
+
+def test_go2rtc_rejected_source_is_reported(go2rtc, monkeypatch):
+    monkeypatch.setattr(go2rtc, "handler", lambda request: httpx.Response(400, text="source not supported"))
+    with pytest.raises(HTTPException) as excinfo:
+        run(adapter._ensure_go2rtc_stream(SERIAL))
+    assert excinfo.value.status_code == 502
+    assert "HTTP 400" in excinfo.value.detail
 
 
 def test_go2rtc_errors_never_echo_the_stream_token(go2rtc, monkeypatch):

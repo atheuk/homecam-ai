@@ -52,7 +52,7 @@ COMMAND_TIMEOUT_SECONDS = 20.0
 
 # Upper bounds for the per-device "current GOP" replay cache. If a GOP grows
 # past these (no keyframe for a long time) the cache is dropped until the
-# next SPS rather than growing without bound.
+# next IDR rather than growing without bound.
 GOP_CACHE_MAX_BYTES = 4 * 1024 * 1024
 GOP_CACHE_MAX_CHUNKS = 300
 
@@ -63,16 +63,33 @@ DEFAULT_LIVE_IDLE_STOP_SECONDS = 60.0
 
 H264_NAL_IDR = 5
 H264_NAL_SPS = 7
+H264_NAL_PPS = 8
+_START_CODE = b"\x00\x00\x01"
+
+
+def _h264_nal_units(chunk: bytes) -> list[tuple[int, bytes]]:
+    """``(type, payload)`` for each Annex-B NAL unit in a chunk.
+
+    Payloads exclude start codes; the zero byte of a 4-byte start code that
+    follows a NAL is trimmed from it.
+    """
+    units: list[tuple[int, bytes]] = []
+    index = chunk.find(_START_CODE)
+    while index != -1 and index + 3 < len(chunk):
+        begin = index + 3
+        following = chunk.find(_START_CODE, begin)
+        end = len(chunk) if following == -1 else following
+        payload = chunk[begin:end]
+        if following != -1 and payload.endswith(b"\x00"):
+            payload = payload[:-1]
+        units.append((chunk[begin] & 0x1F, payload))
+        index = following
+    return units
 
 
 def _h264_nal_types(chunk: bytes) -> set[int]:
     """NAL unit types present in an Annex-B H.264 chunk."""
-    types: set[int] = set()
-    index = chunk.find(b"\x00\x00\x01")
-    while index != -1 and index + 3 < len(chunk):
-        types.add(chunk[index + 3] & 0x1F)
-        index = chunk.find(b"\x00\x00\x01", index + 3)
-    return types
+    return {nal_type for nal_type, _ in _h264_nal_units(chunk)}
 
 
 class EufyBridgeError(RuntimeError):
@@ -110,20 +127,30 @@ class Livestream:
 
     queues: set[asyncio.Queue] = field(default_factory=set)
     started: bool = False
-    # Chunks from the most recent SPS onwards. go2rtc's ffmpeg always joins
-    # after the P2P stream has started (``/live`` starts it, the HLS viewer
-    # arrives later); without SPS/PPS + IDR ffmpeg can neither probe nor
-    # decode the feed, so new subscribers are primed with this first.
+    # Chunks from the most recent IDR onwards, plus the latest SPS/PPS kept
+    # separately (cameras may send parameter sets only once, at stream
+    # start). go2rtc's ffmpeg always joins after the P2P stream has started
+    # (``/live`` starts it, the HLS viewer arrives later); without SPS/PPS +
+    # IDR ffmpeg can neither probe nor decode the feed, so new subscribers
+    # are primed with ``SPS, PPS, GOP`` first.
     gop: list[bytes] = field(default_factory=list)
     gop_bytes: int = 0
+    parameter_sets: dict[int, bytes] = field(default_factory=dict)
     idle_task: asyncio.Task | None = None
 
     def _remember(self, chunk: bytes) -> None:
-        if H264_NAL_SPS in _h264_nal_types(chunk):
+        nal_types: set[int] = set()
+        for nal_type, payload in _h264_nal_units(chunk):
+            nal_types.add(nal_type)
+            if nal_type in (H264_NAL_SPS, H264_NAL_PPS):
+                self.parameter_sets[nal_type] = payload
+        if H264_NAL_IDR in nal_types:
             self.gop = [chunk]
             self.gop_bytes = len(chunk)
             return
         if not self.gop:
+            # No keyframe yet (or dropped after an overflow): a GOP that does
+            # not start at an IDR cannot be decoded, so wait for the next one.
             return
         self.gop.append(chunk)
         self.gop_bytes += len(chunk)
@@ -131,9 +158,20 @@ class Livestream:
             self.gop = []
             self.gop_bytes = 0
 
+    def _primer(self) -> list[bytes]:
+        if not self.gop:
+            return []
+        present = _h264_nal_types(self.gop[0])
+        prefix = [
+            b"\x00\x00\x00\x01" + self.parameter_sets[nal_type]
+            for nal_type in (H264_NAL_SPS, H264_NAL_PPS)
+            if nal_type in self.parameter_sets and nal_type not in present
+        ]
+        return prefix + self.gop
+
     def add_subscriber(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
-        for chunk in self.gop:
+        for chunk in self._primer():
             queue.put_nowait(chunk)
         self.queues.add(queue)
         return queue
@@ -156,6 +194,7 @@ class Livestream:
         self.queues.clear()
         self.gop = []
         self.gop_bytes = 0
+        self.parameter_sets = {}
 
 
 class EufyWsClient:

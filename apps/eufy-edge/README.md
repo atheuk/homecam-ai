@@ -28,7 +28,7 @@ own configuration.
 | Component | Where it comes from |
 | --- | --- |
 | `eufy-security-ws` | Home Assistant add-on, or its Docker image |
-| go2rtc | the standalone add-on, or the copy bundled in Frigate (port 1984) |
+| go2rtc >= 1.2.0 | the standalone add-on, or the copy bundled in Frigate (port 1984) |
 
 ### Upstream maintenance warning
 
@@ -101,12 +101,18 @@ one; ring or trigger the doorbell once and it will populate.
   it was still logging in or waiting on 2FA) arrive as `device added`
   events and are picked up without restarting the adapter.
 - go2rtc's ffmpeg always joins after the P2P stream started. The adapter
-  caches the current H.264 GOP (from the last SPS, max 4 MB) and replays
-  it to new subscribers so ffmpeg gets SPS/PPS and a keyframe immediately.
+  caches the current H.264 GOP (from the last IDR, max 4 MB / 300 chunks)
+  plus the latest SPS/PPS, and replays `SPS, PPS, GOP` to new subscribers
+  so ffmpeg can decode immediately even when the camera sends parameter
+  sets only once. After an overflow the cache restarts at the next IDR.
 - The go2rtc stream is registered with `PATCH /api/streams` on every
-  `/live` call. This is memory-only (the stream token is never written to
-  `go2rtc.yaml`), works with a read-only go2rtc config, and recovers
-  automatically after go2rtc restarts.
+  `/live` call and confirmed with `GET /api/streams?src=<name>`. This is
+  memory-only (the stream token is never written to `go2rtc.yaml`), works
+  with a read-only go2rtc config, and recovers automatically after go2rtc
+  restarts. **go2rtc >= 1.2.0 is required** (PATCH was added in v1.2.0;
+  verified against upstream source through v1.9.14). `PUT` is never used,
+  because it persists the token-bearing source to `go2rtc.yaml`; older
+  go2rtc versions get an explicit 502 instead.
 
 ## Troubleshooting
 
