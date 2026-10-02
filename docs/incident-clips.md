@@ -67,6 +67,7 @@ Configuration (API environment; all values capped by schema):
 | `INCIDENT_CLIPS_ENABLED` | `true` | Enable HLS segment buffering and capture |
 | `INCIDENT_CLIP_PRE_SECONDS` | `8` | Maximum lookback before detection |
 | `INCIDENT_CLIP_POST_SECONDS` | `8` | Capture after detection |
+| `INCIDENT_CLIP_POST_GRACE_SECONDS` | `12` | Extra bounded wait for the HLS segment covering the post-roll deadline (segments publish only once complete; the reader can lag under load). Without it every real 8 s post-roll failed as "insufficient post-roll". |
 | `INCIDENT_CLIP_BUFFER_BYTES` | `8000000` | Per-reader rolling segment cap |
 | `INCIDENT_CLIP_MAX_BYTES` | `16000000` | Per-incident stored clip cap |
 | `INCIDENT_CLIP_DAILY_LIMIT` | `10` | New clips admitted per UTC day, across replicas |

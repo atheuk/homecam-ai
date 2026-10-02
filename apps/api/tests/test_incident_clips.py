@@ -194,3 +194,66 @@ async def test_daily_and_global_budgets_skip_without_evicting_held_clips(client,
                 if row is not None:
                     await session.delete(row)
             await session.commit()
+
+def _late_reader(camera_id, init, first):
+    reader = SimpleNamespace(
+        unsupported=False,
+        latest=FrameSample((b"frame",), time.monotonic(), 1, "segment-1"),
+        clip_segments=[first],
+    )
+    hub = stream_frames.stream_hub
+    previous = hub._readers.get(camera_id)
+    hub._readers[camera_id] = reader
+    return reader, previous
+
+
+async def test_post_roll_waits_for_segment_published_after_deadline(monkeypatch):
+    """Production regression: the segment covering the deadline is only
+    published (and fetched) after it, so stopping at the deadline always
+    reported "insufficient post-roll" for real 8 s post-rolls."""
+    camera_id = "mock-late-segment"
+    init = b"\x00\x00\x00\x10ftypisom"
+    monkeypatch.setattr(settings, "incident_clip_post_seconds", 4)
+    monkeypatch.setattr(settings, "incident_clip_post_grace_seconds", 3.0)
+    triggered_at = time.monotonic() - 3.5
+    first = ClipSegment(init, b"\x00\x00\x00\x10moof-first", triggered_at, 1, 2.0)
+    reader, previous = _late_reader(camera_id, init, first)
+    try:
+        task = incident_clips.capture(camera_id, (first,), triggered_at)
+        await asyncio.sleep(0.9)  # past the deadline, nothing new yet
+        assert not task.done()
+        now = time.monotonic()
+        reader.clip_segments.append(ClipSegment(init, b"\x00\x00\x00\x10moof-late", now, 2, 2.0))
+        reader.latest = FrameSample((b"frame",), now, 2, "segment-2")
+        video = await asyncio.wait_for(task, 2)
+        assert bytes(video) == init + b"\x00\x00\x00\x10moof-first" + b"\x00\x00\x00\x10moof-late"
+        assert video.duration_seconds == 4.0
+    finally:
+        if previous is None:
+            stream_frames.stream_hub._readers.pop(camera_id, None)
+        else:
+            stream_frames.stream_hub._readers[camera_id] = previous
+
+
+async def test_post_roll_grace_is_bounded(monkeypatch):
+    camera_id = "mock-stalled-segment"
+    init = b"\x00\x00\x00\x10ftypisom"
+    monkeypatch.setattr(settings, "incident_clip_post_seconds", 4)
+    monkeypatch.setattr(settings, "incident_clip_post_grace_seconds", 0.4)
+    triggered_at = time.monotonic() - 3.8
+    first = ClipSegment(init, b"\x00\x00\x00\x10moof-first", triggered_at, 1, 2.0)
+    reader, previous = _late_reader(camera_id, init, first)
+    try:
+        started = time.monotonic()
+        task = incident_clips.capture(camera_id, (first,), triggered_at)
+        try:
+            await asyncio.wait_for(task, 3)
+            raise AssertionError("stalled stream must not produce a clip")
+        except ValueError as exc:
+            assert str(exc) == "insufficient post-roll"
+        assert time.monotonic() - started < 1.5
+    finally:
+        if previous is None:
+            stream_frames.stream_hub._readers.pop(camera_id, None)
+        else:
+            stream_frames.stream_hub._readers[camera_id] = previous

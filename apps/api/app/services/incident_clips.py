@@ -100,8 +100,12 @@ async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_a
     reader = stream_hub._readers.get(camera_id)
     if reader is None:
         raise ValueError("stream reader stopped")
-    while time.monotonic() < deadline:
-        await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+    grace_until = deadline + settings.incident_clip_post_grace_seconds
+    while True:
+        now = time.monotonic()
+        if now >= deadline and (segments[-1].captured_at >= deadline - 3 or now >= grace_until):
+            break
+        await asyncio.sleep(min(0.5, max(0.01, (deadline if now < deadline else grace_until) - now)))
         if stream_hub._readers.get(camera_id) is not reader:
             raise ValueError("stream reader changed")
         current = stream_hub.clip_segments(camera_id)
@@ -116,6 +120,10 @@ async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_a
                     raise ValueError("clip exceeds configured size cap")
                 segments.append(segment)
     if segments[-1].captured_at < deadline - 3:
+        logger.info(
+            "clip post-roll for %s short: newest segment %.1fs before deadline after %.1fs grace (%d segments)",
+            camera_id, deadline - segments[-1].captured_at, settings.incident_clip_post_grace_seconds, len(segments),
+        )
         raise ValueError("insufficient post-roll")
     video = CapturedClip(segments[0].init + b"".join(segment.data for segment in segments))
     first = segments[0]

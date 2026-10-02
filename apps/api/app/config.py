@@ -319,6 +319,10 @@ class Settings(BaseSettings):
     incident_clips_enabled: bool = True
     incident_clip_pre_seconds: int = Field(default=8, ge=1, le=20)
     incident_clip_post_seconds: int = Field(default=8, ge=1, le=20)
+    # HLS publishes a segment only once it is complete, and the reader can
+    # lag under CPU load, so the footage covering the post-roll deadline
+    # often arrives a few seconds after it. Keep waiting (bounded) for it.
+    incident_clip_post_grace_seconds: float = Field(default=12.0, ge=0, le=30)
     incident_clip_buffer_bytes: int = Field(default=8_000_000, ge=100_000, le=32_000_000)
     incident_clip_max_bytes: int = Field(default=16_000_000, ge=100_000, le=64_000_000)
     incident_clip_daily_limit: int = Field(default=10, ge=1, le=100)
