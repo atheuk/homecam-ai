@@ -305,6 +305,30 @@ async def test_edge_unsupported_and_no_match_are_reported_honestly(clean_clips, 
     assert provider.fetches == 0
 
 
+@pytest.mark.parametrize(("capability", "expected", "reason"), [
+    ("UNSUPPORTED", "unsupported", "cannot record"),
+    ("UNAVAILABLE", "unavailable", "recorder is not available"),
+])
+async def test_recorder_capability_is_reported_without_waiting(clean_clips, monkeypatch, capability, expected, reason):
+    provider = _EdgeProvider([], b"")
+
+    async def caps(camera_id):
+        return {"eventClips": capability}
+
+    async def find(camera_id):
+        return provider
+
+    provider.get_capabilities = caps
+    monkeypatch.setattr("app.services.provider_registry.find_provider_for_camera", find)
+    event_id = await _event("eufy-T8210", "doorbell")
+    async with SessionLocal() as session:
+        row = await session.get(Event, event_id)
+        await event_clips.attach(session, row, None)
+        state = event_clips.status(row)
+    assert state["status"] == expected and reason in state["reason"]
+    assert not event_clips._tasks and provider.fetches == 0
+
+
 async def test_camera_without_buffer_or_recorder_and_unwanted_types(clean_clips):
     event_id = await _event("mock-front-door", "person")
     async with SessionLocal() as session:

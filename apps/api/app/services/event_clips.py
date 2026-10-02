@@ -207,13 +207,27 @@ async def attach(session, row: Event, capture: asyncio.Task | None) -> tuple[asy
     if capture is not None:
         shared = _SharedCapture(row.camera_id, capture, now, {row.id: 0.0})
         _shared[row.camera_id] = shared
-        _spawn(_finish_stream(shared))
         _set_state(row, {"status": "pending", "source": "stream"})
-        await session.commit()
+        # Commit "pending" before the worker can write its final state, so a
+        # fast result is never overwritten by this late commit.
+        try:
+            await session.commit()
+        except BaseException:
+            if _shared.get(row.camera_id) is shared:
+                _shared.pop(row.camera_id, None)
+            capture.cancel()
+            raise
+        _spawn(_finish_stream(shared))
         await session.refresh(row)
         return None, True
     global _edge_waiters
-    if not await _edge_capable(row.camera_id):
+    worker = None
+    edge = await _edge_capability(row.camera_id)
+    if edge == "UNSUPPORTED":
+        _set_state(row, {"status": "unsupported", "reason": "This camera cannot record event clips"})
+    elif edge == "UNAVAILABLE":
+        _set_state(row, {"status": "unavailable", "reason": "The camera's clip recorder is not available right now"})
+    elif edge != "SUPPORTED":
         _set_state(row, {
             "status": "unavailable",
             "reason": "No buffered live video for this camera at the event time",
@@ -223,24 +237,33 @@ async def attach(session, row: Event, capture: asyncio.Task | None) -> tuple[asy
     else:
         _edge_waiters += 1
         _set_state(row, {"status": "pending", "source": "edge"})
-        _spawn(_fetch_edge(row.id, row.camera_id, row.start_time))
-    await session.commit()
+        worker = _fetch_edge(row.id, row.camera_id, row.start_time)
+    try:
+        await session.commit()
+    except BaseException:
+        if worker is not None:
+            worker.close()
+            _edge_waiters -= 1
+        raise
+    if worker is not None:
+        _spawn(worker)
     await session.refresh(row)
     return None, True
 
 
-async def _edge_capable(camera_id: str) -> bool:
-    """Whether the camera's provider records its own event clips."""
+async def _edge_capability(camera_id: str) -> str | None:
+    """The provider's ``eventClips`` capability, or None for stream-only cameras."""
     from .provider_registry import find_provider_for_camera
 
     try:
         provider = await asyncio.wait_for(find_provider_for_camera(camera_id), 5)
         if not hasattr(provider, "list_event_clips") or not hasattr(provider, "get_event_clip"):
-            return False
+            return None
         capabilities = await asyncio.wait_for(provider.get_capabilities(camera_id), 5)
     except Exception:  # noqa: BLE001 - treat as no edge recorder
-        return False
-    return capabilities.get("eventClips") == "SUPPORTED"
+        return None
+    value = capabilities.get("eventClips")
+    return value if value in ("SUPPORTED", "UNAVAILABLE", "UNSUPPORTED") else None
 
 
 async def _finish_stream(shared: _SharedCapture) -> None:

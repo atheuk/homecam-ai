@@ -81,7 +81,8 @@ def score(
     Appearance - clothing, hood, hair, age, skin, anything about how a person
     looks - never contributes: a "needs review" verdict must be explainable
     purely by behaviour and context (dwell, return visits, visible actions,
-    time and arming mode).
+    time and arming mode). Repeat visits score the *behaviour* of returning;
+    the appearance embedding only links visits together and adds nothing.
     """
     reasons: list[str] = []
     value = 0.0
