@@ -22,6 +22,41 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install -r requirements.txt
       - run: pytest
+  eufy-edge:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: apps/eufy-edge}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r requirements.txt pytest ruff pyyaml
+      - run: ruff check .
+      - run: pytest
+  eufy-addon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg BUILD_ARCH=amd64 -t homecam-eufy-edge:ci homecam-eufy-edge
+      - name: Smoke-test the add-on without any Eufy bridge or credentials
+        run: |
+          mkdir -p /tmp/addon-data
+          printf '%s' '{"eufy_ws_url":"ws://127.0.0.1:3000","home_cam_eufy_token":"ci-only-token","stream_base_url":"http://127.0.0.1:8091","port":8091,"live_idle_stop_seconds":60}' > /tmp/addon-data/options.json
+          docker run -d --name eufy-addon --network host -v /tmp/addon-data:/data:ro homecam-eufy-edge:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8091/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8091/healthz
+          # Bearer auth enforced; bad HLS tokens and the loopback-only ingest stay closed.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/devices)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/hls/wrong/eufy-X/stream.m3u8)" = 404
+          # Bundled go2rtc answers on loopback only, with WebRTC/SRTP not loaded.
+          curl -fsS http://127.0.0.1:11984/api >/dev/null
+          if curl -fsS --max-time 2 http://127.0.0.1:1984/api; then echo "default go2rtc API is open" >&2; exit 1; fi
+          if ss -lntu | grep -E ':(8555|8443|8554|1984)\b'; then echo "shared host port taken" >&2; exit 1; fi
+          ss -lnt | grep -E '127\.0\.0\.1:11984\b'
+          ss -lnt | grep -E '127\.0\.0\.1:18554\b'
+          docker logs eufy-addon > /tmp/addon.log 2>&1
+          cat /tmp/addon.log
+          if grep -F ci-only-token /tmp/addon.log; then echo "token leaked to logs" >&2; exit 1; fi
+          docker rm -f eufy-addon
   docker-validate:
     runs-on: ubuntu-latest
     steps:

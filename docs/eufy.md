@@ -25,7 +25,16 @@ The archived/deprecated `bropat/eufy-security-client` project should be treated 
 `apps/eufy-edge/` is a working implementation of the contract below,
 bridging `eufy-security-ws` to HomeCam and handing live video to go2rtc.
 See `apps/eufy-edge/README.md` for setup. It runs on the owner's Home
-Assistant host, not in Azure.
+Assistant host, not in Azure. On Home Assistant OS, install it as the
+**HomeCam Eufy edge adapter** add-on (`homecam-eufy-edge/`). The add-on:
+
+- connects to the eufy-security-ws add-on at `ws://127.0.0.1:3000`, which
+  keeps the Eufy login and its persistent session;
+- runs its own loopback-only go2rtc 1.9.14 and leaves Frigate unchanged;
+- exposes only port 8091, where every route needs the bearer token or a
+  per-start random HLS path token.
+
+HomeCam's adapter URL is `http://<ha-host>.<tailnet>.ts.net:8091`.
 
 Upstream status (verified September 2026): `bropat/eufy-security-ws` and
 `bropat/eufy-security-client` were **archived by their author in September
@@ -106,4 +115,14 @@ CI uses mocked adapter responses only and never requires a Eufy account or HomeB
   snapshot poll would flatten it. Before the doorbell has produced any
   event, `/snapshot` returns 404 rather than a fabricated image.
 - Live view depends on go2rtc being available on the adapter host to remux
-  the raw P2P H.264 into browser-playable HLS.
+  the raw P2P H.264 into browser-playable HLS. The adapter registers the
+  go2rtc stream in memory only (`PATCH /api/streams`) on every live
+  request (go2rtc >= 1.2.0 required; `PUT` is never used because it
+  would persist the token-bearing source), so it survives go2rtc restarts
+  and read-only go2rtc configs.
+- The edge adapter enriches the bridge's serial-only device list with
+  `device.get_properties`, picks up devices added after it connected, and
+  replays the latest SPS/PPS plus the current IDR-started GOP to go2rtc. See
+  `apps/eufy-edge/README.md` for details and troubleshooting.
+- The edge adapter's own tests (`apps/eufy-edge/tests`) run in CI against a
+  fake eufy-security-ws bridge and a mocked go2rtc API.

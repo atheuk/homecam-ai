@@ -1,0 +1,7 @@
+fastapi>=0.115,<1.0
+# Plain uvicorn (no [standard]): avoids compiling uvloop/httptools on
+# musl/armv7 add-on builds; throughput needs here are tiny.
+uvicorn>=0.30,<1.0
+httpx>=0.27,<1.0
+# Same pin as apps/eufy-edge/requirements.txt.
+websockets>=13.0,<14.0

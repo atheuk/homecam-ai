@@ -1,0 +1,30 @@
+name: HomeCam Eufy edge adapter
+version: "1.0.0"
+slug: homecam_eufy_edge
+description: Token-authenticated adapter from the eufy-security-ws add-on to HomeCam, with a browser-safe HLS relay
+url: https://github.com/atheuk/homecam-ai/tree/main/homecam-eufy-edge
+arch:
+  - aarch64
+  - armv7
+  - amd64
+startup: services
+boot: auto
+init: false
+ingress: false
+# Same as the Dahua edge add-on and eufy-security-ws: reach the bridge on
+# 127.0.0.1:3000 and be reachable over the host's Tailscale interface.
+host_network: true
+options:
+  eufy_ws_url: ws://127.0.0.1:3000
+  home_cam_eufy_token: ""
+  stream_base_url: ""
+  port: 8091
+  live_idle_stop_seconds: 60
+# Deliberately no Eufy account, password or 2FA options: the Eufy login and
+# its persistent session stay inside the eufy-security-ws add-on.
+schema:
+  eufy_ws_url: match(^wss?://.+)
+  home_cam_eufy_token: password
+  stream_base_url: str?
+  port: port
+  live_idle_stop_seconds: int(10,600)
