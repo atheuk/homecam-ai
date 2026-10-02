@@ -61,23 +61,44 @@ export function describePlaybackError(details:string,codec?:string):string{
  */
 export function HlsVideo({src,token}:{src:string;token?:string|null}){
   const videoRef=useRef<HTMLVideoElement|null>(null);
+  const playerRef=useRef<HTMLDivElement|null>(null);
+  const playRef=useRef<()=>void>(()=>{});
   const [error,setError]=useState<string|null>(null);
+  const [playing,setPlaying]=useState(false);
+  const [playBlocked,setPlayBlocked]=useState(false);
+  const [fullscreenError,setFullscreenError]=useState<string|null>(null);
   useEffect(()=>{
     const video=videoRef.current;
     if(!video) return;
+    let destroyed=false;
+    const startPlayback=()=>{
+      void video.play().catch(()=>{
+        if(!destroyed) setPlayBlocked(true);
+      });
+    };
+    playRef.current=startPlayback;
     setError(null);
+    setPlaying(false);
+    setPlayBlocked(false);
+    setFullscreenError(null);
     video.crossOrigin=isApiRequest(src)?"use-credentials":"anonymous";
+    const cleanup=()=>{
+      destroyed=true;
+      playRef.current=()=>{};
+    };
     if(video.canPlayType("application/vnd.apple.mpegurl")){
       // Safari (and some WebKit-based browsers): native HLS support.
       video.src=src;
-      return;
+      startPlayback();
+      return cleanup;
     }
     if(!Hls.isSupported()){
       // No MediaSource/hls.js support available (e.g. jsdom in tests, or an
       // unsupported browser): fall back to a plain src assignment so the
       // element still reflects the stream URL rather than staying empty.
       video.src=src;
-      return;
+      startPlayback();
+      return cleanup;
     }
     const hls=new Hls({
       xhrSetup:(xhr,url)=>{
@@ -87,7 +108,7 @@ export function HlsVideo({src,token}:{src:string;token?:string|null}){
       },
     });
     let recoveries=0;
-    let destroyed=false;
+    hls.on(Hls.Events.MANIFEST_PARSED,()=>{if(!destroyed) startPlayback();});
     hls.on(Hls.Events.ERROR,(_event,data)=>{
       if(!data.fatal) return;
       const codecRejected=isCodecRejection(data.details);
@@ -111,8 +132,32 @@ export function HlsVideo({src,token}:{src:string;token?:string|null}){
     });
     hls.loadSource(src);
     hls.attachMedia(video);
-    return ()=>{if(!destroyed)hls.destroy();};
+    return ()=>{if(!destroyed)hls.destroy();cleanup();};
   },[src,token]);
-  if(error) return <span className="error">{error}</span>;
-  return <video ref={videoRef} controls muted playsInline style={{width:"100%"}}/>;
+  const fullscreen=async()=>{
+    const video=videoRef.current as (HTMLVideoElement&{webkitEnterFullscreen?:()=>void})|null;
+    try{
+      setFullscreenError(null);
+      if(playerRef.current?.requestFullscreen) await playerRef.current.requestFullscreen();
+      else if(video?.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      else setFullscreenError("Fullscreen is not supported in this browser.");
+    }catch{
+      setFullscreenError("Could not enter fullscreen. Try again.");
+    }
+  };
+  return <div className="live-player" ref={playerRef}>
+    <video ref={videoRef} autoPlay muted playsInline hidden={!!error} aria-label="Live camera stream"
+      onPlaying={()=>{setPlaying(true);setPlayBlocked(false);}}
+      onPause={()=>setPlaying(false)} style={{width:"100%"}}/>
+    {error?<span className="error">{error}</span>:<>
+      <div className="live-player-controls">
+        <button type="button" onClick={()=>{if(playing)videoRef.current?.pause();else playRef.current();}}>
+          {playing?"Pause live stream":"Play live stream"}
+        </button>
+        <button type="button" onClick={()=>void fullscreen()}>Fullscreen</button>
+      </div>
+      {playBlocked&&<p className="live-player-message" role="status">Playback did not start. Select Play live stream to try again.</p>}
+      {fullscreenError&&<p className="live-player-message" role="status">{fullscreenError}</p>}
+    </>}
+  </div>;
 }
