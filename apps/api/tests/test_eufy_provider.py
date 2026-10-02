@@ -93,3 +93,42 @@ async def test_eufy_adapter_reauth_failure_is_structured_offline_health():
     health = await provider.get_health()
     assert health["status"] == "OFFLINE"
     assert "re-authentication" in health["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy_url", [None, "http://127.0.0.1:1055"])
+async def test_eufy_requests_use_tailscale_proxy(monkeypatch, proxy_url):
+    if proxy_url:
+        monkeypatch.setenv("TAILSCALE_HTTP_PROXY", proxy_url)
+    else:
+        monkeypatch.delenv("TAILSCALE_HTTP_PROXY", raising=False)
+    real_client = httpx.AsyncClient
+    calls = []
+
+    def client_factory(**kwargs):
+        calls.append(kwargs.copy())
+        kwargs.pop("proxy", None)
+        kwargs.pop("transport", None)
+        return real_client(**kwargs, transport=eufy_transport())
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://edge.example.ts.net:8091", adapter_token="test-token")
+    )
+    assert (await provider.get_health())["status"] == "ONLINE"
+    assert await provider.get_snapshot("eufy-T8210P123") == b"EUFY-SNAPSHOT"
+    assert await provider.get_live_stream("eufy-T8210P123")
+    assert len(calls) == 4
+    for options in calls:
+        assert options.get("proxy") == proxy_url
+        assert options["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_eufy_explicit_transport_bypasses_tailscale_proxy(monkeypatch):
+    monkeypatch.setenv("TAILSCALE_HTTP_PROXY", "http://127.0.0.1:1")
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://edge.example.ts.net:8091"),
+        transport=eufy_transport(),
+    )
+    assert (await provider.get_health())["status"] == "ONLINE"
