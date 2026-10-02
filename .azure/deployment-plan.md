@@ -1,6 +1,6 @@
 # Event clips and richer recognition - Azure development release plan
 
-> **Current release status:** Deployed (2026-10-02) - PR #41 merge `d6ebf37`; API rev 0000042, web rev 0000022, Eufy edge add-on 1.0.2.
+> **Current release status:** Deployed (2026-10-02) - PR #41 merge `d6ebf37`, follow-ups PR #42 (`d261c49`, API rev 0000043) and PR #43 (`d3fd009`, Eufy edge add-on 1.0.3); web rev 0000022 unchanged.
 
 ## Current release scope and authorization
 
@@ -39,7 +39,9 @@ payload growth is unchanged from the approved incident-clip budget.
 - [x] Scoped `azure-validate` (existing-resource, no-op what-if).
 - [x] Migration job → head `0016_event_clips`; API; web; healthy revisions.
 - [x] Anonymous `GET /api/v1/events/{id}/clip` → 401.
-- [ ] Real clip bytes (duration/format) captured from an actual device event.
+- [x] Real clip bytes (duration/format) captured from actual Dahua events (rev 0000043, see follow-up evidence).
+- [ ] Real doorbell clip from a natural ring/motion event on add-on 1.0.3 (fix deployed, awaiting event).
+- [ ] Owner browser playback of a real clip (no owner session available to the agent).
 
 ### All validation checks pass
 
@@ -73,6 +75,57 @@ The scoped template only references the existing API, web, migration job and ACR
 | Web | rev `--0000022` Healthy, 100% traffic; served bundle contains the new clip/filter UI |
 | Eufy edge | HA add-on `d6af6ef6_homecam_eufy_edge` 1.0.1 -> 1.0.2 via `ha apps update`; started, connected to eufy-security-ws (1 device); no secret-like strings in logs |
 | Rollback | API `api@sha256:463fe292...` (rev 0000041), web `web@sha256:d464fd03...` (rev 0000021), migration image `api@sha256:24cf886a...`; 0016 is additive (new table only) |
+
+### Current release: Follow-up fixes and real-device evidence (2026-10-02)
+
+**Dahua post-roll (PR #42, merge `d261c49`).** On rev 0000042 four real
+Dahua events (14:10-14:34Z) failed with "insufficient post-roll": the capture
+ran as soon as the event closed, before the post-roll window had been
+recorded. The fix waits up to `INCIDENT_CLIP_POST_GRACE_SECONDS` (default 12)
+and refreshes the buffer before deciding. It was deployed by updating the
+`api` container only. The result is rev `--0000043`, image
+`api@sha256:e34414ea7f32a048ec893f38e8b1c656c915089a52dcb9349ee2b47eff1a3224`,
+at 100% traffic with the `tailscale/tailscale:v1.102.4` sidecar unchanged.
+The migration job uses the same image. The schema is unchanged (head
+`0016_event_clips`). Web stays on `--0000022`.
+
+Real Dahua clips stored on rev 0000043. Source: Log Analytics
+`ContainerAppConsoleLogs_CL`, `app.services.event_clips`. The API stores a
+clip only after MP4 validation (ftyp/moov, H.264 `avc1`).
+
+| Time (UTC) | Camera | Duration | Pre-roll | Bytes |
+|---|---|---|---|---|
+| 14:44:03 | dahua-channel-1 | 18.0 s | 8.8 s | 2,312,724 |
+| 14:54:29 | dahua-channel-1 | 16.0 s | 8.4 s | 2,057,950 |
+| 15:05:05 | dahua-channel-1 | 16.0 s | 7.7 s | 2,059,010 |
+
+All 3 Dahua photo events on rev 0000043 produced a stored clip. No
+post-roll failures have occurred since the fix.
+
+**Doorbell keyframe wait (PR #43, merge `d3fd009`, edge only).** The first
+real T8210 event on the new release (`evt-b496ad04886348ff`, 14:54Z) failed.
+Edge 1.0.2 logged `go2rtc refused the MP4 recording: HTTP 500`. Root cause:
+recording was requested immediately after `start_livestream`, before the
+waking doorbell had sent SPS/PPS and an IDR frame, and subscribers that
+joined early received mid-GOP data. Fix:
+
+- The livestream gates subscribers until the first keyframe and prefixes it
+  with SPS/PPS.
+- The recorder waits up to `live_ready_timeout` (15 s). On timeout it stops
+  only the stream it started, and only if nobody else is watching.
+
+The HA add-on `d6af6ef6_homecam_eufy_edge` was updated 1.0.2 -> 1.0.3 via
+`ha store reload` and `ha apps update`. It started and connected to
+eufy-security-ws (1 device known). No Azure change was needed.
+
+**Remaining owner acceptance**
+
+1. Ring the doorbell (or walk past it) once, wait about 1 minute, then open the event in Events and play the clip.
+2. Play a Dahua event clip in the browser.
+
+Doorbell events are rare (1 in 3 days), and the agent does not create
+synthetic production events. Doorbell clips have no pre-roll by design; the
+UI reports the actual duration.
 
 # Previous release: Live view overlay fix
 
