@@ -23,7 +23,7 @@ from .services.digest_scheduler import digest_scheduler
 from .services.ingestion import ingestion_service
 from .services.provider_registry import discover_all_cameras
 from .services.retention_scheduler import retention_scheduler
-from .services import detector_watchdog, incident_clips
+from .services import detector_watchdog, event_photos, incident_clips
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
     async with SessionLocal() as session:
         await sync_cameras(session, await discover_all_cameras())
     await camera_health.seed_from_open_incidents(SessionLocal)
+    await event_photos.recover_pending()
     if settings.event_ingestion_enabled:
         ingestion_service.start()
     digest_scheduler.start()
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
     finally:
         await incident_clips.stop()
         await ingestion_service.stop()
+        await event_photos.stop()
         await digest_scheduler.stop()
         await arming_scheduler.stop()
         await retention_scheduler.stop()

@@ -100,6 +100,14 @@ The T8210 is battery powered, so the adapter is deliberately conservative:
 If no event image exists yet, `/snapshot` returns 404 rather than inventing
 one; ring or trigger the doorbell once and it will populate.
 
+HomeCam's optional `EufyEdgeProvider.get_event_snapshot(camera_id)` uses this
+same authenticated endpoint to prefer the latest ring/motion picture before a
+fresh-photo fallback. It returns JPEG bytes, or `None` on 404, and remains
+cancelable by the caller's timeout. Cached pictures are usable even when the
+camera is offline. Neither this path nor the adapter downloads `pictureUrl`
+values or starts a livestream; only picture bytes already supplied by the
+bridge are used. Images are not used for face, identity or plate inference.
+
 ## How the bridge protocol is handled
 
 - eufy-security-ws (schema ≥ 13) lists devices as bare serial numbers, so

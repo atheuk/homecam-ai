@@ -147,11 +147,12 @@ def test_devices_returns_503_when_the_bridge_is_unreachable(http, fake):
     assert http.get("/devices", headers=auth()).status_code == 503
 
 
-def test_snapshot_returns_jpeg_bytes(http):
+def test_snapshot_returns_jpeg_bytes_without_starting_live_video(http, fake):
     response = http.get(f"/devices/{SERIAL}/snapshot", headers=auth())
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
     assert response.content == JPEG
+    assert fake.started == []
 
 
 def test_snapshot_rejects_non_jpeg_payloads(http, fake, monkeypatch):
@@ -166,6 +167,7 @@ def test_snapshot_rejects_non_jpeg_payloads(http, fake, monkeypatch):
 def test_snapshot_404s_before_any_event_image_exists(http, fake):
     fake.snapshot_error = EufyBridgeError("no event image available yet for this device")
     assert http.get(f"/devices/{SERIAL}/snapshot", headers=auth()).status_code == 404
+    assert fake.started == []
 
 
 def test_unknown_device_is_404(http):

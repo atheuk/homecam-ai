@@ -578,6 +578,8 @@ async def assign_event_person(
     row = await session.get(Event, event_id)
     if row is None:
         raise HTTPException(404, "Event not found")
+    if (row.event_metadata or {}).get("photo_capture", {}).get("fallback"):
+        raise HTTPException(409, "Fallback camera frames cannot be used for person recognition")
     if not payload.person_id and not (payload.name and payload.name.strip()):
         raise HTTPException(400, "Provide either person_id or name")
     person = await person_service.assign_person(

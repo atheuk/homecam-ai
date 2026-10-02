@@ -240,9 +240,15 @@ async def enrich_event(
     (a person *and* a parked car) share one frame sample between them,
     instead of spending the NVR's scarce snapshot sessions once per event.
     """
-    if not settings.ai_analysis_enabled:
-        return event
-    if row.type in NON_VISUAL_EVENT_TYPES:
+    from .event_photos import store_fallback
+    from .stream_frames import stream_hub
+
+    cached = stream_hub.latest(row.camera_id)
+    available = list(frames or []) or ([trigger_frame] if trigger_frame else [])
+    if not available and cached is not None:
+        available = list(cached.frames) or [cached.frame]
+    if not settings.ai_analysis_enabled or row.type in NON_VISUAL_EVENT_TYPES:
+        await store_fallback(session, row, available, "trigger" if trigger_frame else "stream")
         return event
 
     from .provider_registry import find_provider_for_camera
@@ -251,8 +257,8 @@ async def enrich_event(
     now = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
 
     provider = None
-    if frames:
-        frames = list(frames)
+    if available:
+        frames = available
     else:
         frames = []
         try:
@@ -261,13 +267,22 @@ async def enrich_event(
             logger.warning("provider lookup failed for %s: %s", row.camera_id, exc)
 
         if provider is not None:
-            frames = await _sample_frames(
-                provider, row.camera_id, settings.best_photo_frames, seed=trigger_frame
-            )
+            # No retries on the ingestion path; late evidence is backfilled
+            # independently, without holding up subsequent provider events.
+            try:
+                frames = await asyncio.wait_for(
+                    _sample_frames(provider, row.camera_id, 1, seed=trigger_frame),
+                    settings.best_photo_snapshot_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning("initial event snapshot timed out for %s", row.camera_id)
         elif trigger_frame:
             # No provider to top up from, but the trigger frame is still the
             # frame this event is about and is enough to produce a photo.
             frames = [trigger_frame]
+
+    if not frames:
+        return event
 
     detector = get_detector()
     context = DetectionContext(
@@ -397,6 +412,7 @@ async def enrich_event(
 
             metadata = dict(row.event_metadata or {})
             metadata["best_photo"] = photo.as_dict()
+            metadata["photo_capture"] = {"status": "captured", "source": "subject", "fallback": False}
             photo_boxes = _mark_verification(
                 list(metadata["best_photo"].get("boxes") or []), photo_verified
             )
@@ -468,6 +484,8 @@ async def enrich_event(
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("person matching failed for %s: %s", row.id, exc)
 
+    await store_fallback(session, row, frames, "trigger" if trigger_frame else "snapshot")
+    photo_verified = (row.event_metadata or {}).get("photo_verified")
     analysis_row = await _persist_ai_analysis(session, row, camera_name, detections, semantics)
     if analysis_row is not None:
         row.ai_analysis_id = analysis_row.id

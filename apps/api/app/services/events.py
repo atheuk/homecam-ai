@@ -17,9 +17,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from ..models.db import Event, EventEvidence
+from ..models.db import Event, EventEvidence, EventPhoto
 from . import activities as activity_service
 from . import ai_pipeline
+from . import event_photos
 from . import incidents as incident_service
 from . import incident_clips
 from . import security_modes
@@ -64,7 +65,7 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
         source=event["source"],
         start_time=datetime.fromisoformat(event["start_time"]),
         description=event["description"],
-        event_metadata=event.get("metadata", {}),
+        event_metadata={**event.get("metadata", {}), "photo_capture": {"status": "pending"}},
         zone=event.get("zone"),
         tags=list(event.get("tags", [])),
     )
@@ -236,7 +237,35 @@ async def create_and_broadcast_event(
             "notification_priority": signal_result.priority,
             "metadata": dict(row.event_metadata or {}),
         }
+    if await session.get(EventPhoto, event_id) is None:
+        # Keep trigger evidence even if an unrelated AI stage rolled back.
+        candidates = list(frames or []) or ([trigger_frame] if trigger_frame else [])
+        cached = event_photos.stream_hub.latest(row.camera_id)
+        if not candidates and cached is not None:
+            candidates = [cached.frame]
+        try:
+            await event_photos.store_fallback(session, row, candidates, "trigger" if trigger_frame else "stream")
+            await session.commit()
+        except Exception:  # noqa: BLE001 - late acquisition can retry storage
+            logger.exception("initial fallback photo storage failed for %s", event_id)
+            await _recover(session, row, event_id)
+    has_photo = await session.get(EventPhoto, event_id) is not None
+    enriched = {
+        **enriched, **to_dict(row), "has_photo": has_photo,
+        "photo_url": f"/api/v1/events/{event_id}/photo" if has_photo else None,
+        "full_photo_url": (
+            f"/api/v1/events/{event_id}/photo/full"
+            if has_photo and (row.event_metadata or {}).get("best_photo", {}).get("full_frame") else None
+        ),
+    }
     await event_bus.publish(enriched)
+    if not event_photos.schedule(row):
+        row.event_metadata = {
+            **(row.event_metadata or {}),
+            "photo_capture": {"status": "failed", "reason": "Photo capture capacity reached"},
+        }
+        await session.commit()
+        await event_bus.publish({**enriched, **to_dict(row), "_sse_event": "event.updated"})
     try:
         # Incident routing happens after the event is fully enriched/final
         # (row.type/zone reflect the AI pipeline's final classification) and
@@ -267,6 +296,7 @@ async def list_events(session: AsyncSession, limit: int = 50) -> list[Event]:
 
 def to_dict(row: Event) -> dict:
     metadata = row.event_metadata or {}
+    photo_capture = event_photos.capture_state(row)
     return {
         "id": row.id,
         "camera_id": row.camera_id,
@@ -309,6 +339,9 @@ def to_dict(row: Event) -> dict:
         # means nobody checked (no Foundry configured, or a non-person
         # subject), which the UI must show as neither confirmation nor doubt.
         "photo_verified": metadata.get("photo_verified"),
+        "photo_capture_status": photo_capture.get("status"),
+        "photo_capture_reason": photo_capture.get("reason"),
+        "photo_fallback": bool((metadata.get("photo_capture") or {}).get("fallback")),
         # Observable, non-protected description: apparent age band, build,
         # clothing, carried items, whether the face is visible.
         "appearance": metadata.get("appearance"),

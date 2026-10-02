@@ -65,6 +65,41 @@ Recheck this baseline immediately before updating to catch concurrent releases.
 
 # Previous release: Incident video clips
 
+## Event-photo image-only release (2026-10-02)
+
+**Status: Approved; ready for scoped validation.** User authorized exact-head
+CI, independent review, squash merge to main and digest-pinned deployment.
+The historical incident-clip release record below remains unchanged.
+
+Deploy only the existing API `api` container and existing web app from an
+archive of this release's merge commit. No schema change or migration job;
+no Bicep resource deployment. Preserve Tailscale, environment/secret
+references, identity and ingress. Coordinate web rollout with the live-player
+fix and rebase on its merged main before release.
+
+### All validation checks pass (this release)
+
+- [ ] Core AZCLI validation: CLI/auth/build/validate/what-if using a temporary
+  existing-only template for the API, web and ACR (zero resource changes).
+- [ ] Docker build contexts and exact-head CI container builds.
+- [ ] Azure Policy assignments at the target scope; no new resource, SKU,
+  network, identity or role configuration is proposed.
+- [ ] API Ruff/pytest, Eufy provider/edge suites, web lint/typecheck/vitest/build.
+- [ ] Static RBAC review: existing app identity's ACR Pull and Key Vault
+  Secrets User scopes remain unchanged; no new data service permissions.
+- [ ] Independent code review and exact-head CI before pinned squash merge.
+
+### Section 7: Validation Proof (this release)
+
+Local API: 805 passed, 3 skipped; Ruff clean. Eufy provider: 12 passed;
+Eufy edge: 62 passed, 1 skipped. Web: 198 passed; lint, typecheck and
+production build passed. Azure account read confirmed the requested enabled
+subscription. Initial API baseline: revision `0000040`, `api` digest
+`sha256:2b79ed2023a38fc8c27bc811272768cf56af7da45e26531cdc725173931f2ffc`,
+`tailscale/tailscale:v1.102.4`, latest-revision traffic at 100%.
+Scoped validation, exact-head CI and review evidence will be recorded below
+before this release is marked Validated.
+
 > **Status:** Validated and deployed to the existing Azure dev environment
 > from PR #34 head `588e2fc`, merge commit `fb20890` (no full-stack Bicep deployment).
 

@@ -114,6 +114,52 @@ def test_serial_only_state_is_enriched_with_device_properties(bridge):
     run(scenario())
 
 
+def test_snapshot_uses_latest_event_picture_without_waking_camera(bridge):
+    async def scenario():
+        bridge["bridge"] = fake = FakeBridge()
+        client = EufyWsClient("ws://bridge")
+        await client.ensure_connected()
+        try:
+            for event in ("ring", "motion"):
+                latest = b"\xff\xd8" + event.encode() + b"\xff\xd9"
+                client._handle_event({
+                    "event": "property changed", "serialNumber": SERIAL,
+                    "name": "picture",
+                    "value": {"type": "Buffer", "data": list(latest)},
+                })
+                assert await client.snapshot(SERIAL) == latest
+            assert [message["command"] for message in fake.sent] == [
+                "set_api_schema", "start_listening", "device.get_properties"
+            ]
+            assert client._livestreams == {}
+        finally:
+            await client.close()
+
+    run(scenario())
+
+
+def test_snapshot_never_downloads_picture_urls_or_starts_live_video(bridge):
+    async def scenario():
+        bridge["bridge"] = fake = FakeBridge()
+        client = EufyWsClient("ws://bridge")
+        await client.ensure_connected()
+        try:
+            client._properties[SERIAL] = {"pictureUrl": "http://127.0.0.1/private"}
+
+            async def refresh(serial):
+                assert serial == SERIAL
+
+            client.refresh_properties = refresh
+            with pytest.raises(eufy_ws.EufyBridgeError, match="no event image"):
+                await client.snapshot(SERIAL)
+            assert not fake.commands("device.start_livestream")
+            assert client._livestreams == {}
+        finally:
+            await client.close()
+
+    run(scenario())
+
+
 def test_devices_added_after_connect_are_picked_up(bridge):
     async def scenario():
         # Bridge still logging in to Eufy: no devices in the initial state.
