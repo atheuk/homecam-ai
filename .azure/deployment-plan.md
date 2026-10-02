@@ -1,8 +1,53 @@
-# Live view overlay fix - Azure development release plan
+# Event clips and richer recognition - Azure development release plan
 
-> **Current release status:** Validated (2026-10-02; final-head CI is a merge gate).
+> **Current release status:** Ready for Validation (2026-10-02).
 
 ## Current release scope and authorization
+
+The user explicitly authorized implementing, reviewing, releasing and
+verifying working short clips for the Eufy T8210 doorbell and the Dahua
+cameras, richer animal recognition and richer *observable* person
+descriptions. Release path: independent review, exact-head green PR CI,
+pinned squash merge, main CI, then an **additive migration job run**
+(`0016_event_clips`, after `0015_incident_clips`), an API image update for
+**only** `--container-name api` (preserving the `tailscale:v1.102.4`
+sidecar, env, secrets, identity and ingress) and a web image update. The HA
+Eufy edge add-on moves to 1.0.2 (new options `event_clips_enabled`,
+`event_clip_daily_limit`). No new Azure resources, roles, secrets or
+full-stack Bicep deployment.
+
+Recipe: scoped AZCLI image-only updates through existing ACR build and the
+existing migration job. Targets: Ate Lab `83288725-b5b5-44ee-bb33-b1b0a38539cd`,
+`rg-homecam-ai`, North Europe, `crhomecamaidev82ac`,
+`job-migrate-homecam-ai-dev-82ac`, `ca-api-homecam-ai-dev-82ac`,
+`ca-web-homecam-ai-dev-82ac`. Build API and web from an archive of the
+verified merge commit; web uses
+`NEXT_PUBLIC_API_URL=https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`.
+Order: migration job with the new API image → prove head `0016_event_clips` →
+API → web. Capture rollback baselines (API `0000041`, web `0000021`)
+immediately before update. On failure restore previous revisions; keep the
+additive schema and do not delete media.
+
+Capacity: event clips add at most 40 clips/day and a 1 GB sub-cap that is
+**also counted** in the existing 4 GB combined clip cap, so database clip
+payload growth is unchanged from the approved incident-clip budget.
+
+### Current release: checklist
+
+- [ ] Local API/edge/web tests, lint, typecheck, build.
+- [ ] Independent review, exact-head CI green, pinned squash merge, main CI.
+- [ ] Scoped `azure-validate` (existing-resource, no-op what-if).
+- [ ] Migration job → head `0016_event_clips`; API; web; healthy revisions.
+- [ ] Anonymous `GET /api/v1/events/{id}/clip` → 401.
+- [ ] Real clip bytes (duration/format) captured from an actual device event.
+
+---
+
+# Previous release: Live view overlay fix
+
+> **Status:** Validated and deployed (web-only, PR #39).
+
+## Live view fix scope and authorization
 
 The user explicitly authorized fixing live HLS autoplay and controls, web
 validation, independent review, exact-head green PR CI, pinned squash merge to
@@ -25,7 +70,7 @@ scale and ingress. Verify healthy revision/100% traffic, HTTP 200, and the live
 JavaScript's API origin. Coordinate with the event-photo release to avoid stale
 web rollouts.
 
-### Current release: All validation checks pass
+### Live view fix: All validation checks pass
 
 - [x] Core scoped validation: CLI/auth, existing-resource Bicep build,
       group validation and no-op what-if for web/ACR only.
@@ -37,7 +82,7 @@ web rollouts.
       no new roles or data-plane access required.
 - [x] Independent code review: no significant findings in live-player changes.
 
-### Current release: Section 7: Validation Proof
+### Live view fix: Section 7: Validation Proof
 
 On 2026-10-02, local web lint, typecheck, 201 Vitest tests and Next production
 build passed. An independent code-review agent reported no significant findings.

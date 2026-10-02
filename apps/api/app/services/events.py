@@ -20,6 +20,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from ..models.db import Event, EventEvidence, EventPhoto
 from . import activities as activity_service
 from . import ai_pipeline
+from . import event_clips
 from . import event_photos
 from . import incidents as incident_service
 from . import incident_clips
@@ -274,6 +275,7 @@ async def create_and_broadcast_event(
         }
         await session.commit()
         await event_bus.publish({**enriched, **to_dict(row), "_sse_event": "event.updated"})
+    clip_linked = False
     try:
         # Incident routing happens after the event is fully enriched/final
         # (row.type/zone reflect the AI pipeline's final classification) and
@@ -283,14 +285,26 @@ async def create_and_broadcast_event(
         # whatever is active now (see comment above).
         incident = await incident_service.route_event(session, row, mode=mode_at_detection)
         if incident is not None and incident.event_ids[0] == row.id:
-            await incident_clips.start(incident, clip_capture)
-            clip_capture = None
+            if await incident_clips.start(incident, clip_capture, event_id=event_id):
+                clip_capture = None
+                clip_linked = True
     except Exception:  # noqa: BLE001 - incident routing must never break ingestion
         logger.exception("incident routing failed for %s", event_id)
         # Callers keep using ``row`` after this returns (scene ingestion
         # links the event to its track and logs ``row.id``), so the row has
         # to survive the rollback as a usable object, not an expired one.
         await _recover(session, row, event_id)
+    if not clip_linked:
+        # Every other event (including later events of an existing incident,
+        # which previously got no video at all) gets a short event clip,
+        # sharing one capture per camera across overlapping events.
+        try:
+            clip_capture, changed = await event_clips.attach(session, row, clip_capture)
+            if changed:
+                await event_bus.publish({**enriched, **to_dict(row), "_sse_event": "event.updated"})
+        except Exception:  # noqa: BLE001 - clips must never break ingestion
+            logger.exception("event clip setup failed for %s", event_id)
+            await _recover(session, row, event_id)
     await incident_clips.discard(clip_capture)
     return row
 
@@ -360,5 +374,8 @@ def to_dict(row: Event) -> dict:
         # departed/returned, mailbox delivery, bin put out/emptied). The UI
         # renders this instead of the raw tracker state.
         "scene": metadata.get("scene"),
+        # Short video for this event: pending / ready / skipped / unavailable
+        # / expired / unsupported, with the real pre-roll and duration.
+        "clip": event_clips.status(row),
         "metadata": metadata,
     }

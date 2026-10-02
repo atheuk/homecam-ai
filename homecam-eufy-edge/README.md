@@ -26,6 +26,13 @@ device list, event snapshots, doorbell/motion state, and on-demand live HLS.
   regenerated on every start and redacted from all logs.
 - The livestream stops when the last viewer leaves, so the battery doorbell
   is not kept awake. Arming/guard mode is never changed.
+- **Event clips (1.0.2):** on a ring or motion/person event the adapter
+  records one bounded post-roll clip (default 15 s) through its private
+  go2rtc, then stops the stream. A sleeping battery doorbell has no earlier
+  footage, so clips start when the camera woke: there is no pre-roll and
+  none is fabricated. Recordings are held in memory only for a short time
+  until HomeCam fetches them with the bearer token, with a 120 s cooldown
+  and a daily cap to protect the battery.
 
 ## Install
 
@@ -41,6 +48,9 @@ device list, event snapshots, doorbell/motion state, and on-demand live HLS.
      `http://homeassistant.<tailnet>.ts.net:8091`.
    - `port`: `8091`, unless something else already uses it.
    - `live_idle_stop_seconds`: `60`.
+   - `event_clips_enabled`: `true` to record a short clip when the doorbell
+     rings or detects motion/a person (see below).
+   - `event_clip_daily_limit`: `24` (0-96) recordings per day.
 4. **Start**, then check the add-on **Log** shows
    `Uvicorn running on http://0.0.0.0:8091`.
 5. In HomeCam, go to **Settings → Eufy adapter**. Set the adapter URL to

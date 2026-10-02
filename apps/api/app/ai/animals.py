@@ -66,6 +66,11 @@ _SPECIES_SYNONYMS: dict[str, str] = {
 # rather than being shown to the user as a classification.
 _NULL_ANSWERS = frozenset({"", "unknown", "unsure", "none", "null", "n/a", "na", "not sure", "undetermined"})
 
+SIZES: tuple[str, ...] = ("small", "medium", "large")
+# Below this a breed is shown as "possible", never as a fact.
+LIKELY_BREED_CONFIDENCE = 0.75
+MAX_ANIMAL_COUNT = 20
+
 ANIMAL_SYSTEM_PROMPT = (
     "You identify animals in still frames from a home security camera. "
     "Reply with JSON only, no prose and no code fences, using exactly these "
@@ -75,15 +80,26 @@ ANIMAL_SYSTEM_PROMPT = (
     '"scientific_name": the binomial; "genus": a genus; "family": a family; '
     '"taxonomic_group": one of "bird", "mammal", "reptile", "amphibian", '
     '"insect", or null; "confidence": a number from 0 to 1 for the most '
-    'specific name supplied; "description": one short sentence describing the '
-    "animal, under 20 words}. Return null for names you cannot see. "
-    "Judge only what is visible."
+    'specific name supplied; "count": how many animals are visible (integer); '
+    '"coat_colours": list of visible coat/feather colours, e.g. ["black", '
+    '"white"]; "coat_pattern": e.g. "tabby", "spotted", "solid", "brindle", '
+    'or null; "size": one of "small", "medium", "large" relative to the '
+    'scene, or null; "action": what it is visibly doing, e.g. "walking across '
+    'the lawn", "sitting at the door", or null; "collar_visible": true, false '
+    'or null; "description": one short sentence describing the '
+    "animal, under 20 words}. Return null for anything you cannot see. "
+    "Judge only what is visible; never claim to know which individual animal "
+    "it is or whose pet it is."
 )
 
 
 @dataclass(frozen=True)
 class AnimalIdentity:
-    """What was seen, at the level of certainty it was actually seen at."""
+    """What was seen, at the level of certainty it was actually seen at.
+
+    This is *recognition* (what kind of animal), never *identity* (which
+    animal, whose pet): naming an individual animal stays an owner action.
+    """
 
     species: str
     breed: str | None = None
@@ -94,6 +110,12 @@ class AnimalIdentity:
     taxonomic_group: str | None = None
     genus: str | None = None
     family: str | None = None
+    count: int | None = None
+    coat_colours: tuple[str, ...] = ()
+    coat_pattern: str | None = None
+    size: str | None = None
+    action: str | None = None
+    collar_visible: bool | None = None
 
     @property
     def kind(self) -> str:
@@ -108,10 +130,18 @@ class AnimalIdentity:
             or self.species
         )
 
+    @property
+    def breed_certainty(self) -> str | None:
+        """"likely" or "possible" - a breed is never presented as certain."""
+        if not self.breed:
+            return None
+        return "likely" if self.confidence >= LIKELY_BREED_CONFIDENCE else "possible"
+
     def as_dict(self) -> dict:
         return {
             "species": self.species,
             "breed": self.breed,
+            "breed_certainty": self.breed_certainty,
             "confidence": round(self.confidence, 4),
             "description": self.description,
             "common_name": self.common_name,
@@ -119,6 +149,12 @@ class AnimalIdentity:
             "taxonomic_group": self.taxonomic_group,
             "genus": self.genus,
             "family": self.family,
+            "count": self.count,
+            "coat_colours": list(self.coat_colours),
+            "coat_pattern": self.coat_pattern,
+            "size": self.size,
+            "action": self.action,
+            "collar_visible": self.collar_visible,
         }
 
 
@@ -160,6 +196,46 @@ def _clean_name(value: object) -> str | None:
     if text.casefold() in _NULL_ANSWERS:
         return None
     return text[:120] or None
+
+
+def _clean_count(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if 1 <= number <= MAX_ANIMAL_COUNT else None
+
+
+def _clean_colours(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = re.split(r",|/| and ", value)
+    if not isinstance(value, list):
+        return ()
+    colours: list[str] = []
+    for item in value:
+        name = _clean_name(item)
+        if name and len(name) <= 30 and name.casefold() not in {c.casefold() for c in colours}:
+            colours.append(name)
+    return tuple(colours[:4])
+
+
+def _clean_choice(value: object, choices: tuple[str, ...]) -> str | None:
+    text = str(value or "").strip().casefold()
+    return text if text in choices else None
+
+
+def _clean_optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().casefold()
+    return True if text in {"true", "yes"} else False if text in {"false", "no"} else None
+
+
+def _clean_short(value: object, limit: int) -> str | None:
+    name = _clean_name(value)
+    return name[:limit] if name else None
 
 
 def _clean_group(value: object) -> str | None:
@@ -214,6 +290,12 @@ def parse_animal_reply(reply: str | None) -> AnimalIdentity | None:
         taxonomic_group=taxonomic_group,
         genus=genus,
         family=family,
+        count=_clean_count(payload.get("count")),
+        coat_colours=_clean_colours(payload.get("coat_colours")),
+        coat_pattern=_clean_short(payload.get("coat_pattern"), 40),
+        size=_clean_choice(payload.get("size"), SIZES),
+        action=_clean_short(payload.get("action"), 80),
+        collar_visible=_clean_optional_bool(payload.get("collar_visible")),
     )
 
 
@@ -283,10 +365,25 @@ async def identify_animal_frames(identifier: AnimalIdentifier, frames: list[byte
 
 
 def describe_animal(identity: AnimalIdentity, camera_name: str, zone_name: str | None = None) -> str:
-    """One-line event description, e.g. "A Border Collie (dog) was seen..."."""
+    """One-line event description, e.g. "A possible Border Collie (dog) was seen...".
+
+    A breed below :data:`LIKELY_BREED_CONFIDENCE` is worded "possible", so a
+    guess never reads as a fact; several animals are counted.
+    """
     where = f" in the {zone_name}" if zone_name else ""
+    count = identity.count or 1
+    hedge = (
+        f"{identity.breed_certainty} "
+        if identity.breed_certainty and identity.kind == identity.breed else ""
+    )
+    noun = identity.species if identity.species != "other" else "animal"
+    if count > 1:
+        detail = f" ({hedge}{identity.kind})" if identity.kind != identity.species else ""
+        return f"{count} {noun}s{detail} were seen{where} at {camera_name}."
     if identity.kind != identity.species:
-        subject = f"A {identity.kind} ({identity.species})"
+        named = f"{hedge}{identity.kind}"
+        article = "An" if named[:1].casefold() in "aeiou" else "A"
+        subject = f"{article} {named} ({identity.species})"
     elif identity.species == "other":
         subject = "An animal"
     else:
@@ -335,7 +432,7 @@ class AzureFoundryAnimalIdentifier:
                     ],
                 },
             ],
-            "max_completion_tokens": 200,
+            "max_completion_tokens": 350,
         }
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(

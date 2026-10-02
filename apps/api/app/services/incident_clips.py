@@ -13,7 +13,7 @@ from ..config import settings
 from ..db import SessionLocal
 from ..models.db import Incident, IncidentClip
 from . import incidents as incident_service
-from .stream_frames import ClipSegment, stream_hub
+from .stream_frames import ClipSegment, clips_enabled, stream_hub
 
 logger = logging.getLogger(__name__)
 _tasks: set[asyncio.Task] = set()
@@ -22,9 +22,16 @@ _MAX_CAPTURES_PER_CAMERA = 2
 _BUDGET_LOCK_KEY = 873284610
 
 
+class CapturedClip(bytes):
+    """Clip bytes plus the real (never padded) timing around the trigger."""
+
+    pre_roll_seconds: float = 0.0
+    duration_seconds: float = 0.0
+
+
 def seed(camera_id: str) -> tuple[ClipSegment, ...]:
     """Freeze pre-roll at detection time, before optional AI enrichment."""
-    if not settings.incident_clips_enabled:
+    if not clips_enabled():
         return ()
     segments = stream_hub.clip_segments(camera_id)
     now = time.monotonic()
@@ -54,27 +61,37 @@ async def discard(capture_task: asyncio.Task | None) -> None:
         await asyncio.gather(capture_task, return_exceptions=True)
 
 
-async def start(incident: Incident, capture_task: asyncio.Task | None) -> None:
-    """Called only for the first event of a newly created incident."""
+async def start(
+    incident: Incident, capture_task: asyncio.Task | None, event_id: str | None = None
+) -> bool:
+    """Called only for the first event of a newly created incident.
+
+    Returns whether the incident took ownership of ``capture_task``. When it
+    did, the triggering event (``event_id``) links to the incident clip
+    instead of storing a second copy of the same footage.
+    """
     if not settings.incident_clips_enabled:
-        await discard(capture_task)
-        return
+        return False
     async with SessionLocal() as session:
         row = await session.get(Incident, incident.id)
         if row is None or row.clip_status is not None:
-            await discard(capture_task)
-            return
+            return False
         row.clip_status = "pending" if capture_task is not None else "unavailable"
         await session.commit()
         await incident_service._broadcast(row, "incident.updated")
     if capture_task is None:
-        return
-    task = asyncio.create_task(_finish(incident.id, capture_task))
+        return False
+    if event_id is not None:
+        from . import event_clips
+
+        await event_clips.link_incident(event_id, incident.id)
+    task = asyncio.create_task(_finish(incident.id, capture_task, event_id))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
+    return True
 
 
-async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_at: float) -> bytes:
+async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_at: float) -> CapturedClip:
     deadline = triggered_at + settings.incident_clip_post_seconds
     segments = list(initial)
     total_bytes = len(segments[0].init) + sum(len(segment.data) for segment in segments)
@@ -100,14 +117,20 @@ async def _collect(camera_id: str, initial: tuple[ClipSegment, ...], triggered_a
                 segments.append(segment)
     if segments[-1].captured_at < deadline - 3:
         raise ValueError("insufficient post-roll")
-    video = segments[0].init + b"".join(segment.data for segment in segments)
+    video = CapturedClip(segments[0].init + b"".join(segment.data for segment in segments))
+    first = segments[0]
+    first_start = first.captured_at - first.duration if first.duration else first.captured_at
+    video.pre_roll_seconds = round(max(0.0, triggered_at - first_start), 1)
+    video.duration_seconds = round(sum(segment.duration for segment in segments), 1)
     return video
 
 
-async def _finish(incident_id: str, capture_task: asyncio.Task) -> None:
+async def _finish(incident_id: str, capture_task: asyncio.Task, event_id: str | None = None) -> None:
+    from . import event_clips
+
     try:
         video = await capture_task
-        async with SessionLocal() as session:
+        async with event_clips.admission_lock, SessionLocal() as session:
             if session.get_bind().dialect.name == "postgresql":
                 # Serialize admission across API replicas; a lock held through
                 # commit ensures both aggregate reads see the previous insert.
@@ -125,9 +148,7 @@ async def _finish(incident_id: str, capture_task: asyncio.Task) -> None:
                     IncidentClip.created_at < today + timedelta(days=1),
                 )
             )).scalar_one()
-            stored_bytes = (await session.execute(
-                select(func.coalesce(func.sum(IncidentClip.size_bytes), 0))
-            )).scalar_one()
+            stored_bytes = await event_clips.stored_clip_bytes(session)
             if (
                 daily_count >= settings.incident_clip_daily_limit
                 or stored_bytes + len(video) > settings.incident_clip_storage_limit_bytes
@@ -136,6 +157,10 @@ async def _finish(incident_id: str, capture_task: asyncio.Task) -> None:
                 await session.commit()
                 await incident_service._broadcast(row, "incident.updated")
                 logger.info("incident clip %s skipped: daily or storage budget reached", incident_id)
+                await event_clips.update_events(
+                    [event_id] if event_id else [],
+                    {"status": "skipped", "reason": "Daily or storage clip budget reached"},
+                )
                 return
             session.add(IncidentClip(
                 incident_id=incident_id, video=video, size_bytes=len(video), created_at=now
@@ -143,23 +168,32 @@ async def _finish(incident_id: str, capture_task: asyncio.Task) -> None:
             row.clip_status = "ready"
             await session.commit()
             await incident_service._broadcast(row, "incident.updated")
+        await event_clips.update_events(
+            [event_id] if event_id else [], {"status": "ready", **event_clips.clip_facts(video)}
+        )
     except asyncio.CancelledError:
         raise
     except (ValueError, OSError) as exc:
         logger.info("incident clip %s unavailable: %s", incident_id, exc)
-        await _unavailable(incident_id)
+        await _unavailable(incident_id, event_id, str(exc))
     except Exception:
         logger.exception("incident clip %s failed", incident_id)
-        await _unavailable(incident_id)
+        await _unavailable(incident_id, event_id, "Clip capture failed")
 
 
-async def _unavailable(incident_id: str) -> None:
+async def _unavailable(incident_id: str, event_id: str | None = None, reason: str = "") -> None:
     async with SessionLocal() as session:
         row = await session.get(Incident, incident_id)
         if row is not None and row.clip_status == "pending":
             row.clip_status = "unavailable"
             await session.commit()
             await incident_service._broadcast(row, "incident.updated")
+    if event_id:
+        from . import event_clips
+
+        await event_clips.update_events(
+            [event_id], {"status": "unavailable", "reason": event_clips.friendly_reason(reason)}
+        )
 
 
 def status(incident: Incident) -> dict:

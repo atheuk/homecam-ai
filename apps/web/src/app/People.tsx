@@ -15,6 +15,7 @@
 import {useCallback,useEffect,useState} from "react";
 import {DetectionBox} from "./DetectionBoxes";
 import {ZoomablePhoto} from "./Lightbox";
+import EventClip,{type EventClipInfo} from "./EventClip";
 
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
 
@@ -27,6 +28,12 @@ export type AnimalIdentity={
   confidence?:number|null;
   description?:string|null;
   common_name?:string|null;scientific_name?:string|null;taxonomic_group?:string|null;
+  // A breed is a cautious suggestion, never a fact; "recognition" is not identity.
+  breed_certainty?:"likely"|"possible"|null;
+  count?:number|null;
+  coat_colours?:string[]|null;coat_pattern?:string|null;
+  size?:"small"|"medium"|"large"|null;
+  action?:string|null;collar_visible?:boolean|null;
 };
 export type VehicleIdentity={
   make?:string;model?:string;colour?:string;body_type?:string;year_generation?:string;trim?:string;
@@ -39,10 +46,11 @@ export type SuspiciousAssessment={
 
 /** Observable description of a person: what a witness could describe.
  *
- * Deliberately carries no ethnicity or gender. Those are protected
- * attributes the model would be guessing at, and pairing a guess about
- * someone's race with a trust flag is profiling, not home security.
- * Legacy age fields are neither requested nor displayed. */
+ * Deliberately carries no ethnicity, skin colour or gender. Those are
+ * protected attributes the model would be guessing at, and pairing a guess
+ * about someone's race with a trust flag is profiling, not home security.
+ * Age is only ever a broad, explicitly uncertain apparent range; anything
+ * hidden or unclear stays null and is simply not shown. */
 export type Appearance={
   person_present:boolean;
   age_band?:"child"|"teenager"|"adult"|"older adult"|null;
@@ -52,6 +60,16 @@ export type Appearance={
   carrying?:string|null;
   face_visible?:boolean;
   description?:string|null;
+  age_range?:string|null;
+  age_certainty?:"low"|"medium"|null;
+  hair?:{length?:string|null;colour?:string|null;style?:string|null}|null;
+  upper_clothing?:{colour?:string|null;type?:string|null}|null;
+  lower_clothing?:{colour?:string|null;type?:string|null}|null;
+  headwear?:string|null;
+  footwear?:string|null;
+  accessories?:string[]|null;
+  action?:string|null;
+  direction?:string|null;
 };
 
 /** Whether the household expects this person. Always set by a human. */
@@ -73,6 +91,7 @@ export type EventItem={
   tags?:string[]|null;zone?:string|null;
   // What changed, for scene transitions (see apps/api/app/services/scene_state.py).
   scene?:EventScene|null;
+  clip?:EventClipInfo|null;
 };
 export type EventScene={
   kind:"vehicle"|"mailbox"|"bin"|string;transition:string;
@@ -189,21 +208,62 @@ function PersonAssign({event,persons,token,onAssigned}:{event:EventItem;persons:
   </div>;
 }
 
-/** Plain-language summary of an animal sighting, breed first when known. */
+/** Plain-language summary of an animal sighting. A breed is always hedged. */
 export function describeAnimal(animal:AnimalIdentity){
-  if(animal.common_name) return animal.common_name;
-  if(animal.breed) return animal.breed;
-  return animal.species==="other"?"Unrecognized animal":animal.species.charAt(0).toUpperCase()+animal.species.slice(1);
+  const count=animal.count&&animal.count>1?`${animal.count} × `:"";
+  if(animal.common_name) return count+animal.common_name;
+  const species=animal.species==="other"?"Unrecognized animal":animal.species.charAt(0).toUpperCase()+animal.species.slice(1);
+  if(animal.breed) return `${count}${species} · ${animal.breed_certainty==="likely"?"likely":"possibly"} ${animal.breed}`;
+  return count+species;
+}
+
+/** Visible coat, size and behaviour of an animal; nothing is inferred. */
+export function animalDetails(animal:AnimalIdentity){
+  const details:{key:string;label:string}[]=[];
+  const coat=[(animal.coat_colours||[]).join(" & "),animal.coat_pattern].filter(Boolean).join(" ");
+  if(coat) details.push({key:"coat",label:`${coat} coat`});
+  if(animal.size) details.push({key:"size",label:`${animal.size} size`});
+  if(animal.action) details.push({key:"action",label:animal.action});
+  if(animal.collar_visible) details.push({key:"collar",label:"Collar visible"});
+  return details;
+}
+
+function phrase(...parts:(string|null|undefined)[]){
+  return parts.filter(Boolean).join(" ");
 }
 
 /** Human-readable clothing and carried-item observations, not demographics. */
 export function appearanceChips(appearance:Appearance){
   const chips:{key:string;label:string}[]=[];
+  // Only the hedged range the API derives is shown, never a raw band or number.
+  if(appearance.age_range){
+    chips.push({key:"age",label:`Apparent age ${appearance.age_range}${appearance.age_certainty?` (${appearance.age_certainty} certainty)`:""}`});
+  }
   if(appearance.build) chips.push({key:"build",label:appearance.build});
-  if(appearance.clothing) chips.push({key:"clothing",label:appearance.clothing});
+  const hair=appearance.hair;
+  const hairText=hair?phrase(hair.length,hair.colour,hair.style):"";
+  if(hairText) chips.push({key:"hair",label:`${hairText} hair`});
+  const upper=appearance.upper_clothing?phrase(appearance.upper_clothing.colour,appearance.upper_clothing.type):"";
+  const lower=appearance.lower_clothing?phrase(appearance.lower_clothing.colour,appearance.lower_clothing.type):"";
+  if(upper||lower){
+    if(upper) chips.push({key:"upper",label:upper});
+    if(lower) chips.push({key:"lower",label:lower});
+  }else if(appearance.clothing) chips.push({key:"clothing",label:appearance.clothing});
+  if(appearance.headwear) chips.push({key:"headwear",label:appearance.headwear});
+  if(appearance.footwear) chips.push({key:"footwear",label:appearance.footwear});
+  for(const item of appearance.accessories||[]) chips.push({key:`accessory-${item}`,label:item});
   if(appearance.carrying) chips.push({key:"carrying",label:`Carrying ${appearance.carrying}`});
+  if(appearance.action) chips.push({key:"action",label:appearance.action});
+  if(appearance.direction) chips.push({key:"direction",label:`Moving ${appearance.direction}`.replace("Moving stationary","Standing still")});
   if(appearance.face_visible===false) chips.push({key:"face",label:"Face not visible"});
   return chips;
+}
+
+/** Neutral wording for a behaviour-based review flag: never a criminal label. */
+export function reviewLabel(level?:string|null){
+  if(level==="suspicious") return "Needs review";
+  if(level==="elevated") return "Worth a look";
+  return "Noted";
 }
 
 const TRUST_LABELS:Record<Trust,string>={unknown:"Not yet known",trusted:"Trusted",watch:"Watch"};
@@ -264,6 +324,7 @@ export function EventCard({event,persons,token,useSessionCookie=false,onChanged}
         <small>{new Date(event.start_time).toLocaleString()}</small>
       </div>
       <p className="event-desc">{event.description}</p>
+      <EventClip eventId={event.id} clip={event.clip} token={token}/>
       {badges.length>0&&<p className="scene" aria-label="What changed">
         {badges.map(label=><span key={label} className="badge scene-badge">{label}</span>)}
         {event.scene?.zone&&<span className="muted"> · {event.scene.zone}</span>}
@@ -288,6 +349,8 @@ export function EventCard({event,persons,token,useSessionCookie=false,onChanged}
           : animal.breed
           ? <span className="badge">{animal.species}{animal.confidence?` · ${Math.round(animal.confidence*100)}% sure`:""}</span>
           : <span className="badge">Species not identifiable</span>}
+        {animal.breed&&<span className="badge">Breed is a suggestion, not a confirmed identity</span>}
+        {animalDetails(animal).map(detail=><span key={detail.key} className="badge">{detail.label}</span>)}
       </p>}
       {event.vehicle&&<p className="vehicle" aria-label="Vehicle identification">
         {(["colour","make","model","year_generation","body_type","trim"] as const).map(key=>
@@ -298,7 +361,8 @@ export function EventCard({event,persons,token,useSessionCookie=false,onChanged}
         )}
       </p>}
       {event.suspicious&&<div className="suspicious" aria-label="Suspicious behaviour assessment">
-        <strong>{event.suspicious.level} · score {event.suspicious.score}</strong>
+        <strong>{reviewLabel(event.suspicious.level)} · score {event.suspicious.score}</strong>
+        <p className="muted">Based only on behaviour and context below, never on how someone looks.</p>
         <ul>{event.suspicious.reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
         {event.suspicious.evidence_event_ids.length>0&&<p>
           Evidence: {event.suspicious.evidence_event_ids.map(id=><a key={id} href={`#event-${id}`}>{id} </a>)}

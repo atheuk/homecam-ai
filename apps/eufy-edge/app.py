@@ -16,13 +16,19 @@ livestreams are stopped as soon as the last viewer disconnects.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ipaddress
 import logging
 import os
 import re
 import secrets
-from dataclasses import dataclass
+import struct
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from contextlib import asynccontextmanager
@@ -93,6 +99,12 @@ class Settings:
     # Set when go2rtc runs in the same network namespace (HA add-on): the
     # raw ingest endpoint then refuses anything but loopback clients.
     internal_loopback_only: bool = False
+    # Bounded post-trigger event clips. The doorbell sleeps, so there is no
+    # pre-roll: recording starts when the bridge reports motion/person/ring.
+    event_clips_enabled: bool = True
+    event_clip_seconds: int = 15
+    event_clip_cooldown_seconds: float = 120.0
+    event_clip_daily_limit: int = 24
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -113,16 +125,235 @@ class Settings:
             hls_public_base_url=(os.environ.get("HLS_PUBLIC_BASE_URL") or "").rstrip("/") or None,
             hls_token=os.environ.get("HLS_TOKEN") or secrets.token_urlsafe(24),
             internal_loopback_only=os.environ.get("INTERNAL_LOOPBACK_ONLY", "").lower() in ("1", "true", "yes"),
+            event_clips_enabled=os.environ.get("EVENT_CLIPS_ENABLED", "true").lower() in ("1", "true", "yes"),
+            event_clip_seconds=max(5, min(30, int(os.environ.get("EVENT_CLIP_SECONDS", "15")))),
+            event_clip_cooldown_seconds=max(30.0, float(os.environ.get("EVENT_CLIP_COOLDOWN_SECONDS", "120"))),
+            event_clip_daily_limit=max(0, min(96, int(os.environ.get("EVENT_CLIP_DAILY_LIMIT", "24")))),
         )
 
 
 settings = Settings.from_env()
 client = EufyWsClient(settings.eufy_ws_url, live_idle_stop_seconds=settings.live_idle_stop_seconds)
 
+CLIP_MAX_BYTES = 8 * 1024 * 1024
+CLIPS_KEPT_PER_DEVICE = 10
+CLIP_TTL_SECONDS = 30 * 60
+
+
+@dataclass
+class EdgeClip:
+    id: str
+    serial: str
+    trigger: str
+    started_at: datetime
+    monotonic: float
+    data: bytes = b""
+    duration_seconds: float | None = None
+    complete: bool = False
+    failed: str | None = None
+
+    def summary(self) -> dict:
+        return {
+            "id": self.id,
+            "started_at": self.started_at.isoformat(),
+            "trigger": self.trigger,
+            "duration_seconds": self.duration_seconds,
+            "size_bytes": len(self.data),
+            # Nothing before the trigger exists: the doorbell was asleep.
+            "pre_roll_seconds": 0.0,
+            "complete": self.complete,
+            "failed": self.failed,
+        }
+
+
+def _mp4_complete_prefix(data: bytes) -> bytes:
+    """Drop a trailing partial top-level box (a cut-off fragment)."""
+    offset = 0
+    while offset + 8 <= len(data):
+        size = struct.unpack(">I", data[offset:offset + 4])[0]
+        if size == 1 and offset + 16 <= len(data):
+            size = struct.unpack(">Q", data[offset + 8:offset + 16])[0]
+        if size < 8 or offset + size > len(data):
+            break
+        offset += size
+    return data[:offset]
+
+
+def _mp4_duration(data: bytes) -> float | None:
+    """Sum fragment durations (trun sample durations / mdhd timescale).
+
+    Best effort only: HomeCam re-validates every clip it stores.
+    """
+    timescale = None
+    total = 0
+    default_duration = 0
+
+    def walk(start: int, end: int) -> None:
+        nonlocal timescale, total, default_duration
+        offset = start
+        while offset + 8 <= end:
+            size, kind = struct.unpack(">I4s", data[offset:offset + 8])
+            if size < 8 or offset + size > end:
+                return
+            body = offset + 8
+            if kind in (b"moov", b"trak", b"mdia", b"moof", b"traf"):
+                walk(body, offset + size)
+            elif kind == b"mdhd" and timescale is None:
+                version = data[body]
+                timescale = struct.unpack(">I", data[body + (20 if version == 1 else 12):][:4])[0]
+            elif kind == b"tfhd":
+                flags = int.from_bytes(data[body + 1:body + 4], "big")
+                pos = body + 8
+                if flags & 0x1:
+                    pos += 8
+                if flags & 0x2:
+                    pos += 4
+                if flags & 0x8:
+                    default_duration = struct.unpack(">I", data[pos:pos + 4])[0]
+            elif kind == b"trun":
+                flags = int.from_bytes(data[body + 1:body + 4], "big")
+                count = struct.unpack(">I", data[body + 4:body + 8])[0]
+                pos = body + 8 + (4 if flags & 0x1 else 0) + (4 if flags & 0x4 else 0)
+                per = sum(4 for bit in (0x100, 0x200, 0x400, 0x800) if flags & bit)
+                for _ in range(min(count, 100000)):
+                    total += struct.unpack(">I", data[pos:pos + 4])[0] if flags & 0x100 else default_duration
+                    pos += per
+            offset += size
+
+    try:
+        walk(0, len(data))
+    except (struct.error, IndexError):
+        return None
+    if not timescale or total <= 0:
+        return None
+    return round(total / timescale, 2)
+
+
+@dataclass
+class ClipRecorder:
+    """Bounded, event-triggered post-roll recorder for battery Eufy devices.
+
+    Never streams continuously: one short recording per trigger, a cooldown
+    per device, a daily cap, a small in-memory ring buffer with a TTL, and the
+    livestream is released (and the device allowed to sleep) as soon as the
+    recording ends.
+    """
+
+    enabled: bool
+    seconds: int
+    cooldown: float
+    daily_limit: int
+    clips: dict[str, deque] = field(default_factory=dict)
+    _last: dict[str, float] = field(default_factory=dict)
+    _day: str = ""
+    _today: int = 0
+    _tasks: set = field(default_factory=set)
+
+    def _prune(self) -> None:
+        cutoff = time.monotonic() - CLIP_TTL_SECONDS
+        for queue in self.clips.values():
+            while queue and queue[0].monotonic < cutoff:
+                queue.popleft()
+
+    def list(self, serial: str) -> list[dict]:
+        self._prune()
+        return [clip.summary() for clip in self.clips.get(serial, ())]
+
+    def get(self, serial: str, clip_id: str) -> EdgeClip | None:
+        self._prune()
+        return next((c for c in self.clips.get(serial, ()) if c.id == clip_id), None)
+
+    def trigger(self, serial: str, trigger: str) -> EdgeClip | None:
+        if not self.enabled:
+            return None
+        now = time.monotonic()
+        if any(not c.complete and not c.failed for c in self.clips.get(serial, ())):
+            return None  # already recording this device: that clip covers it
+        if now - self._last.get(serial, -1e9) < self.cooldown:
+            return None
+        day = datetime.now(timezone.utc).date().isoformat()
+        if day != self._day:
+            self._day, self._today = day, 0
+        if self._today >= self.daily_limit:
+            logger.info("event clip daily limit reached; not waking the device")
+            return None
+        self._today += 1
+        self._last[serial] = now
+        clip = EdgeClip(uuid.uuid4().hex, serial, trigger, datetime.now(timezone.utc), now)
+        self.clips.setdefault(serial, deque(maxlen=CLIPS_KEPT_PER_DEVICE)).append(clip)
+        task = asyncio.get_running_loop().create_task(self._record(clip))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return clip
+
+    async def _record(self, clip: EdgeClip) -> None:
+        try:
+            await client.start_livestream(clip.serial)
+            name = await _ensure_go2rtc_stream(clip.serial)
+            clip.data = await _fetch_mp4(name, self.seconds)
+            if len(clip.data) < 64 or clip.data[4:8] != b"ftyp":
+                raise RuntimeError("no video arrived from the livestream")
+            clip.duration_seconds = _mp4_duration(clip.data)
+            clip.complete = True
+            logger.info("recorded a %s event clip (%d bytes)", clip.trigger, len(clip.data))
+        except asyncio.CancelledError:
+            clip.failed = "cancelled"
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported in the clip listing
+            clip.failed = redact(str(exc) or type(exc).__name__)[:200]
+            clip.data = b""
+            logger.warning("event clip recording failed: %s", clip.failed)
+
+    async def close(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
+        for task in list(self._tasks):
+            with contextlib.suppress(BaseException):
+                await task
+
+
+async def _fetch_mp4(name: str, seconds: int) -> bytes:
+    """Pull ``seconds`` of fragmented MP4 from the private go2rtc.
+
+    go2rtc ends the response itself after ``duration``; a client-side
+    deadline and byte cap bound it anyway. Closing the response drops the
+    go2rtc consumer, which stops ffmpeg, which releases the livestream.
+    """
+    buffer = bytearray()
+    deadline = time.monotonic() + seconds + settings.live_ready_timeout + 10
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=seconds + settings.live_ready_timeout)) as http:
+        async with http.stream(
+            "GET",
+            f"{settings.go2rtc_url}/api/stream.mp4",
+            params={"src": name, "duration": str(seconds)},
+        ) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(f"go2rtc refused the MP4 recording: HTTP {response.status_code}")
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) >= CLIP_MAX_BYTES or time.monotonic() > deadline:
+                    break
+    return _mp4_complete_prefix(bytes(buffer[:CLIP_MAX_BYTES]))
+
+
+recorder = ClipRecorder(
+    enabled=settings.event_clips_enabled,
+    seconds=settings.event_clip_seconds,
+    cooldown=settings.event_clip_cooldown_seconds,
+    daily_limit=settings.event_clip_daily_limit,
+)
+client.trigger_listeners.append(recorder.trigger)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if settings.event_clips_enabled:
+        # Event clips need the bridge's push events even when nobody has
+        # called the API yet since the adapter started.
+        with contextlib.suppress(Exception):
+            await client.ensure_connected()
     yield
+    await recorder.close()
     # Close the bridge socket and stop any livestream still running, so the
     # battery doorbell is not left awake by an adapter restart.
     await client.close()
@@ -176,7 +407,31 @@ async def devices(authorization: str | None = Header(default=None)) -> dict:
         await client.ensure_connected()
     except EufyBridgeUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
-    return {"devices": client.devices()}
+    devices = client.devices()
+    for device in devices:
+        device["capabilities"]["eventClips"] = settings.event_clips_enabled and device["capabilities"].get("liveStream", False)
+    return {"devices": devices}
+
+
+@app.get("/devices/{device_id}/clips")
+async def event_clips(device_id: str, authorization: str | None = Header(default=None)) -> dict:
+    require_token(authorization)
+    if not settings.event_clips_enabled:
+        raise HTTPException(404, "Event clips are disabled on this adapter")
+    serial = await _known_serial(device_id)
+    return {"clips": recorder.list(serial)}
+
+
+@app.get("/devices/{device_id}/clips/{clip_id}")
+async def event_clip(device_id: str, clip_id: str, authorization: str | None = Header(default=None)) -> Response:
+    require_token(authorization)
+    if not settings.event_clips_enabled:
+        raise HTTPException(404, "Event clips are disabled on this adapter")
+    serial = await _known_serial(device_id)
+    clip = recorder.get(serial, clip_id)
+    if clip is None or not clip.complete or not clip.data:
+        raise HTTPException(404, "Clip not found")
+    return Response(clip.data, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/devices/{device_id}/snapshot")

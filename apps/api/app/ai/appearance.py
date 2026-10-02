@@ -15,28 +15,41 @@ shadows. A vision model looking at the same crop is a far better judge, so
 a detection border verified or unverified rather than presenting every
 box as fact.
 
+What it does record (all "unknown"/null when not plainly visible)
+-----------------------------------------------------------------
+* hair: length, colour and style - only when the hair is visible, never
+  guessed under a hood or hat;
+* upper and lower clothing colour/type, headwear, footwear, accessories,
+  carried items and build;
+* a **broad apparent age range** (child / teenager / adult / older adult,
+  each with an explicit approximate span) with a confidence that is capped
+  at "medium" - it is an impression from a security crop, never an age;
+* the visible action (e.g. "ringing the doorbell") and movement direction.
+
 Attributes deliberately NOT inferred
 ------------------------------------
-**Ethnicity/race and gender are not classified, and must not be added.**
+**Ethnicity/race, skin colour, gender, religion, nationality, health,
+emotion, intent, criminality and identity are not classified, and must not
+be added.**
 
-* They are protected attributes. A home security system that sorts callers
-  by race and pairs that with a trust flag is a profiling tool, and the
-  false-positive rate of appearance-based classification falls unevenly on
-  the people most harmed by being wrongly flagged.
-* Microsoft retired exactly these inferences (gender, age, race) from Azure
-  Face in 2022 under its Responsible AI Standard, and the Azure AI Services
-  terms this deployment runs under prohibit using the service to infer
-  them. A model asked anyway will often refuse, producing unparseable
-  output; building on that is unreliable as well as out of policy.
-* They do not serve the actual goal. "Was this the same caller as
-  Tuesday?" is answered by the embedding matcher in
-  :mod:`app.services.persons`, and "what did they look like?" is answered
-  far more specifically by clothing and carried items, which is what a
-  witness statement would record.
+* They are protected or sensitive attributes. A home security system that
+  sorts callers by them and pairs that with a trust flag is a profiling
+  tool, and the error rate of appearance-based classification falls
+  unevenly on the people most harmed by being wrongly flagged. Skin colour
+  is excluded too: it is a direct proxy for ethnicity.
+* The Microsoft Enterprise AI Services Code of Conduct this deployment runs
+  under prohibits inferring gender, race, nationality, religion and a
+  specific age from images, while permitting age *ranges* and hair colour;
+  the fields above stay on the permitted side of that line. A model asked
+  anyway will often refuse, producing unparseable output; building on that
+  is unreliable as well as out of policy.
+* They do not serve the actual goal. "What did they look like?" is answered
+  far more specifically by clothing, hair and carried items, which is what
+  a witness statement would record. Who someone *is* stays a manual owner
+  decision; this module never names or matches anyone.
 
-Legacy age fields remain nullable in stored data for compatibility, but new
-vision requests neither ask for nor use age estimates.
-
+Every free-text answer is screened: a field mentioning a prohibited
+attribute is dropped rather than stored, whatever the model was told.
 Failure policy (SPEC 43): every call is wrapped by the caller and a failure
 degrades to no appearance data rather than losing the event.
 """
@@ -102,23 +115,68 @@ _NULL_VALUES = frozenset(
     }
 )
 
+# Explicitly approximate span shown next to each band.
+AGE_RANGES: dict[str, str] = {
+    "child": "approx. under 13",
+    "teenager": "approx. 13-19",
+    "adult": "approx. 20-64",
+    "older adult": "approx. 65+",
+}
+# An apparent age from a security crop is an impression, never "high".
+MAX_AGE_CONFIDENCE = 0.6
+
+DIRECTIONS: tuple[str, ...] = (
+    "toward camera", "away from camera", "left to right", "right to left", "stationary",
+)
+
+# Any field containing one of these is dropped rather than stored: the model
+# was told not to say them, but instructions are not a guarantee.
+_PROHIBITED = re.compile(
+    r"\b(ethnic\w*|race|racial\w*|skin|complexion|caucasian|asian|african|hispanic|latin[oax]|"
+    r"arab\w*|middle[- ]eastern|european|indian|nationality|"
+    r"male|female|man|men|woman|women|boy|girl|gender\w*|masculine|feminine|"
+    r"religio\w*|muslim|christian|jewish|hindu|sikh|"
+    r"angry|nervous|scared|afraid|anxious|drunk|intoxicated|happy|sad|upset|emotion\w*|"
+    r"disabled|disability|sick|pregnant|"
+    r"suspicious|criminal|thief|burglar|dangerous|threatening|shady|sketchy|"
+    r"\d+\s*(?:years?|yrs?)(?:\s*old)?)\b",
+    re.I,
+)
+
 APPEARANCE_SYSTEM_PROMPT = (
     "You are describing a still frame from a homeowner's own security camera "
-    "so they can recognise a caller later. Report only what is plainly "
-    "visible.\n"
+    "so they can recognise a caller later, like a careful witness statement. "
+    "Report only what is plainly visible; use null for anything hidden, "
+    "occluded, too small or unclear.\n"
     "Reply with JSON only, no prose and no code fences, with exactly these "
     "keys:\n"
     '  "person_present": true or false - is a person clearly visible?\n'
+    '  "apparent_age_band": one of "child", "teenager", "adult", "older adult", '
+    "or null if unclear - a broad impression, never a number.\n"
+    '  "age_confidence": 0 to 1, how clear that impression is.\n'
     '  "build": short phrase for apparent height/build, or null.\n'
-    '  "clothing": colours and garments visible, or null.\n'
+    '  "hair": {"length": e.g. "short"/"shoulder-length"/"long"/"shaved", '
+    '"colour": e.g. "dark brown"/"blond"/"grey", "style": e.g. "ponytail"/"curly"/"braided"} '
+    "- each null when the hair is covered or not visible.\n"
+    '  "upper_clothing": {"colour": ..., "type": e.g. "hooded jacket"} or null.\n'
+    '  "lower_clothing": {"colour": ..., "type": e.g. "jeans"} or null.\n'
+    '  "headwear": e.g. "black beanie", or null.\n'
+    '  "footwear": e.g. "white trainers", or null.\n'
+    '  "accessories": list of visible items such as "glasses", "backpack", '
+    '"face mask"; empty list if none.\n'
     '  "carrying": anything held or carried, or null.\n'
+    '  "action": what they are visibly doing, e.g. "ringing the doorbell", '
+    '"walking past", "delivering a parcel", or null.\n'
+    '  "direction": one of "toward camera", "away from camera", "left to '
+    'right", "right to left", "stationary", or null.\n'
     '  "face_visible": true or false - is the face clearly enough shown to '
     "recognise them?\n"
-    '  "description": one plain sentence, under 20 words, for the event '
-    "list.\n"
-    "Rules: never state or guess the person's age, ethnicity, race, nationality, "
-    "gender or identity, and never include those in the description. Never "
-    "guess intent. Use null rather than guessing any field. If no person is "
+    '  "description": one plain sentence, under 20 words, about clothing, '
+    "hair and action only.\n"
+    "Rules: never state or guess ethnicity, race, skin colour, nationality, "
+    "gender, religion, health, emotion, intent, a specific age or anyone's "
+    "identity, and never include those anywhere. Never call anyone "
+    "suspicious. Use null rather than guessing any field. If no person is "
     'visible set "person_present" to false and every other field to null.'
 )
 
@@ -135,29 +193,56 @@ class Appearance:
     carrying: str | None = None
     face_visible: bool = False
     description: str | None = None
+    hair: dict | None = None
+    upper_clothing: dict | None = None
+    lower_clothing: dict | None = None
+    headwear: str | None = None
+    footwear: str | None = None
+    accessories: tuple[str, ...] = ()
+    action: str | None = None
+    direction: str | None = None
+
+    @property
+    def age_range(self) -> str | None:
+        return AGE_RANGES.get(self.age_band) if self.age_band else None
+
+    @property
+    def age_certainty(self) -> str | None:
+        if self.age_band is None or self.age_confidence is None:
+            return None
+        return "medium" if self.age_confidence >= 0.45 else "low"
 
     def as_dict(self) -> dict:
         return {
             "person_present": self.person_present,
             "age_band": self.age_band,
+            "age_range": self.age_range,
             "age_confidence": round(self.age_confidence, 3) if self.age_confidence is not None else None,
+            "age_certainty": self.age_certainty,
             "build": self.build,
             "clothing": self.clothing,
             "carrying": self.carrying,
             "face_visible": self.face_visible,
             "description": self.description,
+            "hair": self.hair,
+            "upper_clothing": self.upper_clothing,
+            "lower_clothing": self.lower_clothing,
+            "headwear": self.headwear,
+            "footwear": self.footwear,
+            "accessories": list(self.accessories),
+            "action": self.action,
+            "direction": self.direction,
         }
 
     @property
     def summary(self) -> str:
-        """Short human label, e.g. "Adult · dark jacket · carrying a parcel"."""
+        """Short human label, e.g. "Adult (apparent) · dark jacket · carrying a parcel"."""
         parts = [
-            self.age_band.capitalize() if self.age_band else None,
+            f"{self.age_band.capitalize()} (apparent)" if self.age_band else None,
             self.clothing,
             f"carrying {self.carrying}" if self.carrying else None,
         ]
         return " · ".join(part for part in parts if part)
-
 
 class AppearanceAnalyzer(Protocol):
     name: str
@@ -166,11 +251,15 @@ class AppearanceAnalyzer(Protocol):
 
 
 def _clean_text(value: object, limit: int = 120) -> str | None:
-    """Normalize a free-text field, mapping refusals/placeholders to None."""
-    if value is None or isinstance(value, bool):
+    """Normalize a free-text field, mapping refusals/placeholders and any
+    prohibited-attribute wording to None."""
+    if value is None or isinstance(value, (bool, dict, list)):
         return None
     text = str(value).strip().strip(".").strip()
     if not text or text.casefold() in _NULL_VALUES:
+        return None
+    if _PROHIBITED.search(text):
+        logger.info("appearance field dropped: prohibited attribute wording")
         return None
     return text[:limit]
 
@@ -179,13 +268,54 @@ def _safe_description(value: object) -> str | None:
     text = _clean_text(value, limit=300)
     if text is None:
         return None
-    # Model instructions are not a guarantee; omit an answer containing a
-    # demographic or identity claim rather than persisting the claim.
-    if re.search(r"\b(child|kid|teenager|adult|elderly|senior|young|old|"
-                 r"male|female|man|woman|ethnicity|race|aged|years? old)\b", text, re.I):
+    # Ages and age words belong in the explicit, hedged age field only.
+    if re.search(r"\b(child|kid|teenager|teen|adult|elderly|senior|young|old|aged)\b", text, re.I):
         return None
     return text
 
+
+def _clean_parts(value: object, keys: tuple[str, ...]) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    cleaned = {key: _clean_text(value.get(key), limit=40) for key in keys}
+    return cleaned if any(cleaned.values()) else None
+
+
+def _clean_list(value: object, limit: int = 6) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = re.split(r",|;", value)
+    if not isinstance(value, list):
+        return ()
+    items: list[str] = []
+    for item in value:
+        text = _clean_text(item, limit=40)
+        if text and text.casefold() not in {existing.casefold() for existing in items}:
+            items.append(text)
+    return tuple(items[:limit])
+
+
+def _clean_direction(value: object) -> str | None:
+    text = _clean_text(value, limit=40)
+    if text is None:
+        return None
+    lowered = text.casefold().replace("-", " ")
+    for direction in DIRECTIONS:
+        if direction in lowered:
+            return direction
+    if "toward" in lowered or "approach" in lowered:
+        return "toward camera"
+    if "away" in lowered or "leaving" in lowered:
+        return "away from camera"
+    return None
+
+
+def _combined_clothing(upper: dict | None, lower: dict | None) -> str | None:
+    pieces = [
+        " ".join(part for part in (garment.get("colour"), garment.get("type")) if part)
+        for garment in (upper, lower) if garment
+    ]
+    text = " and ".join(piece for piece in pieces if piece)
+    return text or None
 
 def normalize_age_band(value: object) -> str | None:
     """Map a model's age wording onto one of :data:`AGE_BANDS`."""
@@ -263,15 +393,32 @@ def parse_appearance_reply(reply: str | None) -> Appearance | None:
     if not present:
         return Appearance(person_present=False)
 
+    band = normalize_age_band(parsed.get("apparent_age_band") or parsed.get("age_band"))
+    confidence = None
+    if band is not None:
+        confidence = min(MAX_AGE_CONFIDENCE, _clean_confidence(parsed.get("age_confidence")))
+        if confidence <= 0.0:
+            band, confidence = None, None
+    upper = _clean_parts(parsed.get("upper_clothing"), ("colour", "type"))
+    lower = _clean_parts(parsed.get("lower_clothing"), ("colour", "type"))
     return Appearance(
         person_present=True,
+        age_band=band,
+        age_confidence=confidence,
         build=_clean_text(parsed.get("build"), limit=80),
-        clothing=_clean_text(parsed.get("clothing"), limit=160),
+        clothing=_clean_text(parsed.get("clothing"), limit=160) or _combined_clothing(upper, lower),
         carrying=_clean_text(parsed.get("carrying"), limit=120),
         face_visible=_coerce_bool(parsed.get("face_visible")),
         description=_safe_description(parsed.get("description")),
+        hair=_clean_parts(parsed.get("hair"), ("length", "colour", "style")),
+        upper_clothing=upper,
+        lower_clothing=lower,
+        headwear=_clean_text(parsed.get("headwear"), limit=60),
+        footwear=_clean_text(parsed.get("footwear"), limit=60),
+        accessories=_clean_list(parsed.get("accessories")),
+        action=_clean_text(parsed.get("action"), limit=80),
+        direction=_clean_direction(parsed.get("direction")),
     )
-
 
 @dataclass
 class AzureFoundryAppearanceAnalyzer:
@@ -314,7 +461,7 @@ class AzureFoundryAppearanceAnalyzer:
                     ],
                 },
             ],
-            "max_completion_tokens": 300,
+            "max_completion_tokens": 500,
         }
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(

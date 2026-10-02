@@ -13,9 +13,12 @@ channel however many clients read it, so taking frames from there adds no
 NVR CGI load at all.
 
 One :class:`StreamFrameReader` per camera polls the media playlist every
-``stream_sample_interval_seconds``, downloads only the newest complete
-segment (each starts on a keyframe, ~2s), decodes it with OpenCV/FFmpeg and
-keeps the last few frames in memory. Readers back off on failure, re-resolve
+``stream_sample_interval_seconds``, decodes the newest complete segment
+(each starts on a keyframe, ~2s) with OpenCV/FFmpeg and keeps the last few
+frames in memory. While clips are enabled it also downloads every segment
+published since the previous poll (bounded catch-up) into a short fMP4
+buffer keyed by the playlist's media sequence, so a clip never silently
+splices over a segment the reader missed. Readers back off on failure, re-resolve
 the stream URL after repeated failures, and stop when nobody has asked for a
 frame in a while. Callers check frame age, so a stalled reader is never
 mistaken for a live picture.
@@ -47,8 +50,16 @@ _JPEG_QUALITY = 90
 # edge may have been restarted with a new MediaMTX address).
 _RERESOLVE_AFTER_FAILURES = 3
 _MAX_BACKOFF_SECONDS = 60.0
+# Most segments fetched in one poll to close the gap since the previous one;
+# a reader further behind than this restarts its clip buffer instead.
+_MAX_CATCHUP_SEGMENTS = 4
 # Readers whose stream is not HLS are retried this rarely.
 _UNSUPPORTED_RETRY_SECONDS = 600.0
+
+
+def clips_enabled() -> bool:
+    """Whether readers keep a short fMP4 buffer for incident/event clips."""
+    return bool(settings.incident_clips_enabled or getattr(settings, "event_clips_enabled", False))
 
 
 class StreamUnavailableError(Exception):
@@ -74,10 +85,26 @@ class FrameSample:
 
 @dataclass(frozen=True)
 class ClipSegment:
+    """One buffered fMP4 media segment.
+
+    ``seq`` is the playlist's own media sequence number (EXT-X-MEDIA-SEQUENCE
+    based), not a fetch counter, so a segment the reader never downloaded
+    shows up as a hole between neighbours instead of being silently spliced
+    over. ``duration`` is the advertised EXTINF length in seconds.
+    """
+
     init: bytes
     data: bytes
     captured_at: float
     seq: int
+    duration: float = 0.0
+
+
+@dataclass(frozen=True)
+class MediaSegment:
+    seq: int
+    url: str
+    duration: float
 
 
 @dataclass
@@ -143,6 +170,50 @@ def latest_segment(text: str, base_url: str) -> tuple[str | None, str | None]:
                 newest = urljoin(base_url, line)
             gap = False
     return init_url, newest
+
+
+def media_segments(text: str, base_url: str) -> tuple[str | None, list[MediaSegment]]:
+    """``(init_url, complete segments)`` with their media sequence numbers.
+
+    Sequence numbers start at ``#EXT-X-MEDIA-SEQUENCE`` (0 when absent) and
+    advance once per listed segment, *including* ``#EXT-X-GAP`` entries,
+    which are then omitted. A gap therefore stays visible as a missing
+    number, which is what lets the clip buffer refuse to splice across it.
+    """
+    init_url: str | None = None
+    seq = 0
+    duration = 0.0
+    gap = False
+    out: list[MediaSegment] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                seq = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                seq = 0
+        elif line.startswith("#EXT-X-MAP:"):
+            uri = _attribute(line, "URI")
+            if uri:
+                init_url = urljoin(base_url, uri)
+        elif line.startswith("#EXTINF:"):
+            try:
+                duration = float(line.split(":", 1)[1].split(",", 1)[0])
+            except ValueError:
+                duration = 0.0
+        elif line.startswith("#EXT-X-GAP"):
+            gap = True
+        elif line.startswith("#"):
+            continue
+        else:
+            if not gap:
+                out.append(MediaSegment(seq, urljoin(base_url, line), max(0.0, duration)))
+            seq += 1
+            duration = 0.0
+            gap = False
+    return init_url, out
 
 
 def _attribute(line: str, name: str) -> str | None:
@@ -301,7 +372,7 @@ class StreamFrameReader:
                         settings.stream_sample_interval_seconds * (2 ** min(self._failures - 1, 5)),
                     )
                 self.hub.maybe_log_stats(self)
-                await asyncio.sleep(min(delay, 1.5) if settings.incident_clips_enabled and not self._failures else delay)
+                await asyncio.sleep(min(delay, 1.5) if clips_enabled() and not self._failures else delay)
         finally:
             await client.aclose()
 
@@ -322,31 +393,44 @@ class StreamFrameReader:
         if playlist is None:
             playlist = await _get_text(client, self._media_url)
 
-        init_url, segment_url = latest_segment(playlist, self._media_url)
-        if segment_url is None:
+        init_url, available = media_segments(playlist, self._media_url)
+        if not available:
             raise StreamUnavailableError("playlist has no complete segment yet")
+        newest = available[-1]
+        segment_url = newest.url
         if self.latest is not None and self.latest.segment == segment_url:
             self.stats.unchanged += 1
             return False
-        if self.latest is not None and self.clip_segments:
-            available = [
-                urljoin(self._media_url, line.strip())
-                for line in playlist.splitlines()
-                if line.strip() and not line.lstrip().startswith("#")
-            ]
-            if (
-                self.latest.segment not in available
-                or available.index(segment_url) - available.index(self.latest.segment) != 1
-            ):
-                self.clip_segments.clear()
-                self._clip_bytes = 0
 
         init = b""
         if init_url:
             if self._init is None or self._init[0] != init_url:
                 self._init = (init_url, await _get_bytes(client, init_url))
             init = self._init[1]
-        segment = await _get_bytes(client, segment_url)
+
+        buffering = clips_enabled()
+        wanted = [newest]
+        if buffering and self.clip_segments:
+            last = self.clip_segments[-1]
+            missing = [segment for segment in available if segment.seq > last.seq]
+            contiguous = bool(missing) and missing[0].seq == last.seq + 1 and all(
+                later.seq == earlier.seq + 1 for earlier, later in zip(missing, missing[1:])
+            )
+            if last.init == init and contiguous and len(missing) <= _MAX_CATCHUP_SEGMENTS:
+                # Fetch every segment published since the last poll, not
+                # only the newest: a skipped segment would otherwise be a
+                # hole the clip silently jumped over.
+                wanted = missing
+            else:
+                logger.debug(
+                    "stream frames %s: clip buffer reset (last=%s newest=%s init_changed=%s)",
+                    self.camera_id, last.seq, newest.seq, last.init != init,
+                )
+                self.clip_segments.clear()
+                self._clip_bytes = 0
+
+        payloads = [await _get_bytes(client, segment.url) for segment in wanted]
+        segment = payloads[-1]
         frames = await asyncio.to_thread(
             self._decoder,
             init,
@@ -357,15 +441,26 @@ class StreamFrameReader:
         self._seq += 1
         captured_at = time.monotonic()
         self.latest = FrameSample(tuple(frames), captured_at, self._seq, segment_url)
-        if settings.incident_clips_enabled:
-            if self.clip_segments and self.clip_segments[-1].init != init:
-                self.clip_segments.clear()
-                self._clip_bytes = 0
-            if init.startswith(b"\x00\x00") and b"ftyp" in init[:16] and b"moof" in segment[:32]:
-                size = len(segment)
-                if size <= settings.incident_clip_buffer_bytes:
-                    self.clip_segments.append(ClipSegment(init, segment, captured_at, self._seq))
-                    self._clip_bytes += size
+        if buffering:
+            fragmented = init.startswith(b"\x00\x00") and b"ftyp" in init[:16]
+            # Older catch-up segments ended earlier; date each one by the
+            # advertised durations of the segments that followed it.
+            later = 0.0
+            stamped: list[ClipSegment] = []
+            for media, data in zip(reversed(wanted), reversed(payloads)):
+                stamped.append(ClipSegment(init, data, captured_at - later, media.seq, media.duration))
+                later += media.duration
+            for clip in reversed(stamped):
+                if not fragmented or b"moof" not in clip.data[:32]:
+                    self.clip_segments.clear()
+                    self._clip_bytes = 0
+                    continue
+                if len(clip.data) > settings.incident_clip_buffer_bytes:
+                    self.clip_segments.clear()
+                    self._clip_bytes = 0
+                    continue
+                self.clip_segments.append(clip)
+                self._clip_bytes += len(clip.data)
             cutoff = captured_at - settings.incident_clip_pre_seconds - 4
             while self.clip_segments and (
                 self.clip_segments[0].captured_at < cutoff

@@ -42,9 +42,33 @@ describe("appearance chips",()=>{
     }
   });
 
-  it("never displays age from a model response",()=>{
+  it("never displays a raw age band or number without the hedged range",()=>{
     const chips=appearanceChips({...APPEARANCE,age_confidence:0.3});
     expect(chips.find(chip=>chip.key==="age")).toBeUndefined();
+  });
+
+  it("shows apparent age only as a broad range with explicit certainty",()=>{
+    const chips=appearanceChips({...APPEARANCE,age_range:"approx. 20-64",age_certainty:"low"});
+    expect(chips.find(chip=>chip.key==="age")?.label).toBe("Apparent age approx. 20-64 (low certainty)");
+  });
+
+  it("describes visible hair, clothing, accessories, action and direction",()=>{
+    const labels=appearanceChips({
+      person_present:true,
+      hair:{length:"shoulder-length",colour:"dark brown",style:"ponytail"},
+      upper_clothing:{colour:"red",type:"hooded jacket"},lower_clothing:{colour:"blue",type:"jeans"},
+      headwear:"grey beanie",footwear:"white trainers",accessories:["glasses","backpack"],
+      action:"ringing the doorbell",direction:"toward camera",clothing:"red hooded jacket, blue jeans",
+    }).map(chip=>chip.label);
+    expect(labels).toEqual([
+      "shoulder-length dark brown ponytail hair","red hooded jacket","blue jeans","grey beanie",
+      "white trainers","glasses","backpack","ringing the doorbell","Moving toward camera",
+    ]);
+  });
+
+  it("leaves hidden hair unknown instead of guessing",()=>{
+    const chips=appearanceChips({person_present:true,hair:{length:null,colour:null,style:null},headwear:"hood up"});
+    expect(chips.find(chip=>chip.key==="hair")).toBeUndefined();
   });
 
   it("says nothing at all when the model returned nothing",()=>{
