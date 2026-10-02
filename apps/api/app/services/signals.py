@@ -116,9 +116,8 @@ async def apply_signals(session: AsyncSession, row: Event, *, mode: str | None =
         evidence["behaviours"] = metadata.get("behaviours") or []
         if row.type == "person":
             evidence.update(await suspicious.returning_visits(session, row, at, night))
-        appearance = metadata.get("appearance") or {}
         verdict = ({"level": None} if trusted else suspicious.score(
-            evidence, clothing=appearance.get("clothing"), mode=mode,
+            evidence, mode=mode,
             night=night, unusual=unusual_hit,
         ))
         if verdict["level"]:

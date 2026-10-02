@@ -323,6 +323,19 @@ class Settings(BaseSettings):
     incident_clip_max_bytes: int = Field(default=16_000_000, ge=100_000, le=64_000_000)
     incident_clip_daily_limit: int = Field(default=10, ge=1, le=100)
     incident_clip_storage_limit_bytes: int = Field(default=4_000_000_000, ge=100_000, le=16_000_000_000)
+    # Short clips for ordinary (non-incident) events. They reuse the same
+    # stream buffer and pre/post window as incident clips, share one capture
+    # per camera across events that overlap, and count towards the combined
+    # incident clip storage cap above as well as their own smaller sub-cap.
+    event_clips_enabled: bool = True
+    event_clip_types: str = "person,animal,vehicle,doorbell,package,suspicious_activity"
+    event_clip_daily_limit: int = Field(default=40, ge=1, le=500)
+    event_clip_storage_limit_bytes: int = Field(default=1_000_000_000, ge=100_000, le=8_000_000_000)
+    event_clip_retention_days: int = Field(default=7, ge=1, le=90)
+    # Camera-side event recordings (e.g. the Eufy doorbell edge recorder) are
+    # polled for this long after the event before the clip is reported
+    # unavailable.
+    event_clip_edge_wait_seconds: int = Field(default=60, ge=10, le=300)
     # AI-assisted incident risk summary (Foundry chat deployment). Purely
     # descriptive/advisory text alongside the deterministic summary -
     # disabled it changes nothing about whether/when an incident is raised,
@@ -405,7 +418,9 @@ class Settings(BaseSettings):
     suspicious_dedupe_seconds: float = Field(default=900.0, gt=0)
     suspicious_elevated_score: float = Field(default=3.0, gt=0)
     suspicious_incident_score: float = Field(default=5.0, gt=0)
-    suspicious_clothing_weight: float = Field(default=0.5, ge=0, le=1)
+    # Ignored: appearance never contributes to a review verdict. Kept so an
+    # existing SUSPICIOUS_CLOTHING_WEIGHT environment value still loads.
+    suspicious_clothing_weight: float = Field(default=0.0, ge=0, le=1)
     suspicious_return_visits: int = Field(default=3, ge=2)
     suspicious_return_window_hours: float = Field(default=24.0, gt=0)
     suspicious_night_return_visits: int = Field(default=2, ge=2)

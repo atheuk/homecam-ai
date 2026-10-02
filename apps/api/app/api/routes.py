@@ -49,6 +49,7 @@ from ..services import audit as audit_service
 from ..services import cameras as camera_service
 from ..services import detector_watchdog
 from ..services import digest as digest_service
+from ..services import event_clips as event_clip_service
 from ..services import events as event_service
 from ..services import persons as person_service
 from ..services import retention as retention_service
@@ -509,6 +510,41 @@ async def event_evidence(
         headers={
             "Cache-Control": "private, no-store",
             "Content-Disposition": f'inline; filename="{event_id}-{label}.jpg"',
+        },
+    )
+
+
+@router.get("/events/{event_id}/clip")
+async def event_clip(
+    event_id: str,
+    download: bool = False,
+    session: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """The event's short video clip (shared with overlapping events).
+
+    ``410`` means the clip existed but passed retention or was removed;
+    ``404`` means there is no clip for this event (see ``clip.status``).
+    """
+    row = await session.get(Event, event_id)
+    if row is None:
+        raise HTTPException(404, "Event not found")
+    state = event_clip_service.status(row)
+    if state["status"] == "expired":
+        raise HTTPException(410, "This clip has expired")
+    if state["status"] != "ready":
+        raise HTTPException(404, "No clip available for this event")
+    clip = await event_clip_service.clip_bytes(session, row)
+    if clip is None:
+        raise HTTPException(410, "This clip is no longer stored")
+    video, content_type = clip
+    return Response(
+        content=video,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'{"attachment" if download else "inline"}; filename="event-{event_id}.mp4"',
         },
     )
 

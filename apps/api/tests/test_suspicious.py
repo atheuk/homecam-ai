@@ -13,7 +13,7 @@ from sqlalchemy import delete
 
 def test_hoodie_alone_never_alerts():
     for night in (False, True):
-        verdict = suspicious.score({}, clothing="hood up, balaclava", night=night, mode="away")
+        verdict = suspicious.score({}, night=night, mode="away")
         assert verdict["score"] == 0
         assert verdict["level"] is None
         assert verdict["reasons"] == []
@@ -23,10 +23,10 @@ def test_behavioral_evidence_explains_score_without_protected_attributes():
     verdict = suspicious.score(
         {"vehicle_seconds": 130, "circling": True,
          "behaviours": ["hands_at_vehicle", "gender", "ethnicity", "age"]},
-        clothing="hood up", night=True, mode="away",
+        night=True, mode="away",
     )
     assert verdict["level"] == "suspicious"
-    assert "hood up (contributing)" in verdict["reasons"]
+    assert not any("hood" in reason for reason in verdict["reasons"])
     assert not any(word in " ".join(verdict["reasons"]).casefold()
                    for word in ("gender", "ethnicity", "race", "age", "identity"))
 

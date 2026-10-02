@@ -21,7 +21,8 @@ These are product guarantees. Each has tests that assert the refusal.
 | Limit | How it is enforced |
 | --- | --- |
 | **No face recognition, no identity claims.** The system never infers *who* someone is. | `app/ai/query_moderation.py` refuses search queries that ask for identity. No scoring input in `app/services/priority.py` is an identity attribute. |
-| **No gender, ethnicity, age or other protected-attribute inference.** | Query moderation refuses these categories outright. No model output for them is requested, stored or displayed. |
+| **No gender, ethnicity, race, skin colour, religion, health, emotion or other protected-attribute inference.** | Query moderation refuses these categories outright. No model output for them is requested, stored or displayed; `ai/appearance.py` drops any field that mentions them even if the model ignores its instructions. |
+| **Age is only ever a broad, hedged impression.** | On explicit household request the event card may show an *apparent* age band with its span (`approx. 20-64`) and certainty capped at medium (`MAX_AGE_CONFIDENCE = 0.6`). It is never an exact age, never searchable, never used for scoring or alerts, and is omitted when the face/body is not clearly visible. |
 | **Trust is human-set only.** A person's trust level comes from a household member marking them, never from a model. | Unchanged from the existing people/trust model; none of the features here write trust. |
 | **No autonomous deterrence.** A siren, light or voice prompt is only ever executed after an explicit, authenticated human confirmation. | `app/services/deterrence.py` has no detection → execution path. `tests/test_deterrence.py` scans the service tree to prove no other module calls it. |
 | **No autonomous emergency dispatch.** The system never contacts police, fire, ambulance or a monitoring centre. | `deterrence.ACTIONS` is a closed tuple of `siren`/`light`/`voice`. Anything else is a `422`. |
@@ -325,7 +326,6 @@ as an alert reason. A photo alone cannot establish intent.
 | Visibly trying handle / hands at vehicle | +1.5 each |
 | Other allowlisted visible action | +0.75 each |
 | Similar unrecognised appearance, 3 visits/24h or 2 visits/2h at night | +3 |
-| Visible hood up / face covered / balaclava | +0.5, **only with behaviour** |
 | Night / armed away or night | ×1.25 each, **only with behaviour** |
 | Historically unusual time | +0.75, **only with behaviour** |
 
@@ -335,11 +335,24 @@ there is only an event/notification, never an incident. Every verdict stores
 reasons, score and linked visit event IDs. Repeat visits use the existing
 appearance embedding and exclude named or human-trusted people; all behaviour
 signals also skip a confidently matched human-trusted person. The wording says
-**a person with a similar appearance**, never asserts identity. Clothing
-contributes only weak context because hoodies are normal attire, not evidence
-of intent; it cannot alert by itself. No autonomous deterrence or dispatch.
+**a person with a similar appearance**, never asserts identity. Appearance
+(clothing, hoods, hair, apparent age, anything about how someone looks)
+contributes **nothing** to the score: a verdict must be explainable purely by
+behaviour and context. The UI shows the levels as **Needs review** /
+**Worth a look** with their reasons, never as a criminal label. No autonomous deterrence or dispatch.
 Sampling at the mailbox or beside a tracked parked vehicle reuses the
 existing stream-only mailbox boost (never extra NVR snapshots).
+
+## Observable person description
+
+For person events the vision model returns a fixed set of *visible*
+attributes: hair (length, colour, style, only when not covered), upper and
+lower clothing (type and colour), headwear, footwear, accessories, carried
+items, visible action and movement direction relative to the camera, and a
+broad apparent age band (see the limits above). Anything occluded or unclear
+stays `null` and is not shown; there are no guessed defaults. The event card
+renders these as neutral chips. They are descriptive only: they never enter
+suspicious scoring, alerts, trust or identity (owner-set names stay manual).
 
 ## Vehicles and wildlife
 
@@ -359,6 +372,13 @@ frames, voting by species without replacing a strong result with a weak one.
 It reports common/scientific name, taxonomic group and confidence; uncertain
 species fall back to genus, family or group. `HOME_REGION` defaults to the
 Netherlands/Northern Europe as a **prior**, not proof of a species. The
+model also reports, only when visible: how many animals of that species are
+in the frame, coat colours and pattern, rough size, what the animal is doing
+and whether a collar is visible. Breed is a *suggestion* labelled
+`possible` or `likely` (never certain) and is shown as "Dog · possibly
+Labrador" with the note that it is not a confirmed identity: recognising a
+species or breed never identifies a specific pet. The Events filter offers
+per-species selection for animal events. The
 bird-specific detector threshold defaults to `0.25`; a tiled second pass was
 not added because it doubles RT-DETR CPU work per camera frame and would
 compete with live ingestion. The digest lists distinct bird species.

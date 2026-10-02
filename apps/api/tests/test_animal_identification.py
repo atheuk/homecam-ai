@@ -104,8 +104,35 @@ def test_confidence_is_clamped_to_a_real_probability():
 def test_description_names_the_breed_when_known():
     identity = AnimalIdentity(species="dog", breed="Border Collie", confidence=0.8)
     assert describe_animal(identity, "Front Yard", "driveway") == (
-        "A Border Collie (dog) was seen in the driveway at Front Yard."
+        "A likely Border Collie (dog) was seen in the driveway at Front Yard."
     )
+
+
+def test_low_confidence_breed_is_only_possible_and_groups_are_counted():
+    guess = AnimalIdentity(species="dog", breed="Akita", confidence=0.5)
+    assert guess.breed_certainty == "possible"
+    assert describe_animal(guess, "Garden") == "A possible Akita (dog) was seen at Garden."
+    pair = AnimalIdentity(species="cat", confidence=0.9, count=2)
+    assert describe_animal(pair, "Garden") == "2 cats were seen at Garden."
+
+
+def test_rich_animal_reply_keeps_visible_traits_and_drops_junk():
+    identity = parse_animal_reply(
+        '{"species": "cat", "breed": null, "confidence": 0.9, "count": "2", '
+        '"coat_colours": ["black", "white", "Black"], "coat_pattern": "tuxedo", '
+        '"size": "Medium", "action": "sitting at the door", "collar_visible": "yes"}'
+    )
+    assert identity is not None
+    assert identity.count == 2
+    assert identity.coat_colours == ("black", "white")
+    assert identity.coat_pattern == "tuxedo"
+    assert identity.size == "medium"
+    assert identity.action == "sitting at the door"
+    assert identity.collar_visible is True
+    data = identity.as_dict()
+    assert data["breed_certainty"] is None and data["count"] == 2
+    junk = parse_animal_reply('{"species": "dog", "count": 999, "size": "huge", "collar_visible": "maybe"}')
+    assert junk is not None and junk.count is None and junk.size is None and junk.collar_visible is None
 
 
 def test_description_falls_back_to_species_then_to_plain_animal():

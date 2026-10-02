@@ -503,7 +503,8 @@ async def raise_camera_health(
 
         triggered_at = time.monotonic()
         capture_task = incident_clips.capture(camera_id, incident_clips.seed(camera_id), triggered_at)
-        await incident_clips.start(incident, capture_task)
+        if not await incident_clips.start(incident, capture_task):
+            await incident_clips.discard(capture_task)
     _notify(incident, "created")
     logger.warning("camera health incident raised: %s (%s)", camera_id, kind)
     return incident

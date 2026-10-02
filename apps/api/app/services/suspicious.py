@@ -25,7 +25,6 @@ BEHAVIOURS = {
     "trying_handles": "tried a door or vehicle handle",
     "hands_at_vehicle": "hands near a vehicle door or window",
 }
-CONCEALMENT = ("hood up", "face covered", "balaclava")
 logger = logging.getLogger(__name__)
 
 
@@ -73,12 +72,18 @@ async def assess_behaviour(image: bytes) -> list[str]:
 def score(
     signals: dict,
     *,
-    clothing: str | None = None,
     mode: str | None = None,
     night: bool = False,
     unusual: bool = False,
 ) -> dict:
-    """Only allowlisted observations enter reasons (never model-supplied prose)."""
+    """Only allowlisted observations enter reasons (never model-supplied prose).
+
+    Appearance - clothing, hood, hair, age, skin, anything about how a person
+    looks - never contributes: a "needs review" verdict must be explainable
+    purely by behaviour and context (dwell, return visits, visible actions,
+    time and arming mode). Repeat visits score the *behaviour* of returning;
+    the appearance embedding only links visits together and adds nothing.
+    """
     reasons: list[str] = []
     value = 0.0
     dwell = float(signals.get("vehicle_seconds") or 0)
@@ -111,11 +116,6 @@ def score(
         )
     behavioural = bool(reasons)
     if behavioural:
-        lower = (clothing or "").casefold()
-        cue = next((word for word in CONCEALMENT if word in lower), None)
-        if cue and settings.suspicious_clothing_weight:
-            value += settings.suspicious_clothing_weight
-            reasons.append(f"{cue} (contributing)")
         if night:
             value *= 1.25
             reasons.append("night-time")

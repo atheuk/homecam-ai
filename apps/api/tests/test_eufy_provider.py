@@ -204,3 +204,63 @@ async def test_event_snapshot_is_cancelable_by_parent_timeout():
         await asyncio.wait_for(provider.get_event_snapshot("eufy-T8210P123"), timeout=0.02)
     assert canceled.is_set()
     assert requests == ["/devices", "/devices/T8210P123/snapshot"]
+
+
+def eufy_clip_transport(event_clips: bool, seen: list) -> httpx.MockTransport:
+    base = eufy_transport()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/devices":
+            payload = base.handler(request).json() if hasattr(base, "handler") else None
+            if payload is None:
+                raise AssertionError("unexpected transport shape")
+            payload["devices"][0]["capabilities"]["eventClips"] = event_clips
+            return httpx.Response(200, json=payload)
+        if request.url.path == "/devices/T8210P123/clips":
+            return httpx.Response(200, json={"clips": [
+                {"id": "c1", "started_at": "2025-01-01T10:00:00+00:00", "duration_seconds": 14.8,
+                 "pre_roll_seconds": 0.0, "trigger": "doorbell", "complete": True, "failed": None},
+                {"started_at": "missing id"},
+            ]})
+        if request.url.raw_path == b"/devices/T8210P123/clips/c%2F1":
+            return httpx.Response(200, content=b"\x00\x00\x00\x18ftypisom-video")
+        if request.url.path == "/devices/T8210P123/clips/bad":
+            return httpx.Response(200, content=b"<html>")
+        return base.handler(request)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_eufy_event_clips_are_listed_and_fetched_with_the_adapter_token():
+    seen: list = []
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://127.0.0.1:8090", adapter_token="test-token"),
+        transport=eufy_clip_transport(True, seen),
+    )
+    cameras = await provider.discover_devices()
+    assert cameras[0]["capabilities"]["eventClips"] == "SUPPORTED"
+    clips = await provider.list_event_clips("eufy-T8210P123")
+    assert clips == [{
+        "id": "c1", "started_at": "2025-01-01T10:00:00+00:00", "duration_seconds": 14.8,
+        "pre_roll_seconds": 0.0, "trigger": "doorbell", "complete": True,
+    }]
+    video = await provider.get_event_clip("eufy-T8210P123", "c/1")
+    assert video[4:8] == b"ftyp"
+    with pytest.raises(ProviderUnavailableError):
+        await provider.get_event_clip("eufy-T8210P123", "bad")
+    assert all(r.headers.get("authorization") == "Bearer test-token" for r in seen)
+
+
+@pytest.mark.asyncio
+async def test_eufy_event_clips_unsupported_on_older_adapters():
+    seen: list = []
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://127.0.0.1:8090", adapter_token="test-token"),
+        transport=eufy_clip_transport(False, seen),
+    )
+    cameras = await provider.discover_devices()
+    assert cameras[0]["capabilities"]["eventClips"] == "UNAVAILABLE"
+    assert await provider.list_event_clips("eufy-T8210P123") is None
+    assert not any(r.url.path.endswith("/clips") for r in seen)

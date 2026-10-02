@@ -122,6 +122,9 @@ class EufyEdgeProvider:
             "battery": SUPPORTED if raw_caps.get("battery") else UNKNOWN,
             "ptz": UNSUPPORTED,
             "eventImages": SUPPORTED if raw_caps.get("eventImages") else UNKNOWN,
+            # Short post-trigger recordings made by the edge adapter from the
+            # bridge's own event livestream (no pre-roll: the doorbell sleeps).
+            "eventClips": SUPPORTED if raw_caps.get("eventClips") else UNAVAILABLE,
             # The edge adapter does not expose a normalized audio buffer yet;
             # HomeCam never fabricates audio, so this stays UNAVAILABLE.
             AUDIO_DETECTION: audio_detection_status(bool(raw_caps.get("audioBuffer")), False),
@@ -195,6 +198,41 @@ class EufyEdgeProvider:
             return None
         if response.status_code != 200 or not response.content.startswith(b"\xff\xd8"):
             raise ProviderUnavailableError("Eufy adapter did not return a JPEG event image")
+        return response.content
+
+    async def list_event_clips(self, camera_id: str) -> list[dict] | None:
+        """Recent edge-recorded event clips, or ``None`` when unsupported."""
+        device = await self._device(camera_id)
+        if device["capabilities"].get("eventClips") != SUPPORTED:
+            return None
+        serial = quote(device["adapter_device_id"], safe="")
+        response = await self._request("event clips", f"/devices/{serial}/clips", allow_not_found=True)
+        if response.status_code == 404:
+            return None
+        payload = response.json()
+        clips = payload.get("clips") if isinstance(payload, dict) else payload
+        result = []
+        for clip in clips or []:
+            if not isinstance(clip, dict) or not clip.get("id"):
+                continue
+            result.append({
+                "id": str(clip["id"]),
+                "started_at": clip.get("started_at"),
+                "duration_seconds": clip.get("duration_seconds"),
+                "pre_roll_seconds": clip.get("pre_roll_seconds") or 0.0,
+                "trigger": clip.get("trigger"),
+                "complete": bool(clip.get("complete", True)),
+            })
+        return result
+
+    async def get_event_clip(self, camera_id: str, clip_id: str) -> bytes:
+        device = await self._device(camera_id)
+        serial = quote(device["adapter_device_id"], safe="")
+        response = await self._request(
+            "event clip", f"/devices/{serial}/clips/{quote(clip_id, safe='')}"
+        )
+        if response.content[4:8] != b"ftyp":
+            raise ProviderUnavailableError("Eufy adapter did not return an MP4 clip")
         return response.content
 
     async def get_live_stream(self, camera_id: str) -> str:

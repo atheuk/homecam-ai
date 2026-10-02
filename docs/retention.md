@@ -55,6 +55,10 @@ Two protections outrank every cutoff:
    incident clips remain available while the incident is active. Stored
    clips also count toward the aggregate budget in `docs/incident-clips.md`;
    reaching it skips new clips rather than deleting held evidence.
+   Short **event clips** (`docs/incident-clips.md#event-clips`) are removed
+   by their own sweeper after `EVENT_CLIP_RETENTION_DAYS` (default 7) unless
+   an event that uses the clip has a retention hold; removed clips show
+   `expired`. They also count toward the same aggregate budget.
 
 ## The purge job
 

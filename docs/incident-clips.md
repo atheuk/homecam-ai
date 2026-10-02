@@ -20,6 +20,9 @@ restart during capture yields `clip.status: "unavailable"` instead of a
 misleading partial video. New clips start only for newly opened incidents;
 additional events merged into an incident do not multiply video storage.
 Older incidents have no clip. Camera-offline incidents cannot have a clip.
+Ordinary events now get their own short clips too (see **Event clips**
+below), so a clip is no longer only available for the first event of an
+armed incident.
 
 **Aggregate capacity guard:** At most 10 clips are admitted per UTC day
 across all cameras, and stored clip payloads (including held clips) may
@@ -76,3 +79,57 @@ in development. Retention removes resolved unheld clips after
 `RETENTION_MEDIA_DAYS`; a held clip protects its incident even after
 `RETENTION_INCIDENT_DAYS`. Keep retention dry-run enabled for the initial
 rollout and inspect the media counts before allowing deletion.
+
+## Event clips (all cameras, including the Eufy doorbell)
+
+Root cause of "I can't watch any clips": incident clips were only captured
+for the *first event of a newly opened incident* while armed, so normal
+person/animal/doorbell events never had video; the Dahua HLS reader could
+also splice across a playlist gap; and the Eufy battery doorbell had no clip
+path at all. Migration `0016_event_clips` adds an `event_clips` table and
+each event's JSON now carries
+`clip:{status,url,source,duration_seconds,pre_roll_seconds,width,height,codec,size_bytes,reason}`.
+
+* **Streamed cameras (Dahua via MediaMTX):** the same per-camera fMP4 reader
+  as incident clips supplies up to 8 s pre-roll and 8 s post-roll. The reader
+  is now media-sequence aware and refuses to splice over a gap. Overlapping
+  events on one camera share one capture rather than storing duplicate video.
+* **Eufy T8210 battery doorbell:** it does not stream while asleep, so there
+  is **no pre-roll** and none is invented. The edge add-on (1.0.2) records a
+  bounded post-roll (default 15 s) from its private go2rtc when the doorbell
+  rings or detects motion/a person, reusing the existing eufy-security-ws
+  connection and stopping the stream afterwards (120 s cooldown, 24
+  recordings/day, in-memory only with a short TTL). The API polls the edge
+  for up to `EVENT_CLIP_EDGE_WAIT_SECONDS`, matches a complete clip that
+  started near the event and stores it; the card says *"starts when the
+  camera woke (no earlier footage)"* and shows the real duration.
+* Every stored clip is validated as MP4 (`ftyp`/`moov`, H.264 `avc1`),
+  with its true duration and resolution recorded from the file.
+
+Statuses are distinct in the API and UI: `pending` (recording),
+`ready` (playable), `skipped` (daily or storage budget reached),
+`unavailable` + reason (e.g. no buffered video, capture interrupted),
+`expired` (removed by retention) and `unsupported` (the camera cannot
+provide clips). `none` means the event type is not clipped.
+
+`GET /api/v1/events/{id}/clip` (`?download=true` for an attachment) has the
+same household-auth, `video/mp4`, `private, no-store` contract as incident
+clips; the Events and People cards fetch it on demand as an authenticated
+blob. The Events tab also has a **With video clip** filter and a
+**doorbell** type filter.
+
+Budget: event clips are admitted under the same PostgreSQL advisory lock as
+incident clips. Each admission checks the event sub-cap (40/day,
+1,000,000,000 bytes) **and** the combined incident+event 4 GB cap, so event
+clips can never push held incident evidence out or exceed the existing
+aggregate. Event clips expire after `EVENT_CLIP_RETENTION_DAYS`; held
+incident clips are never evicted.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `EVENT_CLIPS_ENABLED` | `true` | Capture clips for ordinary events |
+| `EVENT_CLIP_TYPES` | `person,animal,vehicle,doorbell,package,suspicious_activity` | Event types that get a clip |
+| `EVENT_CLIP_DAILY_LIMIT` | `40` | Event clips per UTC day, across replicas |
+| `EVENT_CLIP_STORAGE_LIMIT_BYTES` | `1000000000` | Event clip sub-cap (also counted in the 4 GB combined cap) |
+| `EVENT_CLIP_RETENTION_DAYS` | `7` | Event clips are deleted after this |
+| `EVENT_CLIP_EDGE_WAIT_SECONDS` | `60` | How long to wait for a camera-side (Eufy) recording |

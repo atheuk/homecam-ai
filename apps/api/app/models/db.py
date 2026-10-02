@@ -554,6 +554,30 @@ class IncidentClip(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class EventClip(Base):
+    """Short event video shared by every event that overlapped one capture.
+
+    ``source`` is ``stream`` (the API's own buffered HLS) or ``edge`` (a
+    camera-side recording such as the Eufy doorbell edge recorder, which can
+    only offer post-roll because a sleeping battery camera never streamed
+    before the trigger). ``pre_roll_ms`` is the real footage before the
+    trigger, never padded.
+    """
+
+    __tablename__ = "event_clips"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(128), index=True)
+    video: Mapped[bytes] = mapped_column(LargeBinary)
+    content_type: Mapped[str] = mapped_column(String(64), default="video/mp4")
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    pre_roll_ms: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(16), default="stream")
+    source_ref: Mapped[str | None] = mapped_column(String(160), nullable=True, unique=True)
+    event_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class AuditLog(Base):
     """Append-only record of security-relevant actions (SPEC follow-up:
     audit trail). Covers auth events (login/lockout/logout/session revoke),

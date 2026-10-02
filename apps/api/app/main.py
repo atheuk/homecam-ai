@@ -23,7 +23,7 @@ from .services.digest_scheduler import digest_scheduler
 from .services.ingestion import ingestion_service
 from .services.provider_registry import discover_all_cameras
 from .services.retention_scheduler import retention_scheduler
-from .services import detector_watchdog, event_photos, incident_clips
+from .services import detector_watchdog, event_clips, event_photos, incident_clips
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,9 +53,11 @@ async def lifespan(app: FastAPI):
     digest_scheduler.start()
     arming_scheduler.start()
     retention_scheduler.start()
+    event_clips.start_sweeper()
     try:
         yield
     finally:
+        await event_clips.stop()
         await incident_clips.stop()
         await ingestion_service.stop()
         await event_photos.stop()

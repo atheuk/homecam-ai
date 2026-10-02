@@ -2,6 +2,7 @@
 
 import {useMemo,useState} from "react";
 import {EventCard,sceneCategory,type EventItem,type Person} from "./People";
+import {hasPlayableClip} from "./EventClip";
 
 export type CameraSummary={id:string;name:string};
 
@@ -16,7 +17,8 @@ type EventsPanelProps={
   onAcknowledgeNew:()=>void;
 };
 
-const FILTER_TYPES=["person","vehicle","animal","package","motion","suspicious_activity"] as const;
+const FILTER_TYPES=["person","doorbell","vehicle","animal","package","motion","suspicious_activity"] as const;
+const SPECIES_FILTERS=[["all","Any animal"],["dog","Dogs"],["cat","Cats"],["bird","Birds"],["other","Other animals"]] as const;
 const ACTIVITY_FILTERS=[
   ["all","All activity"],
   ["vehicle","Vehicle arrivals & departures"],
@@ -42,13 +44,17 @@ export default function EventsPanel({
   const [cameraId,setCameraId]=useState("all");
   const [namedOnly,setNamedOnly]=useState(false);
   const [activity,setActivity]=useState("all");
+  const [clipsOnly,setClipsOnly]=useState(false);
+  const [species,setSpecies]=useState("all");
 
   const filtered=useMemo(()=>events.filter(event=>
     (type==="all"||event.type===type)&&
     (cameraId==="all"||event.camera_id===cameraId)&&
     (activity==="all"||sceneCategory(event)===activity)&&
-    (!namedOnly||Boolean(event.person_display_name))
-  ),[events,type,cameraId,activity,namedOnly]);
+    (!namedOnly||Boolean(event.person_display_name))&&
+    (!clipsOnly||hasPlayableClip(event.clip))&&
+    (species==="all"||(event.animal?.species===species))
+  ),[events,type,cameraId,activity,namedOnly,clipsOnly,species]);
 
   const groups=useMemo(()=>{
     const result:{label:string;events:EventItem[]}[]=[];
@@ -98,6 +104,16 @@ export default function EventsPanel({
         <input type="checkbox" checked={namedOnly} onChange={event=>setNamedOnly(event.target.checked)}/>
         Named people only
       </label>
+      <label className="filter-check">
+        <input type="checkbox" checked={clipsOnly} onChange={event=>setClipsOnly(event.target.checked)}/>
+        With video clip
+      </label>
+      {(type==="animal"||species!=="all")&&<label className="filter-select">
+        <span>Animal</span>
+        <select value={species} onChange={event=>setSpecies(event.target.value)}>
+          {SPECIES_FILTERS.map(([value,label])=><option value={value} key={value}>{label}</option>)}
+        </select>
+      </label>}
     </div>
 
     {groups.length?groups.map(group=><section className="event-day" key={group.label}>

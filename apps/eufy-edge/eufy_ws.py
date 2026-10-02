@@ -197,6 +197,25 @@ class Livestream:
         self.parameter_sets = {}
 
 
+# eufy-security-ws device events (``state`` true on start) and the matching
+# boolean properties, mapped onto HomeCam trigger names.
+TRIGGER_EVENTS = {
+    "motion detected": "motion",
+    "person detected": "person",
+    "stranger person detected": "person",
+    "pet detected": "animal",
+    "dog detected": "animal",
+    "vehicle detected": "vehicle",
+    "rings": "doorbell",
+}
+TRIGGER_PROPERTIES = {
+    "motionDetected": "motion",
+    "personDetected": "person",
+    "petDetected": "animal",
+    "ringing": "doorbell",
+}
+
+
 class EufyWsClient:
     """Maintains one persistent connection to eufy-security-ws."""
 
@@ -220,6 +239,9 @@ class EufyWsClient:
         self._driver_connected = False
         self._captcha_pending = False
         self._mfa_pending = False
+        # Sync callbacks ``(serial, trigger)`` fired on motion/person/ring
+        # starts; used by the bounded event clip recorder.
+        self.trigger_listeners: list = []
 
     # ---------------------------------------------------------------- state
 
@@ -378,8 +400,17 @@ class EufyWsClient:
                 stream.close()
             return
 
+        if name in TRIGGER_EVENTS and serial:
+            if event.get("state", True):
+                self._fire_trigger(serial, TRIGGER_EVENTS[name])
+            return
+
         if name == "property changed" and serial:
-            self._properties.setdefault(serial, {})[str(event.get("name"))] = event.get("value")
+            prop = str(event.get("name"))
+            previous = self._properties.setdefault(serial, {}).get(prop)
+            self._properties[serial][prop] = event.get("value")
+            if prop in TRIGGER_PROPERTIES and event.get("value") is True and previous is not True:
+                self._fire_trigger(serial, TRIGGER_PROPERTIES[prop])
             return
 
         if name == "device added":
@@ -420,6 +451,13 @@ class EufyWsClient:
             return
         if name == "disconnected":
             self._driver_connected = False
+
+    def _fire_trigger(self, serial: str, trigger: str) -> None:
+        for listener in list(self.trigger_listeners):
+            try:
+                listener(serial, trigger)
+            except Exception:  # noqa: BLE001 - a listener must never break the reader
+                logger.exception("event trigger listener failed")
 
     def _ingest_state(self, result: dict) -> None:
         state = result.get("state") or {}

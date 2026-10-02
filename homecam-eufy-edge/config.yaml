@@ -1,5 +1,5 @@
 name: HomeCam Eufy edge adapter
-version: "1.0.1"
+version: "1.0.2"
 slug: homecam_eufy_edge
 description: Token-authenticated adapter from the eufy-security-ws add-on to HomeCam, with a browser-safe HLS relay
 url: https://github.com/atheuk/homecam-ai/tree/main/homecam-eufy-edge
@@ -20,6 +20,10 @@ options:
   stream_base_url: ""
   port: 8091
   live_idle_stop_seconds: 60
+  # Short post-roll clips recorded only when the doorbell itself reports an
+  # event (it is awake then); never continuous streaming.
+  event_clips_enabled: true
+  event_clip_daily_limit: 24
 # Deliberately no Eufy account, password or 2FA options: the Eufy login and
 # its persistent session stay inside the eufy-security-ws add-on.
 schema:
@@ -28,3 +32,5 @@ schema:
   stream_base_url: str?
   port: port
   live_idle_stop_seconds: int(10,600)
+  event_clips_enabled: bool
+  event_clip_daily_limit: int(0,96)

@@ -143,10 +143,17 @@ async def test_clip_buffer_is_bounded_and_discards_playlist_gaps(monkeypatch):
         assert len(hub.clip_segments(reader.camera_id)) == 2
         relay.last = 11
         await reader.fetch_once(client)
-        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [2, 3]
-        relay.last = 14
+        # seq is the playlist media sequence (the two gap entries consume 0-1).
+        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [5, 6]
+        relay.last = 13
         await reader.fetch_once(client)
-        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [4]
+        # Catch-up: seg12 was published between polls between polls and is fetched, not spliced over.
+        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [7, 8]
+        assert [s.duration for s in hub.clip_segments(reader.camera_id)] == [2.0, 2.0]
+        relay.last = 20
+        await reader.fetch_once(client)
+        # Too far behind to catch up: restart rather than splice across a gap.
+        assert [s.seq for s in hub.clip_segments(reader.camera_id)] == [15]
     finally:
         await client.aclose()
 

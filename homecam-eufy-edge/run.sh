@@ -24,6 +24,10 @@ PY
 export EUFY_WS_URL="$(read_option eufy_ws_url)"
 export HOME_CAM_EUFY_TOKEN="$(read_option home_cam_eufy_token)"
 export LIVE_IDLE_STOP_SECONDS="$(read_option live_idle_stop_seconds)"
+event_clips_enabled="$(read_option event_clips_enabled)"
+export EVENT_CLIPS_ENABLED="${event_clips_enabled:-True}"
+event_clip_daily_limit="$(read_option event_clip_daily_limit)"
+export EVENT_CLIP_DAILY_LIMIT="${event_clip_daily_limit:-24}"
 port="$(read_option port)"
 port="${port:-8091}"
 

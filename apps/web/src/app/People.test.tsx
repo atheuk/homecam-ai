@@ -41,7 +41,8 @@ describe("event photo card",()=>{
       score:5.2,level:"suspicious",reasons:["lingered 130s beside a parked vehicle"],
       evidence_event_ids:["evt-older"],
     }}} persons={[]} onChanged={()=>{}}/>);
-    expect(screen.getByText("suspicious · score 5.2")).toBeInTheDocument();
+    expect(screen.getByText("Needs review · score 5.2")).toBeInTheDocument();
+    expect(screen.queryByText(/^suspicious/i)).not.toBeInTheDocument();
     expect(screen.getByText("lingered 130s beside a parked vehicle")).toBeInTheDocument();
     expect(screen.getByRole("link",{name:"evt-older"})).toHaveAttribute("href","#event-evt-older");
   });
