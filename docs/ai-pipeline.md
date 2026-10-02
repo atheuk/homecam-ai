@@ -31,6 +31,40 @@ normalize -> persist -> snapshot -> local detector -> semantics (zones + dwell)
 Every stage is defensive (SPEC 43): a detector, snapshot or AI failure is
 logged and the event survives unenriched. Analysis never breaks ingestion.
 
+## A photo for every camera event
+
+Photo evidence is independent of `AI_ANALYSIS_ENABLED` and
+`BEST_PHOTO_ENABLED`. A detected-subject crop remains the first choice;
+when detection misses, selection fails, or analysis is disabled, the
+sharpest available frame is saved instead. Even camera state events (such
+as `battery_low`) retain a frame without running subject analysis.
+
+If no image is initially available, `app/services/event_photos.py` backfills
+evidence asynchronously, with a 15-second acquisition deadline, four
+attempts with backoff, and three-second provider-call timeouts. It prefers
+recent stream frames, then the provider's cached event image (including
+Eufy ring/motion pictures), then a fresh snapshot. Concurrent events share
+one acquisition per camera; fresh snapshots respect the ingestion snapshot
+cooldown and provider session caps. No livestream is started for a photo.
+An offline camera cannot be guaranteed to return an image: only after the
+bounded attempts fail does the card report "Camera did not return an image".
+During capture it shows "Capturing photo..." and an `event.updated` SSE
+message replaces that state when the photo or failure arrives.
+
+Fallback images carry `photo_fallback: true`, `photo_verified: false`, and
+no detection boxes. They never enter appearance, identity/embedding, animal
+or vehicle recognition; person assignment from fallback imagery is blocked.
+Late images still attempt bounded local subject selection, but never run
+automatic identity inference or train identity embeddings.
+No plate recognition or face inference is added. Imagery remains behind
+the existing authenticated photo routes and media-retention policy. Input
+images are capped at 8 MiB and normalized to JPEG at at most 1920 pixels
+per side; no new disk mirror or duplicate full-frame copy is written for
+fallbacks. Pending work is bounded to 128 events and two acquisitions;
+restart recovery resumes recent pending captures, while interrupted older
+captures display a terminal explanation rather than spinning forever.
+No schema migration is required: capture state lives in event metadata.
+
 ## Event model extension (deliberate, backward compatible)
 
 `HomeCamEvent.type` keeps its original enum

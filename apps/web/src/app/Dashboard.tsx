@@ -261,11 +261,13 @@ export default function Dashboard(){
     if(!authenticated) return;
     const controller=new AbortController();
     void consumeSse(`${API}/api/v1/ws`,token,controller.signal,(type,data)=>{
-      if(type!=="event.created") return;
+      if(type!=="event.created"&&type!=="event.updated") return;
       try{
         const next=JSON.parse(data) as EventItem;
-        setEvents(current=>[next,...current.filter(event=>event.id!==next.id)].slice(0,EVENT_LIMIT));
-        setNewEventIds(current=>new Set(current).add(next.id));
+        setEvents(current=>type==="event.updated"
+          ? current.map(event=>event.id===next.id?{...event,...next}:event)
+          : [next,...current.filter(event=>event.id!==next.id)].slice(0,EVENT_LIMIT));
+        if(type==="event.created") setNewEventIds(current=>new Set(current).add(next.id));
       }catch{
         setError("A live event update could not be read. Existing events are still available.");
       }

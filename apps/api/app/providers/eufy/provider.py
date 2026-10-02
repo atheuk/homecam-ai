@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -65,7 +66,7 @@ class EufyEdgeProvider:
             return {}
         return {"Authorization": f"Bearer {self.settings.adapter_token}"}
 
-    async def _request(self, operation: str, path: str) -> httpx.Response:
+    async def _request(self, operation: str, path: str, *, allow_not_found: bool = False) -> httpx.Response:
         if not self.settings.adapter_url:
             raise ProviderUnavailableError("Eufy adapter URL is not configured")
         url = f"{self.settings.adapter_url.rstrip('/')}{path}"
@@ -87,6 +88,8 @@ class EufyEdgeProvider:
                     raise ProviderRequestError(
                         self.id, operation, f"adapter returned HTTP {response.status_code}", retryable=True
                     )
+                if response.status_code == 404 and allow_not_found:
+                    return response
                 if response.status_code >= 400:
                     raise ProviderRequestError(
                         self.id, operation, f"adapter returned HTTP {response.status_code}", retryable=False
@@ -175,6 +178,23 @@ class EufyEdgeProvider:
         if device["status"] != CameraStatus.ONLINE.value:
             raise CameraOfflineError(camera_id)
         response = await self._request("snapshot", f"/devices/{device['adapter_device_id']}/snapshot")
+        return response.content
+
+    async def get_event_snapshot(self, camera_id: str) -> bytes | None:
+        """Read the bridge's latest ring/motion picture without waking the camera.
+
+        The edge snapshot endpoint already serves event pictures, never live
+        frames. A cached picture can remain useful even while a device is offline.
+        """
+        device = await self._device(camera_id)
+        serial = quote(device["adapter_device_id"], safe="")
+        response = await self._request(
+            "event snapshot", f"/devices/{serial}/snapshot", allow_not_found=True
+        )
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200 or not response.content.startswith(b"\xff\xd8"):
+            raise ProviderUnavailableError("Eufy adapter did not return a JPEG event image")
         return response.content
 
     async def get_live_stream(self, camera_id: str) -> str:

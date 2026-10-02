@@ -65,6 +65,8 @@ export type EventItem={
   vehicle?:VehicleIdentity|null;suspicious?:SuspiciousAssessment|null;
   // ``null`` means nobody checked, which is neither confirmation nor doubt.
   photo_verified?:boolean|null;
+  photo_capture_status?:"pending"|"captured"|"failed"|null;
+  photo_capture_reason?:string|null;photo_fallback?:boolean;
   person_id?:string|null;person_name?:string|null;person_display_name?:string|null;
   person_trust?:Trust|null;
   person_confidence?:number|null;person_confirmed?:boolean;
@@ -252,7 +254,9 @@ export function EventCard({event,persons,token,useSessionCookie=false,onChanged}
             fullBoxes={event.full_photo_boxes}
             subject={subject}
             title={event.person_display_name||event.description}/>
-        : <span className="muted">No photo captured</span>}
+        : <span className="muted" role="status">{event.photo_capture_status==="pending"
+            ? "Capturing photo…"
+            : event.photo_capture_reason||"Camera did not return an image"}</span>}
     </div>
     <div className="event-body">
       <div className="event-head">
@@ -269,7 +273,9 @@ export function EventCard({event,persons,token,useSessionCookie=false,onChanged}
       {/* Saying so is the honest alternative to silently showing a border
           around a fence post as though it were a person. */}
       {event.photo_verified===false&&<p className="unconfirmed">
-        Motion detected, but no person or animal confirmed in the photo.
+        {event.photo_fallback
+          ? "Camera frame saved; the event subject is not verified in this photo."
+          : "Motion detected, but no person or animal confirmed in the photo."}
       </p>}
       {chips.length>0&&<ul className="appearance" aria-label="What was observed">
         {chips.map(chip=><li key={chip.key} className={`chip chip-${chip.key}`}>{chip.label}</li>)}
@@ -309,7 +315,7 @@ export function EventCard({event,persons,token,useSessionCookie=false,onChanged}
       </p>}
       {event.has_photo&&<>
         <StarRating value={rating} label={`Rate the photo for ${event.description}`} onRate={rate}/>
-        <PersonAssign event={event} persons={persons} token={token} onAssigned={onChanged}/>
+        {!event.photo_fallback&&<PersonAssign event={event} persons={persons} token={token} onAssigned={onChanged}/>}
       </>}
     </div>
   </article>;

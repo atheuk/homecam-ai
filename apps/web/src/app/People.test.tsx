@@ -66,8 +66,26 @@ describe("event photo card",()=>{
 
   it("says so when no photo was captured rather than showing a broken image",()=>{
     render(<EventCard event={{...EVENT,has_photo:false,photo_url:null}} persons={[]} onChanged={()=>{}}/>);
-    expect(screen.getByText("No photo captured")).toBeInTheDocument();
+    expect(screen.getByText("Camera did not return an image")).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("shows capture pending, then a clear terminal failure",()=>{
+    const event={...EVENT,has_photo:false,photo_url:null};
+    const {rerender}=render(<EventCard event={{...event,photo_capture_status:"pending"}}
+      persons={[]} onChanged={()=>{}}/>);
+    expect(screen.getByRole("status")).toHaveTextContent("Capturing photo…");
+    rerender(<EventCard event={{...event,photo_capture_status:"failed",
+      photo_capture_reason:"Camera did not return an image"}} persons={[]} onChanged={()=>{}}/>);
+    expect(screen.getByRole("status")).toHaveTextContent("Camera did not return an image");
+    expect(screen.queryByText("Capturing photo…")).not.toBeInTheDocument();
+  });
+
+  it("does not offer identity assignment for an unverified fallback frame",()=>{
+    render(<EventCard event={{...EVENT,photo_fallback:true,photo_verified:false,photo_boxes:[]}}
+      persons={[]} onChanged={()=>{}}/>);
+    expect(screen.getByText(/event subject is not verified/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name this person")).not.toBeInTheDocument();
   });
 
   it("submits a star rating for the photo",async()=>{

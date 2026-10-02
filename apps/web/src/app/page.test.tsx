@@ -63,6 +63,21 @@ describe("dashboard",()=>{
   });
   afterEach(()=>vi.restoreAllMocks());
 
+  it("replaces a pending event photo live without duplicating or reordering cards",async()=>{
+    currentSearch="?tab=events";
+    mockApi(cameras,[{...events[0],has_photo:false,photo_capture_status:"pending"}]);
+    await renderDashboard();
+    await screen.findByText("Capturing photo…");
+    await waitFor(()=>expect(MockSseStream.instances.length).toBeGreaterThan(0));
+    MockSseStream.instances[0].dispatch("event.updated",{
+      ...events[0],has_photo:true,photo_url:"/api/v1/events/evt-1/photo",
+      photo_capture_status:"captured",photo_fallback:true,photo_verified:false,
+    });
+    await waitFor(()=>expect(screen.queryByText("Capturing photo…")).not.toBeInTheDocument());
+    expect(screen.getAllByText("Sarah arrived")).toHaveLength(1);
+    expect(screen.getByText(/event subject is not verified/)).toBeInTheDocument();
+  });
+
   it("renders the brand and a time-aware greeting",async()=>{
     await renderDashboard();
     expect(screen.getByText("HomeCam")).toBeInTheDocument();

@@ -65,6 +65,70 @@ Recheck this baseline immediately before updating to catch concurrent releases.
 
 # Previous release: Incident video clips
 
+## Event-photo image-only release (2026-10-02)
+
+**Status: Validated for the scoped image-only rollout.** User authorized exact-head
+CI, independent review, squash merge to main and digest-pinned deployment.
+The historical incident-clip release record below remains unchanged.
+
+Deploy only the existing API `api` container and existing web app from an
+archive of this release's merge commit. No schema change or migration job;
+no Bicep resource deployment. Preserve Tailscale, environment/secret
+references, identity and ingress. Coordinate web rollout with the live-player
+fix and rebase on its merged main before release.
+
+### All validation checks pass (this release)
+
+- [x] Core AZCLI validation: CLI/auth/build/validate/what-if using a temporary
+  existing-only template for the API, web and ACR (zero resource changes).
+- [x] Docker build contexts and CI container builds; final head must also pass
+  CI immediately before merge.
+- [x] Azure Policy assignments at the target scope; no new resource, SKU,
+  network, identity or role configuration is proposed.
+- [x] API Ruff/pytest, Eufy provider/edge suites, web lint/typecheck/vitest/build.
+- [x] Static RBAC review: existing app identity's ACR Pull and Key Vault
+  Secrets User scopes remain unchanged; no new data service permissions.
+- [x] Independent code review, findings corrected with regression tests.
+- [ ] Final exact-head CI and pinned squash merge (release gate).
+
+### Section 7: Validation Proof (this release)
+
+Local API: 805 passed, 3 skipped; Ruff clean. Eufy provider: 12 passed;
+Eufy edge: 62 passed, 1 skipped. Web: 198 passed; lint, typecheck and
+production build passed. Azure account read confirmed the requested enabled
+subscription. Initial API baseline: revision `0000040`, `api` digest
+`sha256:2b79ed2023a38fc8c27bc811272768cf56af7da45e26531cdc725173931f2ffc`,
+`tailscale/tailscale:v1.102.4`, latest-revision traffic at 100%.
+Scoped validation, exact-head CI and review evidence will be recorded below
+before this release is marked Validated.
+
+The AZCLI helper passed CLI/auth/Bicep compilation/group validation and
+what-if (Create 0, Modify 0, Delete 0) for the existing-only API/web/ACR
+template on 2026-10-02. No template deployment is authorized. Resource-group
+policy listing was empty; subscription listing returned the existing
+`SecurityCenterBuiltIn` audit initiative. This image-only release changes no
+policy-governed resource configuration. Static
+`infra/modules/role-assignments.bicep` review confirms resource-scoped ACR Pull
+and Key Vault Secrets User for the app identity; PostgreSQL photo rows use
+the existing secret-referenced application database connection.
+Independent review identified and fixed three real issues: late subject
+selection, cached frames starved by remote-acquisition slots, and capture
+age incorrectly based on delayed provider event timestamps. Dedicated
+regressions were added; updated targeted API tests: 43 passed.
+
+Rebased on PR #39 merge `f68c1e353c9b9c1f1b2e4695a889528e36ad931c`;
+the coordinated web deployment completed Healthy/Running at 100% on
+revision `0000020`, digest
+`sha256:73e83bf47c96b79a2f23896eda7723902f8b1dbdd0cebfdc9c005cb8fc5275ad`.
+This is the web rollback baseline. Rebased full API: 808 passed, 3 skipped;
+combined web: 204 passed plus lint/types/build. Follow-up review verified
+the three corrections and found a wrong-subject selection issue; both
+initial and late subject selection now reject subjects outside the event's
+target set and save a box-free, unverified fallback instead. Final focused
+API/recognition regressions: 68 passed. All six CI jobs, including Docker
+and add-on builds, passed on head `0f3ac1b5198ac532b217ef062178e2dd9a6b8bd2`;
+the final guard/documentation commit will be gated on its own CI before merge.
+
 > **Status:** Validated and deployed to the existing Azure dev environment
 > from PR #34 head `588e2fc`, merge commit `fb20890` (no full-stack Bicep deployment).
 

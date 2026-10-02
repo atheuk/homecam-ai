@@ -1,7 +1,10 @@
+import asyncio
+
 import httpx
 import pytest
 
 from app.providers.eufy import EufyEdgeProvider, EufySettings
+from app.providers.base import ProviderUnavailableError
 
 
 def eufy_transport(auth_state: str = "authenticated") -> httpx.MockTransport:
@@ -132,3 +135,72 @@ async def test_eufy_explicit_transport_bypasses_tailscale_proxy(monkeypatch):
         transport=eufy_transport(),
     )
     assert (await provider.get_health())["status"] == "ONLINE"
+
+
+@pytest.mark.asyncio
+async def test_event_snapshot_reads_existing_picture_even_when_camera_is_offline():
+    requests = []
+    jpeg = b"\xff\xd8event-picture\xff\xd9"
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path == "/devices":
+            return httpx.Response(200, json={"devices": [{"id": "T8210P123", "online": False}]})
+        return httpx.Response(200, content=jpeg)
+
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://edge", adapter_token="test-token"),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await provider.get_event_snapshot("eufy-T8210P123") == jpeg
+    assert [request.url.path for request in requests] == ["/devices", "/devices/T8210P123/snapshot"]
+    assert all(request.headers["Authorization"] == "Bearer test-token" for request in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "content", "expected"),
+    [(404, b"", None), (200, b"<html>not an image</html>", "error"), (302, b"", "error")],
+)
+async def test_event_snapshot_handles_missing_invalid_and_redirected_images(status, content, expected):
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path == "/devices":
+            return httpx.Response(200, json={"devices": [{"id": "T8210P123"}]})
+        return httpx.Response(status, content=content, headers={"location": "http://untrusted/image"})
+
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://edge"), transport=httpx.MockTransport(handler)
+    )
+    if expected == "error":
+        with pytest.raises(ProviderUnavailableError):
+            await provider.get_event_snapshot("eufy-T8210P123")
+    else:
+        assert await provider.get_event_snapshot("eufy-T8210P123") is None
+    assert requests == ["/devices", "/devices/T8210P123/snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_event_snapshot_is_cancelable_by_parent_timeout():
+    canceled = asyncio.Event()
+    requests = []
+
+    async def handler(request):
+        requests.append(request.url.path)
+        if request.url.path == "/devices":
+            return httpx.Response(200, json={"devices": [{"id": "T8210P123"}]})
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+
+    provider = EufyEdgeProvider(
+        EufySettings(adapter_url="http://edge"), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(provider.get_event_snapshot("eufy-T8210P123"), timeout=0.02)
+    assert canceled.is_set()
+    assert requests == ["/devices", "/devices/T8210P123/snapshot"]
