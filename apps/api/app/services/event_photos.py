@@ -5,16 +5,17 @@ import asyncio
 import io
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from PIL import Image
 from sqlalchemy import select
 
-from ..ai.best_photo import BestPhoto, sharpness_score
+from ..ai.best_photo import BestPhoto, select_best_photo, sharpness_score
+from ..ai.detector import DetectionContext, SUBJECT_LABELS, get_detector
 from ..ai.imaging import configure_pillow
 from ..config import settings
 from ..db import SessionLocal
-from ..models.db import Event, EventPhoto
+from ..models.db import Event, EventEvidence, EventPhoto
 from .provider_registry import find_provider_for_camera
 from .stream_frames import stream_hub
 
@@ -75,7 +76,10 @@ async def store_fallback(session, row: Event, frames: list[bytes], source: str) 
 
 def capture_state(row: Event) -> dict:
     state = dict((row.event_metadata or {}).get("photo_capture") or {})
-    at = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
+    started_at = state.get("started_at")
+    at = datetime.fromisoformat(started_at) if started_at else row.start_time
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
     if state.get("status") == "pending" and (datetime.now(timezone.utc) - at).total_seconds() > 180:
         return {"status": "failed", "reason": "Photo capture was interrupted"}
     return state
@@ -84,15 +88,15 @@ def capture_state(row: Event) -> dict:
 async def _acquire(camera_id: str) -> tuple[bytes, str]:
     # Share acquisition across simultaneous events from one camera. The
     # provider/edge's own session caps still apply to every snapshot call.
-    async with _slots:
-        for delay in (0, 1, 2, 4):
-            await asyncio.sleep(delay)
-            cached = stream_hub.latest(camera_id)
-            if cached is not None and await asyncio.to_thread(fallback_photo, [cached.frame]) is not None:
-                return cached.frame, "stream"
-            recent = _recent.get(camera_id)
-            if recent is not None and time.monotonic() - recent[0] <= 10:
-                return recent[1], "snapshot"
+    for delay in (0, 1, 2, 4):
+        await asyncio.sleep(delay)
+        cached = stream_hub.latest(camera_id)
+        if cached is not None and await asyncio.to_thread(fallback_photo, [cached.frame]) is not None:
+            return cached.frame, "stream"
+        recent = _recent.get(camera_id)
+        if recent is not None and time.monotonic() - recent[0] <= 10:
+            return recent[1], "snapshot"
+        async with _slots:
             try:
                 provider = await asyncio.wait_for(find_provider_for_camera(camera_id), ATTEMPT_TIMEOUT)
                 if provider is None:
@@ -119,7 +123,35 @@ async def _acquire(camera_id: str) -> tuple[bytes, str]:
                     return image, "snapshot"
             except Exception:  # noqa: BLE001 - bounded retry, never suppress the event
                 logger.warning("event photo attempt failed for camera %s", camera_id)
-        raise TimeoutError("Camera did not return an image")
+    raise TimeoutError("Camera did not return an image")
+
+
+async def store_late_photo(session, row: Event, image: bytes, source: str) -> bool:
+    """Prefer a locally detected subject; late frames never train identities."""
+    from .ai_pipeline import BEST_PHOTO_TARGETS, NON_VISUAL_EVENT_TYPES, _persist_event_photo
+
+    photo = None
+    if settings.ai_analysis_enabled and settings.best_photo_enabled and row.type not in NON_VISUAL_EVENT_TYPES:
+        targets = SUBJECT_LABELS.get("person" if row.type == "suspicious_activity" else row.type, BEST_PHOTO_TARGETS)
+        context = DetectionContext(camera_id=row.camera_id, camera_name=row.camera_id, event_type=row.type)
+        try:
+            photo = await asyncio.wait_for(
+                asyncio.to_thread(select_best_photo, [image], get_detector(), context, targets), ATTEMPT_TIMEOUT
+            )
+        except Exception:  # noqa: BLE001 - a local detector failure still keeps evidence
+            logger.warning("late subject photo selection failed for %s", row.id)
+    if photo is None or photo.detection is None:
+        return await store_fallback(session, row, [image], source)
+    await _persist_event_photo(session, row.id, photo, None)
+    session.add(EventEvidence(
+        event_id=row.id, label="full", image=photo.full_image,
+        content_type=photo.full_content_type, created_at=datetime.now(timezone.utc),
+    ))
+    row.event_metadata = {
+        **(row.event_metadata or {}), "best_photo": photo.as_dict(), "photo_verified": None,
+        "photo_capture": {"status": "captured", "source": source, "fallback": False},
+    }
+    return True
 
 
 async def _bounded_acquire(camera_id: str) -> tuple[bytes, str]:
@@ -159,7 +191,7 @@ async def backfill(event_id: str, camera_id: str) -> None:
             # Retention may have removed the event while acquisition ran.
             if row is None or await session.get(EventPhoto, event_id) is not None:
                 return
-            if image is not None and await store_fallback(session, row, [image], source):
+            if image is not None and await store_late_photo(session, row, image, source):
                 logger.info("event photo backfilled for %s camera=%s source=%s", event_id, camera_id, source)
             else:
                 row.event_metadata = {
@@ -172,6 +204,10 @@ async def backfill(event_id: str, camera_id: str) -> None:
             payload.update(
                 _sse_event="event.updated", has_photo=has_photo,
                 photo_url=f"/api/v1/events/{event_id}/photo" if has_photo else None,
+                full_photo_url=(
+                    f"/api/v1/events/{event_id}/photo/full"
+                    if has_photo and (row.event_metadata or {}).get("best_photo", {}).get("full_frame") else None
+                ),
             )
             await event_bus.publish(payload)
     except Exception:  # noqa: BLE001 - log durable storage failures explicitly
@@ -195,7 +231,7 @@ async def recover_pending() -> None:
     """A restart must not leave persisted pending cards spinning forever."""
     async with SessionLocal() as session:
         rows = (await session.execute(
-            select(Event).where(Event.start_time >= datetime.now(timezone.utc) - timedelta(minutes=5))
+            select(Event).where(Event.event_metadata["photo_capture"]["status"].as_string() == "pending")
             .order_by(Event.start_time.desc()).limit(MAX_PENDING)
         )).scalars().all()
         for row in rows:

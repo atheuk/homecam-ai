@@ -79,13 +79,13 @@ fix and rebase on its merged main before release.
 
 ### All validation checks pass (this release)
 
-- [ ] Core AZCLI validation: CLI/auth/build/validate/what-if using a temporary
+- [x] Core AZCLI validation: CLI/auth/build/validate/what-if using a temporary
   existing-only template for the API, web and ACR (zero resource changes).
 - [ ] Docker build contexts and exact-head CI container builds.
-- [ ] Azure Policy assignments at the target scope; no new resource, SKU,
+- [x] Azure Policy assignments at the target scope; no new resource, SKU,
   network, identity or role configuration is proposed.
-- [ ] API Ruff/pytest, Eufy provider/edge suites, web lint/typecheck/vitest/build.
-- [ ] Static RBAC review: existing app identity's ACR Pull and Key Vault
+- [x] API Ruff/pytest, Eufy provider/edge suites, web lint/typecheck/vitest/build.
+- [x] Static RBAC review: existing app identity's ACR Pull and Key Vault
   Secrets User scopes remain unchanged; no new data service permissions.
 - [ ] Independent code review and exact-head CI before pinned squash merge.
 
@@ -99,6 +99,20 @@ subscription. Initial API baseline: revision `0000040`, `api` digest
 `tailscale/tailscale:v1.102.4`, latest-revision traffic at 100%.
 Scoped validation, exact-head CI and review evidence will be recorded below
 before this release is marked Validated.
+
+The AZCLI helper passed CLI/auth/Bicep compilation/group validation and
+what-if (Create 0, Modify 0, Delete 0) for the existing-only API/web/ACR
+template on 2026-10-02. No template deployment is authorized. Resource-group
+policy listing was empty; subscription listing returned the existing
+`SecurityCenterBuiltIn` audit initiative. This image-only release changes no
+policy-governed resource configuration. Static
+`infra/modules/role-assignments.bicep` review confirms resource-scoped ACR Pull
+and Key Vault Secrets User for the app identity; PostgreSQL photo rows use
+the existing secret-referenced application database connection.
+Independent review identified and fixed three real issues: late subject
+selection, cached frames starved by remote-acquisition slots, and capture
+age incorrectly based on delayed provider event timestamps. Dedicated
+regressions were added; updated targeted API tests: 43 passed.
 
 > **Status:** Validated and deployed to the existing Azure dev environment
 > from PR #34 head `588e2fc`, merge commit `fb20890` (no full-stack Bicep deployment).

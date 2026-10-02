@@ -65,7 +65,10 @@ async def persist_event(session: AsyncSession, event: dict) -> Event:
         source=event["source"],
         start_time=datetime.fromisoformat(event["start_time"]),
         description=event["description"],
-        event_metadata={**event.get("metadata", {}), "photo_capture": {"status": "pending"}},
+        event_metadata={
+            **event.get("metadata", {}),
+            "photo_capture": {"status": "pending", "started_at": datetime.now(timezone.utc).isoformat()},
+        },
         zone=event.get("zone"),
         tags=list(event.get("tags", [])),
     )

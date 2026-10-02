@@ -54,6 +54,8 @@ message replaces that state when the photo or failure arrives.
 Fallback images carry `photo_fallback: true`, `photo_verified: false`, and
 no detection boxes. They never enter appearance, identity/embedding, animal
 or vehicle recognition; person assignment from fallback imagery is blocked.
+Late images still attempt bounded local subject selection, but never run
+automatic identity inference or train identity embeddings.
 No plate recognition or face inference is added. Imagery remains behind
 the existing authenticated photo routes and media-retention policy. Input
 images are capped at 8 MiB and normalized to JPEG at at most 1920 pixels

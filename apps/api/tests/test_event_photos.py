@@ -9,6 +9,7 @@ from PIL import Image
 from sqlalchemy import delete
 
 from app.config import settings
+from app.ai.detector import BoundingBox, Detection
 from app.db import SessionLocal
 from app.models.db import Event, EventPhoto
 from app.services import ai_pipeline, event_photos, events, ingestion, provider_registry
@@ -149,3 +150,44 @@ def test_restart_never_leaves_an_old_pending_card_spinning():
                 start_time=datetime.now(timezone.utc) - timedelta(minutes=10),
                 event_metadata={"photo_capture": {"status": "pending"}})
     assert event_photos.capture_state(row) == {"status": "failed", "reason": "Photo capture was interrupted"}
+
+
+async def test_delayed_provider_event_starts_capture_now(client, monkeypatch):
+    async def acquire(_):
+        return jpeg(), "provider_event"
+    monkeypatch.setattr(event_photos, "_acquire", acquire)
+    payload = {**event(), "start_time": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()}
+    async with SessionLocal() as session:
+        row = await events.persist_event(session, payload)
+        assert event_photos.capture_state(row)["status"] == "pending"
+        assert event_photos.schedule(row)
+        await asyncio.wait_for(event_photos._tasks[row.id], 3)
+        await session.refresh(row)
+        assert await session.get(EventPhoto, row.id) is not None
+
+
+async def test_cache_is_available_even_when_provider_slots_are_busy(client, monkeypatch):
+    monkeypatch.setattr(event_photos.stream_hub, "latest", lambda _: SimpleNamespace(frame=jpeg()))
+    slots = asyncio.Semaphore(0)
+    monkeypatch.setattr(event_photos, "_slots", slots)
+    image, source = await asyncio.wait_for(event_photos._bounded_acquire("mock-front-door"), 1)
+    assert image == jpeg() and source == "stream"
+
+
+async def test_late_image_prefers_subject_without_identity_inference(client, monkeypatch):
+    detector = SimpleNamespace(detect=lambda *_: [Detection("person", 0.95, BoundingBox(.2, .1, .7, .9))])
+    monkeypatch.setattr(event_photos, "get_detector", lambda: detector)
+    async def acquire(_):
+        return jpeg(), "provider_event"
+    monkeypatch.setattr(event_photos, "_acquire", acquire)
+    monkeypatch.setattr(ai_pipeline, "_embed_photo", lambda *_: pytest.fail("late image must not train identities"))
+    async with SessionLocal() as session:
+        row = await events.persist_event(session, {**event(), "type": "person"})
+        await event_photos.backfill(row.id, row.camera_id)
+        await session.refresh(row)
+        result = events.to_dict(row)
+        assert result["photo_capture_status"] == "captured"
+        assert result["photo_fallback"] is False
+        assert result["photo_verified"] is None
+        assert result["photo_boxes"][0]["label"] == "person"
+        assert row.person_id is None
