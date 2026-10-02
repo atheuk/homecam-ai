@@ -191,3 +191,16 @@ async def test_late_image_prefers_subject_without_identity_inference(client, mon
         assert result["photo_verified"] is None
         assert result["photo_boxes"][0]["label"] == "person"
         assert row.person_id is None
+
+
+async def test_late_photo_of_wrong_subject_is_unverified_fallback(client, monkeypatch):
+    detector = SimpleNamespace(detect=lambda *_: [Detection("car", .95, BoundingBox(.2, .1, .7, .9))])
+    monkeypatch.setattr(event_photos, "get_detector", lambda: detector)
+    async with SessionLocal() as session:
+        row = await events.persist_event(session, {**event(), "type": "person"})
+        assert await event_photos.store_late_photo(session, row, jpeg(), "provider_event")
+        await session.commit()
+        result = events.to_dict(row)
+        assert result["photo_fallback"] is True
+        assert result["photo_verified"] is False
+        assert result["photo_boxes"] == result["full_photo_boxes"] == []

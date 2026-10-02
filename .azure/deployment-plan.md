@@ -67,7 +67,7 @@ Recheck this baseline immediately before updating to catch concurrent releases.
 
 ## Event-photo image-only release (2026-10-02)
 
-**Status: Approved; ready for scoped validation.** User authorized exact-head
+**Status: Validated for the scoped image-only rollout.** User authorized exact-head
 CI, independent review, squash merge to main and digest-pinned deployment.
 The historical incident-clip release record below remains unchanged.
 
@@ -81,13 +81,15 @@ fix and rebase on its merged main before release.
 
 - [x] Core AZCLI validation: CLI/auth/build/validate/what-if using a temporary
   existing-only template for the API, web and ACR (zero resource changes).
-- [ ] Docker build contexts and exact-head CI container builds.
+- [x] Docker build contexts and CI container builds; final head must also pass
+  CI immediately before merge.
 - [x] Azure Policy assignments at the target scope; no new resource, SKU,
   network, identity or role configuration is proposed.
 - [x] API Ruff/pytest, Eufy provider/edge suites, web lint/typecheck/vitest/build.
 - [x] Static RBAC review: existing app identity's ACR Pull and Key Vault
   Secrets User scopes remain unchanged; no new data service permissions.
-- [ ] Independent code review and exact-head CI before pinned squash merge.
+- [x] Independent code review, findings corrected with regression tests.
+- [ ] Final exact-head CI and pinned squash merge (release gate).
 
 ### Section 7: Validation Proof (this release)
 
@@ -113,6 +115,19 @@ Independent review identified and fixed three real issues: late subject
 selection, cached frames starved by remote-acquisition slots, and capture
 age incorrectly based on delayed provider event timestamps. Dedicated
 regressions were added; updated targeted API tests: 43 passed.
+
+Rebased on PR #39 merge `f68c1e353c9b9c1f1b2e4695a889528e36ad931c`;
+the coordinated web deployment completed Healthy/Running at 100% on
+revision `0000020`, digest
+`sha256:73e83bf47c96b79a2f23896eda7723902f8b1dbdd0cebfdc9c005cb8fc5275ad`.
+This is the web rollback baseline. Rebased full API: 808 passed, 3 skipped;
+combined web: 204 passed plus lint/types/build. Follow-up review verified
+the three corrections and found a wrong-subject selection issue; both
+initial and late subject selection now reject subjects outside the event's
+target set and save a box-free, unverified fallback instead. Final focused
+API/recognition regressions: 68 passed. All six CI jobs, including Docker
+and add-on builds, passed on head `0f3ac1b5198ac532b217ef062178e2dd9a6b8bd2`;
+the final guard/documentation commit will be gated on its own CI before merge.
 
 > **Status:** Validated and deployed to the existing Azure dev environment
 > from PR #34 head `588e2fc`, merge commit `fb20890` (no full-stack Bicep deployment).

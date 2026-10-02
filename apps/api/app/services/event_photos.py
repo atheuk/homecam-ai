@@ -140,7 +140,7 @@ async def store_late_photo(session, row: Event, image: bytes, source: str) -> bo
             )
         except Exception:  # noqa: BLE001 - a local detector failure still keeps evidence
             logger.warning("late subject photo selection failed for %s", row.id)
-    if photo is None or photo.detection is None:
+    if photo is None or photo.detection is None or photo.detection.label not in targets:
         return await store_fallback(session, row, [image], source)
     await _persist_event_photo(session, row.id, photo, None)
     session.add(EventEvidence(

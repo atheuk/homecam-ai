@@ -253,6 +253,11 @@ async def create_and_broadcast_event(
             logger.exception("initial fallback photo storage failed for %s", event_id)
             await _recover(session, row, event_id)
     has_photo = await session.get(EventPhoto, event_id) is not None
+    if has_photo:
+        logger.info(
+            "event photo ready for %s camera=%s fallback=%s",
+            event_id, row.camera_id, bool(event_photos.capture_state(row).get("fallback")),
+        )
     enriched = {
         **enriched, **to_dict(row), "has_photo": has_photo,
         "photo_url": f"/api/v1/events/{event_id}/photo" if has_photo else None,

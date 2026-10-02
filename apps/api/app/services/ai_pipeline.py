@@ -363,7 +363,7 @@ async def enrich_event(
         except Exception as exc:  # noqa: BLE001
             logger.warning("best-photo selection failed for %s: %s", row.camera_id, exc)
             photo = None
-        if photo is not None:
+        if photo is not None and photo.detection is not None and photo.detection.label in photo_targets:
             stored = _store_best_photo(row.id, photo.image)
             row.best_photo_path = stored
             row.thumbnail_path = stored
