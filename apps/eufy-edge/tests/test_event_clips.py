@@ -13,10 +13,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as adapter
-from eufy_ws import EufyWsClient
+from eufy_ws import EufyWsClient, Livestream
 
 SERIAL = "T8210P1234567890"
 TOKEN = "test-token"
+SPS = b"\x00\x00\x00\x01\x67\x42\x00\x1f"
+PPS = b"\x00\x00\x00\x01\x68\xce\x3c\x80"
+IDR = b"\x00\x00\x00\x01\x65\x88\x84\x00"
+P_FRAME = b"\x00\x00\x00\x01\x41\x9a\x02\x00"
 
 
 def _box(kind: bytes, payload: bytes) -> bytes:
@@ -38,8 +42,12 @@ def fmp4(seconds: float = 2.0, timescale: int = 90000, fps: int = 10) -> bytes:
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, keyframe: bool = True):
         self.started: list[str] = []
+        self.stopped: list[str] = []
+        self.stream = Livestream()
+        if keyframe:
+            self.stream.publish(SPS + PPS + IDR)
 
     async def ensure_connected(self):
         return None
@@ -53,6 +61,10 @@ class FakeClient:
 
     async def start_livestream(self, serial):
         self.started.append(serial)
+        return self.stream
+
+    async def stop_livestream(self, serial):
+        self.stopped.append(serial)
 
     async def close(self):
         return None
@@ -142,6 +154,70 @@ def test_disabled_recorder_never_wakes_the_device(fake):
     recorder = adapter.ClipRecorder(enabled=False, seconds=15, cooldown=120, daily_limit=3)
     assert recorder.trigger(SERIAL, "doorbell") is None
     assert fake.started == []
+
+
+def test_recorder_waits_for_the_waking_doorbell_keyframe_before_recording(monkeypatch):
+    # Production failure: go2rtc was asked to record immediately after
+    # start_livestream, while the sleeping T8210 had not sent SPS/PPS+IDR yet,
+    # and its ffmpeg probe failed with "Invalid data found when processing input".
+    client = FakeClient(keyframe=False)
+    monkeypatch.setattr(adapter, "client", client)
+    monkeypatch.setattr(adapter, "recorder", adapter.ClipRecorder(enabled=True, seconds=15, cooldown=120, daily_limit=3))
+    monkeypatch.setattr(adapter.settings, "live_ready_timeout", 5.0)
+    events: list = []
+
+    async def ensure(serial):
+        events.append("register")
+        return f"eufy-{serial}"
+
+    async def fetch(name, seconds):
+        events.append("fetch")
+        return fmp4(15.0)
+
+    monkeypatch.setattr(adapter, "_ensure_go2rtc_stream", ensure)
+    monkeypatch.setattr(adapter, "_fetch_mp4", fetch)
+
+    async def scenario():
+        clip = adapter.recorder.trigger(SERIAL, "doorbell")
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert events == []  # still waking: go2rtc not touched yet
+        client.stream.publish(P_FRAME)
+        await asyncio.sleep(0)
+        assert events == []
+        client.stream.publish(SPS + PPS + IDR)
+        await asyncio.gather(*adapter.recorder._tasks)
+        return clip
+
+    clip = asyncio.run(scenario())
+    assert events == ["register", "fetch"]
+    assert clip.complete is True and clip.failed is None
+    assert client.stopped == []
+
+
+def test_recorder_gives_up_and_releases_a_device_that_never_sends_a_keyframe(monkeypatch):
+    client = FakeClient(keyframe=False)
+    monkeypatch.setattr(adapter, "client", client)
+    monkeypatch.setattr(adapter, "recorder", adapter.ClipRecorder(enabled=True, seconds=15, cooldown=120, daily_limit=3))
+    monkeypatch.setattr(adapter.settings, "live_ready_timeout", 0.05)
+    fetched: list = []
+
+    async def fetch(name, seconds):
+        fetched.append(name)
+        return fmp4()
+
+    monkeypatch.setattr(adapter, "_fetch_mp4", fetch)
+
+    async def scenario():
+        clip = adapter.recorder.trigger(SERIAL, "doorbell")
+        await asyncio.gather(*adapter.recorder._tasks)
+        return clip
+
+    clip = asyncio.run(scenario())
+    assert fetched == []
+    assert clip.complete is False and clip.data == b""
+    assert "no keyframe" in clip.failed
+    assert client.stopped == [SERIAL]
 
 
 def test_clip_endpoints_require_the_token_and_serve_mp4(fake):

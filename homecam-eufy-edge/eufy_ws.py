@@ -137,8 +137,14 @@ class Livestream:
     gop_bytes: int = 0
     parameter_sets: dict[int, bytes] = field(default_factory=dict)
     idle_task: asyncio.Task | None = None
+    # Subscribers that joined before any decodable GOP was cached (e.g. an
+    # event clip recorder while a sleeping doorbell is still waking up). They
+    # receive nothing until the next IDR, which is then prefixed with the
+    # parameter sets, so ffmpeg never has to probe mid-GOP data.
+    awaiting_keyframe: set[asyncio.Queue] = field(default_factory=set)
+    keyframe: asyncio.Event = field(default_factory=asyncio.Event)
 
-    def _remember(self, chunk: bytes) -> None:
+    def _remember(self, chunk: bytes) -> set[int]:
         nal_types: set[int] = set()
         for nal_type, payload in _h264_nal_units(chunk):
             nal_types.add(nal_type)
@@ -147,42 +153,66 @@ class Livestream:
         if H264_NAL_IDR in nal_types:
             self.gop = [chunk]
             self.gop_bytes = len(chunk)
-            return
+            self.keyframe.set()
+            return nal_types
         if not self.gop:
             # No keyframe yet (or dropped after an overflow): a GOP that does
             # not start at an IDR cannot be decoded, so wait for the next one.
-            return
+            return nal_types
         self.gop.append(chunk)
         self.gop_bytes += len(chunk)
         if self.gop_bytes > GOP_CACHE_MAX_BYTES or len(self.gop) > GOP_CACHE_MAX_CHUNKS:
             self.gop = []
             self.gop_bytes = 0
+        return nal_types
 
-    def _primer(self) -> list[bytes]:
-        if not self.gop:
-            return []
-        present = _h264_nal_types(self.gop[0])
-        prefix = [
+    def _parameter_prefix(self, present: set[int]) -> list[bytes]:
+        return [
             b"\x00\x00\x00\x01" + self.parameter_sets[nal_type]
             for nal_type in (H264_NAL_SPS, H264_NAL_PPS)
             if nal_type in self.parameter_sets and nal_type not in present
         ]
-        return prefix + self.gop
+
+    def _primer(self) -> list[bytes]:
+        if not self.gop:
+            return []
+        return self._parameter_prefix(_h264_nal_types(self.gop[0])) + self.gop
 
     def add_subscriber(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
-        for chunk in self._primer():
+        primer = self._primer()
+        for chunk in primer:
             queue.put_nowait(chunk)
+        if not primer:
+            self.awaiting_keyframe.add(queue)
         self.queues.add(queue)
         return queue
 
+    def remove_subscriber(self, queue: asyncio.Queue) -> None:
+        self.queues.discard(queue)
+        self.awaiting_keyframe.discard(queue)
+
+    async def wait_for_keyframe(self, timeout: float) -> bool:
+        """Wait (bounded) until a decodable GOP start has arrived."""
+        try:
+            await asyncio.wait_for(self.keyframe.wait(), timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
     def publish(self, chunk: bytes) -> None:
-        self._remember(chunk)
+        nal_types = self._remember(chunk)
         for queue in list(self.queues):
             # Drop rather than block: a slow reader must never stall the
             # socket that every other device's events share.
             if queue.qsize() > 512:
                 continue
+            if queue in self.awaiting_keyframe:
+                if H264_NAL_IDR not in nal_types:
+                    continue
+                self.awaiting_keyframe.discard(queue)
+                for prefix in self._parameter_prefix(nal_types):
+                    queue.put_nowait(prefix)
             queue.put_nowait(chunk)
 
     def close(self) -> None:
@@ -192,6 +222,8 @@ class Livestream:
         for queue in list(self.queues):
             queue.put_nowait(None)
         self.queues.clear()
+        self.awaiting_keyframe.clear()
+        self.keyframe.clear()
         self.gop = []
         self.gop_bytes = 0
         self.parameter_sets = {}
@@ -599,7 +631,7 @@ class EufyWsClient:
         stream = self._livestreams.get(serial)
         if stream is None:
             return
-        stream.queues.discard(queue)
+        stream.remove_subscriber(queue)
         if not stream.queues:
             # Last viewer left: stop P2P so the battery is not drained by a
             # stream nobody is watching.

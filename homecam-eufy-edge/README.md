@@ -26,13 +26,16 @@ device list, event snapshots, doorbell/motion state, and on-demand live HLS.
   regenerated on every start and redacted from all logs.
 - The livestream stops when the last viewer leaves, so the battery doorbell
   is not kept awake. Arming/guard mode is never changed.
-- **Event clips (1.0.2):** on a ring or motion/person event the adapter
+- **Event clips (1.0.2+):** on a ring or motion/person event the adapter
   records one bounded post-roll clip (default 15 s) through its private
   go2rtc, then stops the stream. A sleeping battery doorbell has no earlier
   footage, so clips start when the camera woke: there is no pre-roll and
   none is fabricated. Recordings are held in memory only for a short time
   until HomeCam fetches them with the bearer token, with a 120 s cooldown
-  and a daily cap to protect the battery.
+  and a daily cap to protect the battery. Since 1.0.3 recording starts only
+  once the waking doorbell has sent its first keyframe (bounded by
+  `LIVE_READY_TIMEOUT_SECONDS`); before that, go2rtc's ffmpeg could fail to
+  probe the not-yet-decodable stream.
 
 ## Install
 

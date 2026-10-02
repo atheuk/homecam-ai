@@ -1,5 +1,5 @@
 name: HomeCam Eufy edge adapter
-version: "1.0.2"
+version: "1.0.3"
 slug: homecam_eufy_edge
 description: Token-authenticated adapter from the eufy-security-ws add-on to HomeCam, with a browser-safe HLS relay
 url: https://github.com/atheuk/homecam-ai/tree/main/homecam-eufy-edge

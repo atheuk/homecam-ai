@@ -226,6 +226,28 @@ def test_separately_sent_parameter_sets_are_kept():
     assert [queue.get_nowait() for _ in range(queue.qsize())] == [SPS, PPS, IDR]
 
 
+def test_subscriber_joining_a_waking_device_gets_nothing_before_the_first_idr():
+    # ffmpeg (event clip recorder) subscribing before the doorbell's first
+    # keyframe must not be fed undecodable mid-GOP data to probe.
+    async def scenario():
+        stream = Livestream()
+        queue = stream.add_subscriber()
+        stream.publish(P_FRAME)
+        stream.publish(SPS)
+        stream.publish(PPS)
+        assert queue.empty()
+        assert not stream.keyframe.is_set()
+        stream.publish(IDR)
+        stream.publish(P_FRAME)
+        assert stream.keyframe.is_set()
+        assert [queue.get_nowait() for _ in range(queue.qsize())] == [SPS, PPS, IDR, P_FRAME]
+        assert await stream.wait_for_keyframe(0.01) is True
+        stream.close()
+        assert not stream.keyframe.is_set() and not stream.awaiting_keyframe
+
+    run(scenario())
+
+
 def test_gop_cache_is_bounded(monkeypatch):
     monkeypatch.setattr(eufy_ws, "GOP_CACHE_MAX_BYTES", 32)
     stream = Livestream()
