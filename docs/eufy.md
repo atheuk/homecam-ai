@@ -52,6 +52,15 @@ view takes a few seconds to start, and it can fail transiently.
 
 All Eufy-specific HomeCam code is isolated under `apps/api/app/providers/eufy`.
 
+When the API uses the Tailscale sidecar, set `TAILSCALE_HTTP_PROXY` to its
+HTTP proxy (typically `http://127.0.0.1:1055`). The Eufy provider uses it for
+health, discovery, snapshots and live descriptors, as the HLS relay does for
+playback. A successful proxied `/healthz` check alone does not prove that the
+provider uses the same network path: also run **Test Connection** in HomeCam.
+Without the proxy, the API may be unable to resolve the adapter's `.ts.net`
+name even though the add-on is healthy. No proxy is required for local LAN
+deployments; explicit test transports bypass it.
+
 ### Runtime admin configuration (preferred)
 
 Configure the adapter connection at runtime through the authenticated admin

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 
 import httpx
@@ -75,6 +76,7 @@ class EufyEdgeProvider:
                     timeout=self.settings.timeout_seconds,
                     transport=self._transport,
                     follow_redirects=False,
+                    proxy=os.environ.get("TAILSCALE_HTTP_PROXY") if self._transport is None else None,
                 ) as client:
                     response = await client.get(url, headers=self._headers())
                 if response.status_code in (401, 403):
