@@ -1,5 +1,5 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from "vitest";
-import {render,screen,cleanup} from "@testing-library/react";
+import {render,screen,cleanup,fireEvent} from "@testing-library/react";
 import {act} from "react";
 
 /** hls.js only runs where MediaSource exists, which jsdom does not provide,
@@ -7,13 +7,14 @@ import {act} from "react";
  * keeps the public surface the component uses and lets a test fire the exact
  * fatal error a browser would raise. */
 const errorHandlers:((event:string,data:Record<string,unknown>)=>void)[]=[];
+const manifestHandlers:(()=>void)[]=[];
 const instances:{startLoad:ReturnType<typeof vi.fn>;recoverMediaError:ReturnType<typeof vi.fn>;destroy:ReturnType<typeof vi.fn>;levels:{videoCodec?:string}[];currentLevel:number;xhrSetup:(xhr:XMLHttpRequest,url:string)=>void}[]=[];
 let supported=true;
 
 vi.mock("hls.js",()=>{
   class MockHls{
     static isSupported(){return supported;}
-    static Events={ERROR:"hlsError"};
+    static Events={ERROR:"hlsError",MANIFEST_PARSED:"manifestParsed"};
     static ErrorTypes={NETWORK_ERROR:"networkError",MEDIA_ERROR:"mediaError",OTHER_ERROR:"otherError"};
     static ErrorDetails={
       MANIFEST_INCOMPATIBLE_CODECS_ERROR:"manifestIncompatibleCodecsError",
@@ -32,7 +33,10 @@ vi.mock("hls.js",()=>{
     attachMedia=vi.fn();
     xhrSetup:(xhr:XMLHttpRequest,url:string)=>void;
     constructor(options:{xhrSetup:(xhr:XMLHttpRequest,url:string)=>void}){this.xhrSetup=options.xhrSetup;instances.push(this as never);}
-    on(_event:string,handler:(event:string,data:Record<string,unknown>)=>void){errorHandlers.push(handler);}
+    on(event:string,handler:(event:string,data:Record<string,unknown>)=>void){
+      if(event==="manifestParsed") manifestHandlers.push(()=>handler(event,{}));
+      else errorHandlers.push(handler);
+    }
   }
   return {default:MockHls};
 });
@@ -44,12 +48,73 @@ function fireFatal(data:Record<string,unknown>){
 }
 
 beforeEach(()=>{
-  errorHandlers.length=0;instances.length=0;supported=true;
+  errorHandlers.length=0;manifestHandlers.length=0;instances.length=0;supported=true;
+  vi.spyOn(HTMLMediaElement.prototype,"play").mockResolvedValue();
+  vi.spyOn(HTMLMediaElement.prototype,"pause").mockImplementation(()=>{});
   // jsdom's <video> has no codec support table; an empty string is what a
   // non-Safari browser returns for HLS, which is the branch under test.
   HTMLMediaElement.prototype.canPlayType=()=>"" as CanPlayTypeResult;
 });
-afterEach(()=>cleanup());
+afterEach(()=>{cleanup();vi.restoreAllMocks();});
+
+describe("live stream controls",()=>{
+  it("autoplays after the manifest is parsed without native controls covering the image",()=>{
+    const {container}=render(<HlsVideo src="https://api.example/hls/index.m3u8"/>);
+    const video=container.querySelector("video")!;
+    expect(video.autoplay).toBe(true);
+    expect(video.muted).toBe(true);
+    expect(video.playsInline).toBe(true);
+    expect(video.controls).toBe(false);
+    expect(video.play).not.toHaveBeenCalled();
+    act(()=>manifestHandlers.forEach(handler=>handler()));
+    expect(video.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles blocked autoplay and allows an explicit retry, pause and resume",async()=>{
+    vi.mocked(HTMLMediaElement.prototype.play).mockRejectedValueOnce(new DOMException("Blocked","NotAllowedError"));
+    const {container}=render(<HlsVideo src="https://api.example/hls/index.m3u8"/>);
+    const video=container.querySelector("video")!;
+    await act(async()=>manifestHandlers.forEach(handler=>handler()));
+    expect(screen.getByRole("status")).toHaveTextContent("Select Play live stream");
+    fireEvent.click(screen.getByRole("button",{name:"Play live stream"}));
+    expect(video.play).toHaveBeenCalledTimes(2);
+    fireEvent.playing(video);
+    expect(screen.queryByRole("status")).toBeNull();
+    fireEvent.click(screen.getByRole("button",{name:"Pause live stream"}));
+    expect(video.pause).toHaveBeenCalledTimes(1);
+    fireEvent.pause(video);
+    fireEvent.click(screen.getByRole("button",{name:"Play live stream"}));
+    expect(video.play).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["native","fallback"])("starts playback with the %s source path",path=>{
+    if(path==="native") HTMLMediaElement.prototype.canPlayType=()=>"probably";
+    else supported=false;
+    render(<HlsVideo src="https://api.example/hls/index.m3u8"/>);
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+    expect(instances).toHaveLength(0);
+  });
+
+  it("offers fullscreen and reports a rejected request",async()=>{
+    const {container}=render(<HlsVideo src="https://api.example/hls/index.m3u8"/>);
+    const requestFullscreen=vi.fn().mockRejectedValue(new Error("Denied"));
+    container.querySelector(".live-player")!.requestFullscreen=requestFullscreen;
+    await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Fullscreen"})));
+    expect(requestFullscreen).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveTextContent("Could not enter fullscreen");
+  });
+
+  it("destroys HLS on unmount and ignores late manifest events and play rejection",async()=>{
+    let rejectPlay:(reason:Error)=>void=()=>{};
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(()=>new Promise((_,reject)=>{rejectPlay=reject;}));
+    const {unmount}=render(<HlsVideo src="https://api.example/hls/index.m3u8"/>);
+    act(()=>manifestHandlers.forEach(handler=>handler()));
+    unmount();
+    await act(async()=>{rejectPlay(new Error("Detached"));manifestHandlers.forEach(handler=>handler());});
+    expect(instances[0].destroy).toHaveBeenCalledTimes(1);
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("live stream playback errors",()=>{
   it("sends the bearer token only to HLS resources on the API origin",()=>{
@@ -88,8 +153,7 @@ describe("live stream playback errors",()=>{
     // The actionable part: which codec, and what to change on the NVR.
     expect(message.textContent).toContain("hvc1.1.2.L180.80");
     expect(message.textContent).toMatch(/H\.264/);
-    // The dead player is removed rather than left as a black rectangle.
-    expect(container.querySelector("video")).toBeNull();
+    expect(container.querySelector("video")).not.toBeVisible();
   });
 
   it("reports a codec the buffer rejects after the manifest parsed",()=>{

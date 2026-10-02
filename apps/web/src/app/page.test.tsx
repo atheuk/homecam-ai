@@ -57,6 +57,7 @@ describe("dashboard",()=>{
     currentSearch="";
     MockSseStream.instances.length=0;
     routerPush.mockReset();
+    vi.spyOn(HTMLMediaElement.prototype,"play").mockResolvedValue();
     vi.spyOn(Date.prototype,"getHours").mockReturnValue(14);
     mockApi();
   });

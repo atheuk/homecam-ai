@@ -48,6 +48,11 @@ Eufy's own documentation lists Home Assistant, HomeKit, ONVIF and Blue Iris
 as "Not Supported" for these devices. A P2P bridge is the only route, live
 view takes a few seconds to start, and it can fail transiently.
 
+HomeCam's live tiles start muted playback automatically. If the browser blocks
+playback, select **Play live stream** below the image to retry. Play/pause and
+fullscreen controls stay below the video, so native paused controls do not dim
+the live picture. Incident clips retain their separate native video controls.
+
 ## HomeCam adapter contract
 
 All Eufy-specific HomeCam code is isolated under `apps/api/app/providers/eufy`.

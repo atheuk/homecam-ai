@@ -1,4 +1,69 @@
-# Incident video clips — Azure development release plan
+# Live view overlay fix - Azure development release plan
+
+> **Current release status:** Validated (2026-10-02; final-head CI is a merge gate).
+
+## Current release scope and authorization
+
+The user explicitly authorized fixing live HLS autoplay and controls, web
+validation, independent review, exact-head green PR CI, pinned squash merge to
+main, then a web-only deployment. No API, migration, HA, infrastructure or
+secret changes are authorized. The incident-clip release history below is
+retained for reference; its validation is not evidence for this release.
+
+Recipe: scoped AZCLI image-only update, using the existing ACR build process.
+Targets: Ate Lab subscription `83288725-b5b5-44ee-bb33-b1b0a38539cd`,
+`rg-homecam-ai`, North Europe, registry `crhomecamaidev82ac`, and only
+`ca-web-homecam-ai-dev-82ac`. Existing Next.js Dockerfile and lockfile are reused;
+no resources or additional capacity are needed. Docker is unavailable locally;
+exact-head CI Docker validation is required before merge.
+
+Build `apps/web` from an archive of the verified merge commit with
+`NEXT_PUBLIC_API_URL=https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`.
+Resolve the resulting ACR digest, capture current rollback revision, and update
+only the web container image by digest. Preserve environment, secrets, identity,
+scale and ingress. Verify healthy revision/100% traffic, HTTP 200, and the live
+JavaScript's API origin. Coordinate with the event-photo release to avoid stale
+web rollouts.
+
+### Current release: All validation checks pass
+
+- [x] Core scoped validation: CLI/auth, existing-resource Bicep build,
+      group validation and no-op what-if for web/ACR only.
+- [x] Docker build on PR head `95472e4` CI (Docker unavailable locally).
+      Final exact-head CI must be green before merge.
+- [x] Azure Policy validation at the target scope.
+- [x] Web lint, typecheck, Vitest and Next production build.
+- [x] Static role verification: existing ACR-scoped AcrPull for app identity;
+      no new roles or data-plane access required.
+- [x] Independent code review: no significant findings in live-player changes.
+
+### Current release: Section 7: Validation Proof
+
+On 2026-10-02, local web lint, typecheck, 201 Vitest tests and Next production
+build passed. An independent code-review agent reported no significant findings.
+Initial PR #39 head `95472e45bfa52b3986a04cffdf66a6311294f917` passed
+frontend and Docker validation CI (both push and PR runs); final-head CI remains
+a merge gate. Incident clips retain their native controls.
+
+The standard `azure-validate` helper ran with `-Scope group -ResourceGroup
+rg-homecam-ai -Subscription 83288725-b5b5-44ee-bb33-b1b0a38539cd` against
+a temporary existing-resource Bicep in session artifacts declaring only the web
+app and ACR. CLI, Ate Lab authentication, Bicep compilation, group validation,
+and what-if all passed: create 0, modify 0, delete 0. This is a scoped no-op
+target check, not a preview of the image update or full-stack deployment.
+No full-stack Bicep deployment is authorized. Policy checks found no assignments
+at the resource-group query scope and the subscription SecurityCenterBuiltIn
+assignment; this image-only update adds no policy-conflicting resources.
+Static RBAC confirms resource-scoped AcrPull in the existing role module.
+
+Baseline: web revision `ca-web-homecam-ai-dev-82ac--0000019`,
+image `crhomecamaidev82ac.azurecr.io/web@sha256:c7e6322298799f22f2095e36a625cf6a6d534584017011a57e7d176dfca948db`,
+Single revision mode, latest revision 100% traffic, HTTPS ingress port 3000.
+Recheck this baseline immediately before updating to catch concurrent releases.
+
+---
+
+# Previous release: Incident video clips
 
 > **Status:** Validated and deployed to the existing Azure dev environment
 > from PR #34 head `588e2fc`, merge commit `fb20890` (no full-stack Bicep deployment).
