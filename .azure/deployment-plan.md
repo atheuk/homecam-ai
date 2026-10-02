@@ -1,6 +1,6 @@
 # Event clips and richer recognition - Azure development release plan
 
-> **Current release status:** Ready for Validation (2026-10-02).
+> **Current release status:** Deployed (2026-10-02) - PR #41 merge `d6ebf37`; API rev 0000042, web rev 0000022, Eufy edge add-on 1.0.2.
 
 ## Current release scope and authorization
 
@@ -34,14 +34,45 @@ payload growth is unchanged from the approved incident-clip budget.
 
 ### Current release: checklist
 
-- [ ] Local API/edge/web tests, lint, typecheck, build.
-- [ ] Independent review, exact-head CI green, pinned squash merge, main CI.
-- [ ] Scoped `azure-validate` (existing-resource, no-op what-if).
-- [ ] Migration job → head `0016_event_clips`; API; web; healthy revisions.
-- [ ] Anonymous `GET /api/v1/events/{id}/clip` → 401.
+- [x] Local API/edge/web tests, lint, typecheck, build.
+- [x] Independent review, exact-head CI green, pinned squash merge, main CI.
+- [x] Scoped `azure-validate` (existing-resource, no-op what-if).
+- [x] Migration job → head `0016_event_clips`; API; web; healthy revisions.
+- [x] Anonymous `GET /api/v1/events/{id}/clip` → 401.
 - [ ] Real clip bytes (duration/format) captured from an actual device event.
 
+### All validation checks pass
+
+- [x] 1. Core Validation (CLI, auth, build, validate, what-if) — scoped existing-resource template
+- [x] 2. Docker Build (if containerized)
+- [x] 3. Azure Policy Validation
+
 ---
+
+### Current release: Section 7: Validation Proof
+
+| Check | Command | Result | Timestamp |
+|---|---|---|---|
+| Core validation (CLI, auth, bicep build, validate, what-if) | `validate-deployment.ps1 -Scope group -ResourceGroup rg-homecam-ai -Template <session>/clips-release-validation.bicep -Parameters <empty params>` | PASS; what-if Create 0 / Modify 0 / Delete 0 | 2026-10-02 |
+| Docker build | CI `docker-validate` on exact PR head `ab86408` | PASS | 2026-10-02 |
+| Azure Policy | `az policy assignment list --scope .../resourceGroups/rg-homecam-ai` | No assignments; nothing to block | 2026-10-02 |
+
+The scoped template only references the existing API, web, migration job and ACR (outputs only). It is not a full-stack validation: full-stack `infra/main.bicep` needs secure parameters, which were deliberately not retrieved.
+
+### Current release: Deployment evidence (2026-10-02)
+
+| Step | Evidence |
+|---|---|
+| Source | `git archive d6ebf37` (main, CI success) built with `az acr build` |
+| API image | `api@sha256:865078ab06ad320096659bd4e07a784773483388d68416cd0629bb8bcc0662cc` (ACR run cg2b) |
+| Web image | `web@sha256:99d174d4c566bedc150f111d5a8e9f6eb91eaf28d8b58e784b3e327f117b621e` (ACR run cg2c, `NEXT_PUBLIC_API_URL` = API URL) |
+| Migration | Job execution `job-migrate-homecam-ai-dev-82ac-yqk320p` Succeeded; log: `Running upgrade 0015_incident_clips -> 0016_event_clips` |
+| API | `--container-name api` only; rev `--0000042` Healthy, 100% traffic; `tailscale/tailscale:v1.102.4` sidecar unchanged; `/health` 200 |
+| Auth | Anonymous `GET /api/v1/events/{id}/clip` -> 401 `Not authenticated` |
+| Ingestion lease | No `INGESTION_LEASE_ENABLED` override (default on); rev 0000042 logs `ingestion lease ... acquired` for eufy and dahua cameras, so only one replica records each camera |
+| Web | rev `--0000022` Healthy, 100% traffic; served bundle contains the new clip/filter UI |
+| Eufy edge | HA add-on `d6af6ef6_homecam_eufy_edge` 1.0.1 -> 1.0.2 via `ha apps update`; started, connected to eufy-security-ws (1 device); no secret-like strings in logs |
+| Rollback | API `api@sha256:463fe292...` (rev 0000041), web `web@sha256:d464fd03...` (rev 0000021), migration image `api@sha256:24cf886a...`; 0016 is additive (new table only) |
 
 # Previous release: Live view overlay fix
 
