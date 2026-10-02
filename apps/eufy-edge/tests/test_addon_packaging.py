@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -67,9 +70,22 @@ def test_dockerfile_maps_every_supported_arch_and_pins_go2rtc():
 
 def test_bundled_go2rtc_stays_private_and_off_shared_host_ports():
     run = _text(ADDON / "run.sh")
-    config = yaml.safe_load(run.split("<<EOF\n", 1)[1].split("\nEOF\n", 1)[0].replace("${go2rtc_api_port}", "11984").replace("${go2rtc_rtsp_port}", "18554"))
-    assert config["api"]["listen"].startswith("127.0.0.1:")
-    assert config["rtsp"]["listen"].startswith("127.0.0.1:")
+    api_port = int(re.search(r"^go2rtc_api_port=(\d+)$", run, re.M).group(1))
+    rtsp_port = int(re.search(r"^go2rtc_rtsp_port=(\d+)$", run, re.M).group(1))
+    # Ports already owned on the HAOS host network: Home Assistant Core's
+    # built-in go2rtc (API 11984, RTSP 18554, WebRTC 18555), Frigate/go2rtc
+    # defaults, the Dahua edge add-on, eufy-security-ws and this adapter.
+    reserved = {11984, 18554, 18555, 1984, 8554, 8555, 8443, 8888, 8189, 3000, 8091}
+    assert api_port not in reserved and rtsp_port not in reserved
+    assert api_port != rtsp_port
+    config = yaml.safe_load(
+        run.split("<<EOF\n", 1)[1].split("\nEOF\n", 1)[0]
+        .replace("${go2rtc_api_port}", str(api_port))
+        .replace("${go2rtc_rtsp_port}", str(rtsp_port))
+    )
+    assert config["api"]["listen"] == f"127.0.0.1:{api_port}"
+    assert config["rtsp"]["listen"] == f"127.0.0.1:{rtsp_port}"
+    assert 'GO2RTC_URL="http://127.0.0.1:${go2rtc_api_port}"' in run
     modules = set(config["app"]["modules"])
     # ffmpeg sources publish through go2rtc's own RTSP server, and HLS is
     # what HomeCam plays; WebRTC/SRTP would grab 8555/8443 on the host.
@@ -77,6 +93,31 @@ def test_bundled_go2rtc_stays_private_and_off_shared_host_ports():
     assert not modules & {"webrtc", "srtp", "homekit", "rtmp", "webtorrent", "ngrok"}
     assert "INTERNAL_LOOPBACK_ONLY=1" in run
     assert "HLS_PUBLIC_BASE_URL" in run
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="SO_REUSEADDR lets Windows bind over a listener; run.sh only runs on Linux",
+)
+def test_run_script_refuses_to_start_when_a_private_port_is_taken():
+    run = _text(ADDON / "run.sh")
+    probe = run.index('python3 - "$go2rtc_api_port" "$go2rtc_rtsp_port"')
+    assert probe < run.index("/usr/local/bin/go2rtc -config")
+    script = run[probe:].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        busy = taken.getsockname()[1]
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(busy)], capture_output=True, text=True
+        )
+    assert result.returncode != 0
+    assert f"127.0.0.1:{busy} is already in use" in result.stderr
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        idle = free.getsockname()[1]
+    result = subprocess.run([sys.executable, "-c", script, str(idle)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_run_script_never_echoes_secrets():

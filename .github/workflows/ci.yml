@@ -47,16 +47,29 @@ jobs:
           # Bearer auth enforced; bad HLS tokens and the loopback-only ingest stay closed.
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/devices)" = 401
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/hls/wrong/eufy-X/stream.m3u8)" = 404
-          # Bundled go2rtc answers on loopback only, with WebRTC/SRTP not loaded.
-          curl -fsS http://127.0.0.1:11984/api >/dev/null
+          # Bundled go2rtc answers on loopback only, with WebRTC/SRTP not loaded,
+          # and stays off Home Assistant Core's go2rtc ports (11984/18554/18555).
+          curl -fsS http://127.0.0.1:21984/api >/dev/null
           if curl -fsS --max-time 2 http://127.0.0.1:1984/api; then echo "default go2rtc API is open" >&2; exit 1; fi
-          if ss -lntu | grep -E ':(8555|8443|8554|1984)\b'; then echo "shared host port taken" >&2; exit 1; fi
-          ss -lnt | grep -E '127\.0\.0\.1:11984\b'
-          ss -lnt | grep -E '127\.0\.0\.1:18554\b'
+          if ss -lntu | grep -E ':(8555|8443|8554|1984|11984|18554|18555)\b'; then echo "shared host port taken" >&2; exit 1; fi
+          ss -lnt | grep -E '127\.0\.0\.1:21984\b'
+          ss -lnt | grep -E '127\.0\.0\.1:28554\b'
           docker logs eufy-addon > /tmp/addon.log 2>&1
           cat /tmp/addon.log
           if grep -F ci-only-token /tmp/addon.log; then echo "token leaked to logs" >&2; exit 1; fi
           docker rm -f eufy-addon
+      - name: Refuse to start when the private go2rtc port is already taken
+        run: |
+          python3 -m http.server 21984 --bind 127.0.0.1 >/dev/null 2>&1 &
+          squatter=$!
+          sleep 1
+          if docker run --rm --network host -v /tmp/addon-data:/data:ro homecam-eufy-edge:ci > /tmp/busy.log 2>&1; then
+            echo "add-on started next to another server on 21984" >&2; exit 1
+          fi
+          cat /tmp/busy.log
+          grep -F "127.0.0.1:21984 is already in use" /tmp/busy.log
+          if grep -F "Uvicorn running" /tmp/busy.log; then exit 1; fi
+          kill "$squatter"
   docker-validate:
     runs-on: ubuntu-latest
     steps:

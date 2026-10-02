@@ -11,10 +11,13 @@ device list, event snapshots, doorbell/motion state, and on-demand live HLS.
   add-on only connects to its local WebSocket (`ws://127.0.0.1:3000`).
 - **One HomeCam token** (`home_cam_eufy_token`), which HomeCam sends as a
   bearer token. It is unrelated to any Eufy credential.
-- **Its own private go2rtc 1.9.14**: API on `127.0.0.1:11984` and RTSP on
-  `127.0.0.1:18554` (loopback only), and WebRTC/SRTP not loaded. It does not
-  touch Frigate or its go2rtc and does not use ports 1984/8554/8555/8443,
-  so Frigate and the Dahua edge add-on are unaffected. Streams are
+- **Its own private go2rtc 1.9.14**: API on `127.0.0.1:21984` and RTSP on
+  `127.0.0.1:28554` (loopback only), and WebRTC/SRTP not loaded. It does not
+  touch Frigate, its go2rtc or Home Assistant Core's built-in go2rtc
+  (11984/18554/18555), and does not use ports 1984/8554/8555/8443, so
+  Frigate, Home Assistant and the Dahua edge add-on are unaffected. If
+  either private port is already taken, the add-on refuses to start rather
+  than talk to another server. Streams are
   registered in memory only; nothing is written to disk.
 - **Token-gated HLS relay** on the adapter port:
   `/hls/<random per-start token>/eufy-<serial>/stream.m3u8`. HomeCam gets

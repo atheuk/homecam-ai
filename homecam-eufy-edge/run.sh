@@ -43,13 +43,33 @@ esac
 export HLS_PUBLIC_BASE_URL="${stream_base_url%/}"
 
 # go2rtc is private to this add-on: its API and RTSP server bind to
-# loopback on ports that cannot collide with Frigate (1984/8554/8555), the
-# Dahua edge add-on (8443/8888/8189) or RTSP servers on the host network.
-# Only the modules the adapter needs are loaded, so WebRTC (8555) and SRTP
-# (8443) never open. Nothing is persisted: streams are registered in memory
-# with PATCH /api/streams on every /live call.
-go2rtc_api_port=11984
-go2rtc_rtsp_port=18554
+# loopback on ports that do not collide with Home Assistant Core's built-in
+# go2rtc (API 11984, RTSP 127.0.0.1:18554, WebRTC 18555), Frigate
+# (1984/8554/8555), the Dahua edge add-on (8443/8888/8189) or RTSP servers
+# on the host network. Only the modules the adapter needs are loaded, so
+# WebRTC and SRTP never open. Nothing is persisted: streams are registered in
+# memory with PATCH /api/streams on every /live call.
+go2rtc_api_port=21984
+go2rtc_rtsp_port=28554
+
+# go2rtc only logs a listen error and keeps running when a port is taken,
+# and the adapter would then register streams with whatever owns that port.
+# Refuse to start instead.
+python3 - "$go2rtc_api_port" "$go2rtc_rtsp_port" <<'PY'
+import socket
+import sys
+
+for port in sys.argv[1:]:
+    probe = socket.socket()
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind(("127.0.0.1", int(port)))
+    except OSError:
+        sys.exit(f"127.0.0.1:{port} is already in use on this host; refusing to start the private go2rtc")
+    finally:
+        probe.close()
+PY
+
 cat > /tmp/go2rtc.yaml <<EOF
 app:
   modules: [api, rtsp, http, hls, mp4, ffmpeg, exec]
