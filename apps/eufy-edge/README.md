@@ -48,6 +48,11 @@ hardware, not of this adapter.
 
 ## Setup
 
+**On Home Assistant OS, use the add-on instead:** `homecam-eufy-edge/`
+(store name "HomeCam Eufy edge adapter"). It bundles its own loopback-only
+go2rtc and the token-gated HLS relay; see `homecam-eufy-edge/README.md`.
+The steps below are for a plain Docker host.
+
 1. Get `eufy-security-ws` running and authenticated (including 2FA/captcha)
    and note its WebSocket port, normally `3000`.
 2. Copy `.env.example` to `.env` and fill it in. Generate the token with
@@ -74,8 +79,12 @@ Everything except `/healthz` requires `Authorization: Bearer $HOME_CAM_EUFY_TOKE
 | `GET /health` | `{"auth_state": ...}` so HomeCam can surface 2FA/captcha needs |
 | `GET /devices` | Normalised device list |
 | `GET /devices/{id}/snapshot` | Latest event image as JPEG |
-| `GET /devices/{id}/live` | `{"hls_url": ...}` pointing at go2rtc |
-| `GET /internal/devices/{id}/h264` | Raw H.264 for go2rtc's ffmpeg source (separate token) |
+| `GET /devices/{id}/live` | `{"hls_url": ...}` pointing at go2rtc, or at the HLS relay below when `HLS_PUBLIC_BASE_URL` is set |
+| `GET /hls/{hls_token}/eufy-{id}/stream.m3u8` and `.../hls/{playlist.m3u8,segment.ts,segment.m4s,init.mp4}` | Read-only HLS relay to a loopback go2rtc; gated by a random path token (`HLS_TOKEN`), because HLS players cannot send bearer headers |
+| `GET /internal/devices/{id}/h264` | Raw H.264 for go2rtc's ffmpeg source (separate token; loopback-only when `INTERNAL_LOOPBACK_ONLY=1`) |
+
+Request tokens (`/hls/<token>/`, `?token=`) are redacted from uvicorn and
+httpx logs.
 
 ## Battery behaviour
 

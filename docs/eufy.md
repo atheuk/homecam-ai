@@ -25,7 +25,16 @@ The archived/deprecated `bropat/eufy-security-client` project should be treated 
 `apps/eufy-edge/` is a working implementation of the contract below,
 bridging `eufy-security-ws` to HomeCam and handing live video to go2rtc.
 See `apps/eufy-edge/README.md` for setup. It runs on the owner's Home
-Assistant host, not in Azure.
+Assistant host, not in Azure. On Home Assistant OS, install it as the
+**HomeCam Eufy edge adapter** add-on (`homecam-eufy-edge/`). The add-on:
+
+- connects to the eufy-security-ws add-on at `ws://127.0.0.1:3000`, which
+  keeps the Eufy login and its persistent session;
+- runs its own loopback-only go2rtc 1.9.14 and leaves Frigate unchanged;
+- exposes only port 8091, where every route needs the bearer token or a
+  per-start random HLS path token.
+
+HomeCam's adapter URL is `http://<ha-host>.<tailnet>.ts.net:8091`.
 
 Upstream status (verified September 2026): `bropat/eufy-security-ws` and
 `bropat/eufy-security-client` were **archived by their author in September
