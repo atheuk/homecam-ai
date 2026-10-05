@@ -15,6 +15,32 @@ const ACTIVITY_WINDOW_MS=10*60*1000;
 const TABS=["Overview","Live","Events","People","Security","System","Settings"] as const;
 type Tab=typeof TABS[number];
 
+// Fixed codes the API's Google callback redirects back with. Anything else
+// is ignored, so a crafted link cannot inject text into the sign-in page.
+export const GOOGLE_ERROR_MESSAGES:Record<string,string>={
+  pending_approval:"Your Google account is registered but has not been approved yet. Ask the HomeCam owner for access.",
+  account_disabled:"This account has been disabled.",
+  account_exists:"An account with this email already exists. Sign in with your password, then link Google from System → Account.",
+  account_conflict:"That Google account could not be registered. Try again or contact the owner.",
+  email_not_verified:"Google has not verified this email address, so it cannot be used to sign in.",
+  access_denied:"Google sign-in was cancelled.",
+  invalid_state:"The Google sign-in request was invalid or already used. Start again.",
+  expired_state:"The Google sign-in request expired. Start again.",
+  invalid_token:"Google's response could not be verified. Start again.",
+  token_exchange_failed:"HomeCam could not complete sign-in with Google. Try again.",
+  link_expired:"The Google link request expired. Start again from System → Account.",
+  link_requires_session:"Sign in to HomeCam in this browser before linking a Google account.",
+  already_linked_other:"This HomeCam account is already linked to a different Google account.",
+  google_account_in_use:"That Google account is already linked to another HomeCam account.",
+};
+
+export function googleNotice(params:{get(name:string):string|null}){
+  const code=params.get("google_error");
+  if(code) return {error:true,text:GOOGLE_ERROR_MESSAGES[code]||"Google sign-in failed. Try again."};
+  if(params.get("google")==="linked") return {error:false,text:"Google account linked. You can now sign in with Google."};
+  return null;
+}
+
 export type Camera={
   id:string;
   name:string;
@@ -179,7 +205,26 @@ export default function Dashboard(){
   const [showRegistration,setShowRegistration]=useState(false);
   const [bootstrapSecret,setBootstrapSecret]=useState("");
   const [newEventIds,setNewEventIds]=useState<Set<string>>(new Set());
+  const [googleEnabled,setGoogleEnabled]=useState(false);
+  const [googleLinked,setGoogleLinked]=useState(false);
+  const [googleMessage,setGoogleMessage]=useState<{error:boolean;text:string}|null>(()=>googleNotice(searchParams));
+  const [linkBusy,setLinkBusy]=useState(false);
   const tabParam=searchParams.get("tab");
+  const hasGoogleParams=searchParams.has("google_error")||searchParams.has("google");
+
+  useEffect(()=>{
+    // Drop the one-shot callback result from the address bar.
+    if(hasGoogleParams) router.replace(tabParam?`/?tab=${encodeURIComponent(tabParam)}`:"/",{scroll:false});
+  },[hasGoogleParams,router,tabParam]);
+
+  useEffect(()=>{
+    const controller=new AbortController();
+    fetch(`${API}/api/v1/auth/google/status`,{cache:"no-store",signal:controller.signal})
+      .then(response=>response.ok?response.json():null)
+      .then((body:{enabled?:boolean}|null)=>{if(!controller.signal.aborted) setGoogleEnabled(body?.enabled===true);})
+      .catch(()=>{});
+    return ()=>controller.abort();
+  },[]);
 
   useEffect(()=>setTab(tabFrom(tabParam)),[tabParam]);
 
@@ -191,7 +236,11 @@ export default function Dashboard(){
       signal:controller.signal,
     }).then(response=>{
       if(controller.signal.aborted) return;
-      if(response.ok) setAuthenticated(true);
+      if(response.ok){
+        setAuthenticated(true);
+        void response.json().then((body:{google_linked?:boolean})=>setGoogleLinked(body?.google_linked===true)).catch(()=>{});
+      }
+      else if(response.status===403) setLoginError("This account is disabled or awaiting approval.");
       else if(response.status!==401) setLoginError("HomeCam could not verify the current session.");
     }).catch(()=>{
       if(!controller.signal.aborted) setLoginError("HomeCam could not reach the API. Try again.");
@@ -298,15 +347,18 @@ export default function Dashboard(){
         body:JSON.stringify({email:loginEmail,password:loginPassword}),
       });
       if(!response.ok){
-        setLoginError("Invalid email or password.");
+        setLoginError(response.status===403
+          ?"This account is disabled or awaiting approval."
+          :"Invalid email or password.");
         return;
       }
-      const body=await response.json() as {access_token?:string};
+      const body=await response.json() as {access_token?:string;user?:{google_linked?:boolean}};
       if(!body.access_token){
         setLoginError("Sign-in did not return a session.");
         return;
       }
       setToken(body.access_token);
+      setGoogleLinked(body.user?.google_linked===true);
       setAuthenticated(true);
       setLoginPassword("");
     }catch{
@@ -388,6 +440,29 @@ export default function Dashboard(){
     setPersons([]);
   },[token]);
 
+  const linkGoogle=async()=>{
+    setLinkBusy(true);
+    setGoogleMessage(null);
+    try{
+      const response=await fetch(`${API}/api/v1/auth/google/link`,{
+        method:"POST",
+        headers:{...(token?{Authorization:`Bearer ${token}`}:{}),"X-HomeCam-Request":"1"},
+        credentials:"include",
+        cache:"no-store",
+      });
+      const body=response.ok?await response.json() as {url?:string}:null;
+      if(!body?.url||!body.url.startsWith("/api/v1/auth/google/start?")){
+        setGoogleMessage({error:true,text:"Google linking is unavailable right now."});
+        return;
+      }
+      window.location.assign(`${API}${body.url}`);
+    }catch{
+      setGoogleMessage({error:true,text:"HomeCam could not reach the API. Try again."});
+    }finally{
+      setLinkBusy(false);
+    }
+  };
+
   const activeCameras=useMemo(()=>cameras.filter(camera=>camera.online),[cameras]);
   const offlineCount=cameras.length-activeCameras.length;
   const status=homeStatus(cameras,events);
@@ -425,7 +500,11 @@ export default function Dashboard(){
             {showRegistration?"Back to sign in":"Create first account"}
           </button></div>
           {loginError&&<p className="error" role="alert">{loginError}</p>}
+          {googleMessage&&<p className={googleMessage.error?"error":"success"} role={googleMessage.error?"alert":"status"}>{googleMessage.text}</p>}
         </form>
+        {googleEnabled&&!showRegistration&&<div className="admin-actions google-signin">
+          <a className="button" href={`${API}/api/v1/auth/google/start`}>Continue with Google</a>
+        </div>}
       </section>
     </main>;
   }
@@ -491,6 +570,13 @@ export default function Dashboard(){
             <div><dt>Online</dt><dd>{activeCameras.length}</dd></div>
             <div><dt>Needs attention</dt><dd>{offlineCount}</dd></div>
           </dl>
+          {(googleEnabled||googleLinked||googleMessage)&&<div aria-labelledby="account-title">
+            <h3 id="account-title">Account</h3>
+            <p className="muted">{googleLinked?"Google sign-in is linked to this account.":"Google sign-in is not linked to this account."}</p>
+            {googleEnabled&&!googleLinked&&<button type="button" disabled={linkBusy} onClick={linkGoogle}>
+              {linkBusy?"Opening Google…":"Link Google account"}</button>}
+            {googleMessage&&<p className={googleMessage.error?"error":"success"} role={googleMessage.error?"alert":"status"}>{googleMessage.text}</p>}
+          </div>}
         </section>}
         {tab==="Settings"&&<div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings"><AdminPanel authToken={token} authenticated={authenticated} onUnauthorized={signOut}/></div>}
       </>}

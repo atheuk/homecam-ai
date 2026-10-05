@@ -48,9 +48,10 @@ code comments and the UI:
 Every `/api/v1` route requires a valid bearer token or the `homecam_session`
 HttpOnly cookie, including camera snapshots/live streams, event and person
 data, photos, activity, settings, security, and the SSE event stream. The
-only unauthenticated versioned endpoints are `POST /api/v1/auth/login` and
-`POST /api/v1/auth/register`; `/health` and `/ready` remain public for
-platform probes. Browser fetches use an in-memory bearer token, which the
+only unauthenticated versioned endpoints are `POST /api/v1/auth/login`,
+`POST /api/v1/auth/register`, and the Google sign-in redirect endpoints
+`GET /api/v1/auth/google/{status,start,callback}`; `/health` and `/ready`
+remain public for platform probes. Browser fetches use an in-memory bearer token, which the
 HLS player sends only to URLs on the configured API origin, never to
 provider-supplied cross-origin manifests or segments. The dashboard does
 not persist bearer tokens: on reload it restores the login from the
@@ -69,6 +70,15 @@ requires nor attempts account creation. Development keeps registration
 available without a bootstrap secret. The per-email login-lock map is capped
 at 256 cached locks; database lockout updates remain the correctness boundary
 across replicas.
+
+Users carry a `role` (`admin` or `pending`) and an optional `disabled_at`.
+Only enabled `admin` users can use the API; pending or disabled users get
+`403` on login and on every authenticated request, and their SSE stream is
+closed at the next recheck. Accounts that existed before roles were
+introduced were backfilled to `admin`. Optional Google sign-in (OpenID
+Connect, PKCE, single-use state, nonce, Google-verified email only, no silent
+linking to existing accounts, exact-email admin allowlist) is described in
+[`google-auth.md`](google-auth.md); it is disabled until configured.
 
 ## Arming modes
 

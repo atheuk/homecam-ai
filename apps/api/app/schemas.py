@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CameraOut(BaseModel):
@@ -108,6 +108,23 @@ class LoginIn(BaseModel):
 class UserOut(BaseModel):
     model_config=ConfigDict(from_attributes=True)
     id:str; email:str; created_at:datetime
+    role:str = "admin"
+    google_linked:bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_google_linked(cls, value):
+        # From an ORM ``User``: expose only whether a Google identity is
+        # linked, never the ``sub`` itself.
+        if hasattr(value, "google_sub"):
+            return {
+                "id": value.id,
+                "email": value.email,
+                "created_at": value.created_at,
+                "role": value.role or "pending",
+                "google_linked": bool(value.google_sub),
+            }
+        return value
 
 
 class TokenOut(BaseModel):

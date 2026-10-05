@@ -17,6 +17,11 @@ param tailscaleAuthKeySecretUri string
 param foundryAccountId string
 param foundryEndpoint string
 param foundryVisionDeployment string
+@description('Google OAuth web client id. Empty keeps Google sign-in disabled. When set, the client secret must already exist in Key Vault as google-oauth-client-secret, otherwise the revision cannot provision.')
+param googleOAuthClientId string = ''
+@description('Exact, comma-separated admin allowlist for verified Google sign-in.')
+param googleAdminEmails string = ''
+var googleEnabled = !isPlaceholder && !empty(googleOAuthClientId)
 var foundryAccountName = last(split(foundryAccountId, '/'))
 var effectiveImage = containerImage
 var effectivePort = isPlaceholder ? 80 : 8000
@@ -39,7 +44,7 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
         allowInsecure: false
       }
       registries: isPlaceholder ? [] : [{ server: acr.properties.loginServer, identity: managedIdentityId }]
-      secrets: isPlaceholder ? [] : [
+      secrets: isPlaceholder ? [] : concat([
         {
           name: 'database-url'
           #disable-next-line no-hardcoded-env-urls
@@ -69,7 +74,14 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
           name: 'foundry-api-key'
           value: foundry.listKeys().key1
         }
-      ]
+      ], googleEnabled ? [
+        {
+          name: 'google-oauth-client-secret'
+          #disable-next-line no-hardcoded-env-urls
+          keyVaultUrl: 'https://${keyVaultName}.vault.azure.net/secrets/google-oauth-client-secret'
+          identity: managedIdentityId
+        }
+      ] : [])
     }
     template: {
       containers: concat(
@@ -145,7 +157,14 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
                 { name: 'SECRET_KEY', secretRef: 'secret-key' }
                 { name: 'FOUNDRY_API_KEY', secretRef: 'foundry-api-key' }
                 { name: 'TAILSCALE_HTTP_PROXY', value: 'http://127.0.0.1:1055' }
-              ]
+                // Google sign-in stays disabled until a client id is supplied.
+                // See docs/google-auth.md.
+                { name: 'GOOGLE_ADMIN_EMAILS', value: googleAdminEmails }
+              ],
+              googleEnabled ? [
+                { name: 'GOOGLE_OAUTH_CLIENT_ID', value: googleOAuthClientId }
+                { name: 'GOOGLE_OAUTH_CLIENT_SECRET', secretRef: 'google-oauth-client-secret' }
+              ] : []
             )
           }
         ],

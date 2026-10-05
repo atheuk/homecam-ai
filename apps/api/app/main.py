@@ -9,6 +9,7 @@ from .ai.detector import detector_status
 from .api.admin_routes import router as admin_router
 from .api.admin_routes import zones_router as admin_zones_router
 from .api.auth_routes import router as auth_router
+from .api.google_routes import router as google_auth_router
 from .api.notification_routes import router as notification_router
 from .api.retention_routes import router as retention_router
 from .api.routes import router
@@ -27,6 +28,22 @@ from .services import detector_watchdog, event_clips, event_photos, incident_cli
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class _RedactOAuthQueryFilter(logging.Filter):
+    """Drop the query string of Google OAuth requests from access logs: it
+    carries the one-time authorization code, state and link ticket."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2]
+            if path.startswith("/api/v1/auth/google/") and "?" in path:
+                record.args = (*args[:2], path.split("?", 1)[0] + "?[redacted]", *args[3:])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactOAuthQueryFilter())
 
 
 @asynccontextmanager
@@ -90,6 +107,7 @@ async def protect_cookie_authenticated_writes(request: Request, call_next):
 
 app.include_router(router)
 app.include_router(auth_router)
+app.include_router(google_auth_router)
 app.include_router(admin_router)
 app.include_router(admin_zones_router)
 app.include_router(security_router)

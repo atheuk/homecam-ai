@@ -6,6 +6,11 @@ aiosqlite==0.20.0
 alembic==1.14.0
 redis==5.2.1
 httpx==0.28.1
+# Google sign-in: ID-token (JWT) signature/claim verification against
+# Google's JWKS. cryptography provides RS256 and ships wheels for every
+# platform used here, including Windows ARM64.
+PyJWT[crypto]==2.10.1
+cryptography==46.0.3
 pytest==8.3.4
 pytest-asyncio==0.25.0
 asyncpg==0.30.0

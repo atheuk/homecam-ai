@@ -184,6 +184,7 @@ async def test_failed_attempt_counter_is_atomic_at_the_database_layer_without_th
                 id=user_id,
                 email="atomic-attempt@example.com",
                 password_hash=hash_password("irrelevant"),
+                role="admin",
                 created_at=datetime.now(timezone.utc),
             )
         )
@@ -245,6 +246,7 @@ async def test_a_correct_guess_verified_before_a_concurrent_lockout_cannot_still
                 id=user_id,
                 email="race-at-threshold@example.com",
                 password_hash=hash_password("supersecret1"),
+                role="admin",
                 created_at=datetime.now(timezone.utc),
                 failed_attempts=settings.auth_max_failed_attempts - 1,
             )
@@ -292,6 +294,7 @@ async def test_a_correct_guess_verified_before_a_concurrent_lockout_cannot_still
                 id=user_id_2,
                 email="no-race-at-threshold@example.com",
                 password_hash=hash_password("supersecret1"),
+                role="admin",
                 created_at=datetime.now(timezone.utc),
                 failed_attempts=settings.auth_max_failed_attempts - 1,
             )
