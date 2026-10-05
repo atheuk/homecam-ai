@@ -1,6 +1,6 @@
 # Event clips and richer recognition - Azure development release plan
 
-> **Current release status:** Deployed (2026-10-02) - PR #41 merge `d6ebf37`, follow-ups PR #42 (`d261c49`, API rev 0000043) and PR #43 (`d3fd009`, Eufy edge add-on 1.0.3); web rev 0000022 unchanged.
+> **Current release status:** Deployed (2026-10-05) - PR #46 Google sign-in, merge `5cb660b`: migration `0017_google_auth`, API rev 0000044, web rev 0000023 → 0000024. Google sign-in code is live but **disabled until the owner configures the Google OAuth client** (see `docs/google-auth.md`). Previous: PR #41-#43 (API rev 0000043).
 
 ## Current release scope and authorization
 
@@ -454,3 +454,60 @@ success. Continued monitoring after a real camera event and an authenticated
 clip test are needed to prove those behaviors. Roll back images to the
 recorded previous revisions if live verification exposes a regression;
 leave the additive schema and stored evidence intact.
+
+## Google sign-in release (PR #46, 2026-10-05)
+
+Scope: user-authorized Google sign-in alongside local login; the verified
+Google account `a.heukels@gmail.com` is the only admin allowlist entry.
+Recipe unchanged: scoped AZCLI image-only updates via ACR build and the
+existing migration job; no new Azure resources, roles or full-stack Bicep
+deployment, no secure-parameter retrieval. Releases were serialized with the
+concurrent doorbell/Admin session (its web-only PR #45 `f20d095` was merged
+first; this branch was rebased on it and the web image includes it).
+
+Validation: local API 879 passed/3 skipped, `ruff` clean; web 232 passed,
+lint, typecheck and build clean; Alembic 0016 → 0017 → downgrade → 0017 on
+SQLite. `az bicep build`/`lint` of `infra/main.bicep` and `api.bicep` passed
+with only pre-existing warnings (the new Google secret reference is
+conditional on a client id, so the default deployment is unchanged). An
+independent security review of the diff reported **no findings**. PR #46
+exact head `275c97f` passed backend, frontend, edge, eufy-addon, eufy-edge
+and docker-validate CI (pull_request and push); squash merge was pinned with
+`--match-head-commit 275c97f` → `5cb660bbd88402786758ecb043a2556cae2fc358`.
+
+Deployment (Ate Lab, `rg-homecam-ai`): a `git archive` of merge `5cb660b`
+was the only build context.
+- API ACR run `cg2f` → `api:release-5cb660b`,
+  `sha256:30ccea730a4ded518eed247aa73fe0c52e9a7cfb90fcc8415aba8d834542e866`.
+- Web ACR run `cg2g` → `web:release-5cb660b`,
+  `sha256:53567d16a924c7073690aa544704ca16b6d4265e5c11256e5a07ab0d3dc39cce`,
+  with `NEXT_PUBLIC_API_URL` set to the API origin.
+- Migration job `db-migrate` image set to the API digest (command
+  `alembic upgrade head` retained); execution
+  `job-migrate-homecam-ai-dev-82ac-9b56r44` succeeded. Read-only
+  `az containerapp exec --container api --command "alembic current"` on the
+  new revision printed `0017_google_auth (head)`.
+- API: `--container-name api` image update plus non-secret env
+  `GOOGLE_ADMIN_EMAILS=a.heukels@gmail.com`. Rollback baseline
+  `ca-api-homecam-ai-dev-82ac--0000043`
+  (`api@sha256:e34414ea7f32a048ec893f38e8b1c656c915089a52dcb9349ee2b47eff1a3224`).
+  New `--0000044` Healthy/Running/100%. A before/after diff of secret names
+  (7), container names (`api`, `tailscale`), the tailscale container
+  definition, ingress FQDN and identity showed only the added env name.
+- Web: `--container-name web` image update; rollback baseline
+  `ca-web-homecam-ai-dev-82ac--0000023`
+  (`web@sha256:846bf3a99381508ea7ecd9f2ee92a4ddcca71a85bdf5c3b99a55137e957646e7`).
+  New `--0000024` Healthy/100%; env/secret names unchanged.
+
+Live checks: `/health` and `/ready` 200; `GET /api/v1/auth/google/status`
+→ `{"enabled":false}`; `GET /api/v1/auth/google/start` → 503 with no
+redirect; `/api/v1/cameras` and `/api/v1/auth/me` anonymous → 401; bad
+password login → 401; web root 200 and its bundle contains the API origin
+and the Google status call. Existing accounts were backfilled to `admin`, so
+password login is unchanged. Live Google sign-in is **not** verified: it is
+blocked on the owner creating the Google OAuth client and storing the
+client secret in Key Vault (`docs/google-auth.md`, steps 1-7). Callback URI:
+`https://ca-api-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io/api/v1/auth/google/callback`;
+JavaScript origin:
+`https://ca-web-homecam-ai-dev-82ac.icywave-dfee8ac8.northeurope.azurecontainerapps.io`.
+Rollback: restore the recorded API/web images; keep the additive schema.
