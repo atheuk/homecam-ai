@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.dependencies import get_current_auth_session, get_current_user
+from ..auth.roles import has_access
 from ..config import settings
 from ..db import SessionLocal, get_db
 from ..models.db import AIAnalysis, AuthSession, Event, EventEvidence, EventPhoto, Person, User
@@ -1004,7 +1005,10 @@ def sse_frame(event: object) -> tuple[str, object]:
 
 
 @router.get("/ws")
-async def sse(auth_session: AuthSession = Depends(get_current_auth_session)):
+async def sse(
+    auth_session: AuthSession = Depends(get_current_auth_session),
+    _user: User = Depends(get_current_user),
+):
     async def stream():
         queue = event_service.event_bus.subscribe()
         next_auth_check = asyncio.get_running_loop().time() + SSE_AUTH_RECHECK_INTERVAL_SECONDS
@@ -1020,11 +1024,16 @@ async def sse(auth_session: AuthSession = Depends(get_current_auth_session)):
                 if asyncio.get_running_loop().time() >= next_auth_check:
                     async with SessionLocal() as session:
                         active_session = await session.get(AuthSession, auth_session.token_hash)
+                        active_user = (
+                            await session.get(User, active_session.user_id) if active_session else None
+                        )
                     expires_at = active_session.expires_at if active_session else None
                     if expires_at is not None:
                         if expires_at.tzinfo is None:
                             expires_at = expires_at.replace(tzinfo=timezone.utc)
                     if active_session is None or expires_at <= datetime.now(timezone.utc):
+                        return
+                    if active_user is None or active_user.disabled_at is not None or not has_access(active_user.role):
                         return
                     next_auth_check = asyncio.get_running_loop().time() + SSE_AUTH_RECHECK_INTERVAL_SECONDS
 

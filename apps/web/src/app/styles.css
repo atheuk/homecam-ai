@@ -484,3 +484,7 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible{
 .channel-controls button{background:var(--accent);color:#0c1110;border:0;border-radius:6px;padding:6px 10px;font-weight:700;font-size:12px;cursor:pointer}
 .channel-controls button[disabled]{opacity:.5;cursor:not-allowed}
 .quiet-hours{display:flex;gap:12px;flex-wrap:wrap}
+
+/* Google sign-in: a link styled like the primary action buttons. */
+.admin-actions a.button{background:var(--accent);color:#0c1110;border-radius:6px;padding:8px 14px;font-weight:700;font-size:12px;text-decoration:none}
+.google-signin{margin-top:14px}

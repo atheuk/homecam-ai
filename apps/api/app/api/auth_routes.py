@@ -28,6 +28,7 @@ from ..db import get_db
 from ..models.db import AuthSession, User
 from ..schemas import LoginIn, RegisterIn, TokenOut, UserOut
 from ..auth.dependencies import COOKIE_NAME, get_current_auth_session, get_current_user
+from ..auth.roles import ROLE_ADMIN, has_access
 from ..auth.security import generate_session_token, hash_password, hash_token, verify_password
 from ..services import audit as audit_service
 
@@ -196,6 +197,9 @@ async def register(
         id=str(uuid.uuid4()),
         email=payload.email,
         password_hash=hash_password(payload.password),
+        # Password registration is either development-only or the one-time
+        # production owner bootstrap above, both of which create the owner.
+        role=ROLE_ADMIN,
         created_at=datetime.now(timezone.utc),
     )
     session.add(user)
@@ -230,6 +234,13 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
                     await session.commit()
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
+        # Only reached with a correct password, so this reveals nothing to a
+        # guesser that the password itself would not.
+        if user.disabled_at is not None:
+            raise HTTPException(status_code=403, detail="Account disabled")
+        if not has_access(user.role):
+            raise HTTPException(status_code=403, detail="Account awaiting approval")
+
         # Password verified against a snapshot read taken above, with no
         # cross-replica lock held while awaiting it - so re-check (and
         # reset) the lockout state as a single atomic, conditional UPDATE
@@ -250,6 +261,11 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
         ))
         await audit_service.record(session, "auth.login", actor_user_id=user.id, target_type="user", target_id=user.id)
         await session.commit()
+    set_session_cookie(response, token, expires_at)
+    return TokenOut(access_token=token, expires_at=expires_at, user=UserOut.model_validate(user))
+
+
+def set_session_cookie(response: Response, token: str, expires_at: datetime) -> None:
     response.set_cookie(
         COOKIE_NAME,
         token,
@@ -259,7 +275,6 @@ async def login(payload: LoginIn, response: Response, session: AsyncSession = De
         path="/",
         expires=int(expires_at.timestamp()),
     )
-    return TokenOut(access_token=token, expires_at=expires_at, user=UserOut.model_validate(user))
 
 
 @router.post("/logout")

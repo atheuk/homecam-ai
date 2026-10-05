@@ -386,6 +386,42 @@ class User(Base):
     # correctness. Both reset to 0/NULL on a successful login.
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Access level (see ``app/auth/roles.py``). New rows default to the
+    # least-privileged ``pending`` role, which grants no API access; the
+    # owner account(s) are ``admin``. Migration 0017 backfilled every
+    # pre-existing account to ``admin`` because before roles existed every
+    # account had full access.
+    role: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    # Set when an admin (or operator) disables the account. A disabled
+    # account can neither sign in (password or Google) nor use an existing
+    # session, and an admin allowlist never re-enables it.
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Google's stable subject identifier (the ID token's ``sub``). This, never
+    # the email address, is what a Google sign-in is matched on.
+    google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
+    # Last verified email Google reported for ``google_sub`` (informational).
+    google_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class OAuthLoginState(Base):
+    """One in-flight Google authorization request (single use, short-lived).
+
+    Only a hash of the ``state`` value and of the browser-binding cookie are
+    stored, so a database read never yields values that could complete a
+    flow. The row is deleted atomically when the callback consumes it, which
+    is what makes a replayed callback fail.
+    """
+    __tablename__ = "oauth_login_states"
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    binding_hash: Mapped[str] = mapped_column(String(64))
+    nonce: Mapped[str] = mapped_column(String(128))
+    code_verifier: Mapped[str] = mapped_column(String(128))
+    intent: Mapped[str] = mapped_column(String(16))
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)

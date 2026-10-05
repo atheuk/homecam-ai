@@ -1,11 +1,12 @@
-import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
+import {afterEach,beforeEach,describe,expect,it,onTestFinished,vi} from "vitest";
 import {fireEvent,render,screen,waitFor} from "@testing-library/react";
 import {MockSseStream} from "../test-setup";
 
 const routerPush=vi.fn();
+const routerReplace=vi.fn();
 let currentSearch="";
 vi.mock("next/navigation",()=>({
-  useRouter:()=>({push:routerPush}),
+  useRouter:()=>({push:routerPush,replace:routerReplace}),
   useSearchParams:()=>new URLSearchParams(currentSearch),
 }));
 
@@ -52,11 +53,104 @@ async function renderDashboard(){
   return rendered;
 }
 
+function withGoogle(enabled:boolean,me?:unknown){
+  const api=global.fetch;
+  global.fetch=vi.fn(async(url:string,init?:RequestInit)=>{
+    const path=String(url);
+    if(path.endsWith("/auth/google/status")) return response({enabled});
+    if(path.endsWith("/auth/google/link")) return response({url:"/api/v1/auth/google/start?intent=link&ticket=t1"});
+    if(me&&path.endsWith("/auth/me")) return response(me);
+    return api(url,init);
+  }) as typeof fetch;
+}
+
+describe("google sign-in",()=>{
+  beforeEach(()=>{
+    currentSearch="";
+    MockSseStream.instances.length=0;
+    routerPush.mockReset();
+    routerReplace.mockReset();
+    vi.spyOn(Date.prototype,"getHours").mockReturnValue(14);
+    mockApi();
+  });
+  afterEach(()=>vi.restoreAllMocks());
+
+  it("hides the Google button until the server reports it is configured",async()=>{
+    withGoogle(false);
+    render(<Home/>);
+    await screen.findByLabelText("Email");
+    await waitFor(()=>expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/google/status"),expect.anything()));
+    expect(screen.queryByRole("link",{name:"Continue with Google"})).not.toBeInTheDocument();
+    expect(screen.getByRole("button",{name:"Sign in"})).toBeInTheDocument();
+  });
+
+  it("shows a Continue with Google link to the server-side start endpoint alongside password sign-in",async()=>{
+    withGoogle(true);
+    render(<Home/>);
+    const link=await screen.findByRole("link",{name:"Continue with Google"});
+    expect(link.getAttribute("href")).toMatch(/\/api\/v1\/auth\/google\/start$/);
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+  });
+
+  it("maps callback error codes to fixed messages and clears them from the URL",async()=>{
+    currentSearch="?google_error=pending_approval";
+    withGoogle(true);
+    render(<Home/>);
+    expect(await screen.findByText(/has not been approved yet/)).toBeInTheDocument();
+    await waitFor(()=>expect(routerReplace).toHaveBeenCalledWith("/",{scroll:false}));
+  });
+
+  it("never renders arbitrary text from the query string",async()=>{
+    currentSearch="?google_error=%3Cb%3Eyou%20were%20hacked%3C%2Fb%3E";
+    render(<Home/>);
+    expect(await screen.findByText("Google sign-in failed. Try again.")).toBeInTheDocument();
+    expect(screen.queryByText(/hacked/)).not.toBeInTheDocument();
+  });
+
+  it("offers linking to a signed-in account that is not linked yet",async()=>{
+    currentSearch="?tab=system";
+    withGoogle(true,{email:"owner@example.com",role:"admin",google_linked:false});
+    const assign=vi.fn();
+    const originalLocation=window.location;
+    Object.defineProperty(window,"location",{configurable:true,value:{...originalLocation,assign}});
+    onTestFinished(()=>{Object.defineProperty(window,"location",{configurable:true,value:originalLocation});});
+    render(<Home/>);
+    const button=await screen.findByRole("button",{name:"Link Google account"});
+    fireEvent.click(button);
+    await waitFor(()=>expect(assign).toHaveBeenCalledWith(expect.stringMatching(/\/api\/v1\/auth\/google\/start\?intent=link&ticket=t1$/)));
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/google/link"),
+      expect.objectContaining({method:"POST",credentials:"include",headers:expect.objectContaining({"X-HomeCam-Request":"1"})}));
+  });
+
+  it("shows linked state and success notice after linking",async()=>{
+    currentSearch="?tab=system&google=linked";
+    withGoogle(true,{email:"owner@example.com",role:"admin",google_linked:true});
+    render(<Home/>);
+    expect(await screen.findByText("Google sign-in is linked to this account.")).toBeInTheDocument();
+    expect(screen.getByText(/Google account linked/)).toBeInTheDocument();
+    expect(screen.queryByRole("button",{name:"Link Google account"})).not.toBeInTheDocument();
+    await waitFor(()=>expect(routerReplace).toHaveBeenCalledWith("/?tab=system",{scroll:false}));
+  });
+
+  it("explains disabled or unapproved accounts on password sign-in",async()=>{
+    const api=global.fetch;
+    global.fetch=vi.fn(async(url:string,init?:RequestInit)=>
+      String(url).endsWith("/auth/login")?response({detail:"Account disabled"},403):api(url,init)) as typeof fetch;
+    render(<Home/>);
+    await screen.findByLabelText("Email");
+    fireEvent.change(screen.getByLabelText("Email"),{target:{value:"user@example.com"}});
+    fireEvent.change(screen.getByLabelText("Password"),{target:{value:"password"}});
+    fireEvent.click(screen.getByRole("button",{name:"Sign in"}));
+    expect(await screen.findByText("This account is disabled or awaiting approval.")).toBeInTheDocument();
+  });
+});
+
 describe("dashboard",()=>{
   beforeEach(()=>{
     currentSearch="";
     MockSseStream.instances.length=0;
     routerPush.mockReset();
+    routerReplace.mockReset();
     vi.spyOn(HTMLMediaElement.prototype,"play").mockResolvedValue();
     vi.spyOn(Date.prototype,"getHours").mockReturnValue(14);
     mockApi();

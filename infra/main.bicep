@@ -14,6 +14,10 @@ param webImage string = ''
 param administratorLoginPassword string
 @secure()
 param secretKey string
+@description('Google OAuth web client id (not a secret). Leave empty to keep Google sign-in disabled. See docs/google-auth.md.')
+param googleOAuthClientId string = ''
+@description('Exact, comma-separated emails promoted to admin on verified Google sign-in. Never a domain.')
+param googleAdminEmails string = ''
 
 var tags = {
   'app-onboard-skill': 'true'
@@ -135,6 +139,8 @@ module api './modules/api.bicep' = {
     foundryAccountId: foundry.outputs.id
     foundryEndpoint: foundry.outputs.endpoint
     foundryVisionDeployment: foundry.outputs.visionDeploymentName
+    googleOAuthClientId: googleOAuthClientId
+    googleAdminEmails: googleAdminEmails
   }
 }
 module web './modules/web.bicep' = {

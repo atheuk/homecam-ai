@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..models.db import AuthSession, User
+from .roles import has_access
 from .security import hash_token
 
 COOKIE_NAME = "homecam_session"
@@ -48,5 +49,12 @@ async def get_current_user(
     user = await session.get(User, auth_session.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
+    # Defense in depth: disabled or not-yet-approved accounts are never
+    # issued a session, but one issued before the account was disabled must
+    # stop working immediately rather than at expiry.
+    if user.disabled_at is not None:
+        raise HTTPException(status_code=403, detail="Account disabled")
+    if not has_access(user.role):
+        raise HTTPException(status_code=403, detail="Account awaiting approval")
     return user
 

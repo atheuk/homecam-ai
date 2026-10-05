@@ -135,6 +135,7 @@ async def test_production_existing_owner_can_sign_in_with_bootstrap_closed(
         id=str(uuid.uuid4()),
         email="existing-owner@example.com",
         password_hash=hash_password("existing-owner-password"),
+        role="admin",
         created_at=datetime.now(timezone.utc),
     )
     try:

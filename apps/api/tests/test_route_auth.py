@@ -15,6 +15,11 @@ from app.services import events as event_service
 PUBLIC_API_ROUTES = {
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/register"),
+    # Google sign-in: the status flag, and the OAuth redirect endpoints which
+    # authenticate via single-use state + binding cookie + verified ID token.
+    ("GET", "/api/v1/auth/google/status"),
+    ("GET", "/api/v1/auth/google/start"),
+    ("GET", "/api/v1/auth/google/callback"),
 }
 
 # Routes authenticated by a shared secret instead of a user session, so an

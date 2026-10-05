@@ -549,6 +549,20 @@ class Settings(BaseSettings):
     # every notification ("open the incident"). Without it the payload
     # simply carries no link rather than a broken one.
     web_app_base_url: str | None = None
+    # --- Google sign-in (OpenID Connect, see docs/google-auth.md) ---------
+    # Disabled unless both the client id and the client secret are set. The
+    # secret is injected from Key Vault as a Container App secret, never
+    # committed. The redirect URI defaults to
+    # ``{PUBLIC_API_BASE_URL}/api/v1/auth/google/callback`` and must match
+    # the one registered on the Google OAuth client exactly.
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    google_oauth_redirect_uri: str | None = None
+    # Comma-separated list of exact email addresses that are made ``admin``
+    # when they sign in with a *Google-verified* email. No wildcards or
+    # domains; entries without a local part are ignored.
+    google_admin_emails: str = ""
+    google_oauth_state_ttl_seconds: int = Field(default=600, ge=60, le=1800)
     # VAPID keypair for Web Push (RFC 8292). Generated once per deployment
     # and stored like any other secret; the *public* key is served to
     # signed-in browsers, the private key never leaves the server.
