@@ -109,10 +109,48 @@ describe("AdminPanel",()=>{
     await signIn();
     expect(await screen.findByText("http://192.0.2.10:80")).toBeInTheDocument();
     expect(screen.getByText("Enabled")).toBeInTheDocument();
-    expect(screen.getByText("Last test: SUCCESS")).toBeInTheDocument();
+    expect(screen.getByText(/^Last test: SUCCESS \(.*just now\)$/)).toBeInTheDocument();
     expect(screen.queryByText("hunter2")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Disable"));
     await waitFor(()=>expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/admin/providers/cfg-1/enabled"),expect.objectContaining({method:"POST"})));
+  });
+
+  it("dates a stale failed test and shows current live provider health separately", async()=>{
+    const threeDaysAgo=new Date(Date.now()-3*24*3600*1000).toISOString();
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/admin/providers":()=>jsonResponse([{id:"cfg-e",provider_type:"eufy",name:"Eufy",enabled:true,adapter_url:"http://ha.tailnet.ts.net:8091",has_secret:true,last_test_status:"OFFLINE",last_test_message:"Name or service not known",last_test_at:threeDaysAgo,created_at:threeDaysAgo,updated_at:threeDaysAgo}]),
+      "/api/v1/providers":()=>jsonResponse([{provider_id:"eufy",status:"ONLINE",message:"Eufy adapter authenticated.",camera_count:1,online_camera_count:1}]),
+    });
+    await signIn();
+    expect(await screen.findByText(/^Last test: OFFLINE \(.*3 days ago\)$/)).toBeInTheDocument();
+    expect(await screen.findByText(/Now: ONLINE \(1\/\s*1 cameras online\)/)).toBeInTheDocument();
+  });
+
+  it("shows a live outage instead of hiding it behind an old successful test", async()=>{
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/admin/providers":()=>jsonResponse([{id:"cfg-e",provider_type:"eufy",name:"Eufy",enabled:true,adapter_url:"http://ha:8091",has_secret:true,last_test_status:"ONLINE",last_test_message:"ok",last_test_at:new Date().toISOString(),created_at:new Date().toISOString(),updated_at:new Date().toISOString()}]),
+      "/api/v1/providers":()=>jsonResponse([{provider_id:"eufy",status:"OFFLINE",message:"Eufy health unavailable",camera_count:0,online_camera_count:0}]),
+    });
+    await signIn();
+    const live=await screen.findByText(/Now: OFFLINE/);
+    expect(live).toHaveClass("error");
+  });
+
+  it("re-tests a saved provider with its stored config via Test now", async()=>{
+    let tested=false;
+    let testBody:Record<string,unknown>|null=null;
+    mockFetch({
+      "/auth/login":()=>jsonResponse({access_token:"tok-123",expires_at:new Date().toISOString(),user:{id:"u1",email:"e",created_at:new Date().toISOString()}}),
+      "/admin/providers/eufy/test":(init)=>{tested=true;testBody=JSON.parse(String(init?.body));return jsonResponse({success:true,status:"ONLINE",message:"Eufy adapter authenticated."});},
+      "/admin/providers":()=>jsonResponse([{id:"cfg-e",provider_type:"eufy",name:"Eufy",enabled:true,adapter_url:"http://ha:8091",has_secret:true,last_test_status:tested?"ONLINE":"OFFLINE",last_test_message:null,last_test_at:new Date().toISOString(),created_at:new Date().toISOString(),updated_at:new Date().toISOString()}]),
+    });
+    await signIn();
+    expect(await screen.findByText(/^Last test: OFFLINE/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Test now"));
+    expect(await screen.findByText(/^Last test: ONLINE/)).toBeInTheDocument();
+    expect(testBody).toEqual({config_id:"cfg-e"});
   });
 
   it("switches the Dahua form to edge-connector mode and hides direct-mode fields", async()=>{
