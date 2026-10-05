@@ -66,6 +66,13 @@ Without the proxy, the API may be unable to resolve the adapter's `.ts.net`
 name even though the add-on is healthy. No proxy is required for local LAN
 deployments; explicit test transports bypass it.
 
+The **Configured providers** list shows two separate things: the stored
+**Last test** (with when it ran — it is history and is only refreshed by a
+test) and **Now**, the provider's live health from `GET /api/v1/providers`.
+An old failed test, for example one recorded before the proxy was configured,
+does not mean the doorbell is offline today: check **Now**, or press
+**Test now** to re-test the saved config and record a fresh result.
+
 ### Runtime admin configuration (preferred)
 
 Configure the adapter connection at runtime through the authenticated admin

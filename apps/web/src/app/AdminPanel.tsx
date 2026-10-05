@@ -23,6 +23,26 @@ type ProviderConfig = {
 };
 
 type TestResult = { success: boolean; status: string; message: string };
+type ProviderHealth = {
+  provider_id: string;
+  status: string;
+  message: string;
+  camera_count: number;
+  online_camera_count: number;
+};
+
+/** A stored test result is history, not current state: always show when it
+ * ran so a days-old failure is not mistaken for a current outage. */
+export function describeLastTest(config: Pick<ProviderConfig, "last_test_status" | "last_test_at">, now = Date.now()): string {
+  if (!config.last_test_status) return "Not tested yet";
+  if (!config.last_test_at) return `Last test: ${config.last_test_status}`;
+  const at = new Date(config.last_test_at);
+  if (Number.isNaN(at.getTime())) return `Last test: ${config.last_test_status}`;
+  const minutes = Math.max(0, Math.round((now - at.getTime()) / 60000));
+  const ago =
+    minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} days ago`;
+  return `Last test: ${config.last_test_status} (${at.toLocaleString()}, ${ago})`;
+}
 type ChannelRow = { channel: string; name: string };
 type CameraOption = { id: string; name: string };
 type CameraZone = {
@@ -103,6 +123,8 @@ export default function AdminPanel({
 
   const [configs, setConfigs] = useState<ProviderConfig[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [liveHealth, setLiveHealth] = useState<Record<string, ProviderHealth>>({});
+  const [retestingId, setRetestingId] = useState<string | null>(null);
 
   const [dahuaEditingId, setDahuaEditingId] = useState<string | null>(null);
   const [dahuaMode, setDahuaMode] = useState<"direct" | "edge">("direct");
@@ -159,6 +181,43 @@ export default function AdminPanel({
     }
     setLoadError(null);
     setConfigs(await r.json());
+    await loadLiveHealth(activeToken);
+  }
+
+  async function loadLiveHealth(activeToken: string | null) {
+    try {
+      const r = await fetch(`${API}/api/v1/providers`, {
+        headers: authHeaders(activeToken),
+        credentials: "include",
+      });
+      if (!r.ok) {
+        setLiveHealth({});
+        return;
+      }
+      const body = await r.json();
+      const byId: Record<string, ProviderHealth> = {};
+      if (Array.isArray(body)) for (const entry of body as ProviderHealth[]) byId[entry.provider_id] = entry;
+      setLiveHealth(byId);
+    } catch {
+      setLiveHealth({});
+    }
+  }
+
+  async function retestConfig(config: ProviderConfig) {
+    if (!hasSession) return;
+    setRetestingId(config.id);
+    try {
+      const body: Record<string, unknown> = { config_id: config.id };
+      await fetch(`${API}/api/v1/admin/providers/${config.provider_type}/test`, {
+        method: "POST",
+        headers: authHeaders(token),
+        credentials: "include",
+        body: JSON.stringify(body),
+      });
+      await loadConfigs(token);
+    } finally {
+      setRetestingId(null);
+    }
   }
 
   useEffect(() => {
@@ -855,10 +914,22 @@ export default function AdminPanel({
                     : config.adapter_url}
                 </span>
                 <span className={config.enabled ? "success" : "muted"}>{config.enabled ? "Enabled" : "Disabled"}</span>
-                <span className="muted">
-                  {config.last_test_status ? `Last test: ${config.last_test_status}` : "Not tested yet"}
+                {config.enabled && liveHealth[config.provider_type] && (
+                  <span
+                    className={liveHealth[config.provider_type].status === "ONLINE" ? "success" : "error"}
+                    title={liveHealth[config.provider_type].message}
+                  >
+                    Now: {liveHealth[config.provider_type].status} ({liveHealth[config.provider_type].online_camera_count}/
+                    {liveHealth[config.provider_type].camera_count} cameras online)
+                  </span>
+                )}
+                <span className="muted" title={config.last_test_message || undefined}>
+                  {describeLastTest(config)}
                 </span>
                 <div className="provider-row-actions">
+                  <button type="button" onClick={() => retestConfig(config)} disabled={retestingId === config.id}>
+                    {retestingId === config.id ? "Testing…" : "Test now"}
+                  </button>
                   <button type="button" onClick={() => (config.provider_type === "dahua" ? editDahua(config) : editEufy(config))}>
                     Edit
                   </button>
